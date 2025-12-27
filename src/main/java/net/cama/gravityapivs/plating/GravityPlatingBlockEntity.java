@@ -287,7 +287,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             double wMaxX = -Double.MAX_VALUE, wMaxY = -Double.MAX_VALUE, wMaxZ = -Double.MAX_VALUE;
 
             for (Vector3d corner : corners) {
-                ship.getShipToWorld().transformPosition(corner);
+                ship.getTransform().getShipToWorldMatrix().transformPosition(corner);
                 if (corner.x < wMinX) wMinX = corner.x;
                 if (corner.y < wMinY) wMinY = corner.y;
                 if (corner.z < wMinZ) wMinZ = corner.z;
@@ -321,7 +321,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                     Direction worldEffectDir = localEffectDir;
                     if (ship != null) {
                         Vector3d dirVec = new Vector3d(localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ());
-                        ship.getShipToWorld().transformDirection(dirVec);
+                        ship.getTransform().getShipToWorldMatrix().transformDirection(dirVec);
                         worldEffectDir = Direction.getNearest(dirVec.x, dirVec.y, dirVec.z);
                     }
 
@@ -333,7 +333,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
                     if (ship != null) {
                         Vector3d posJoml = new Vector3d(testingPosWorld.x, testingPosWorld.y, testingPosWorld.z);
-                        ship.getWorldToShip().transformPosition(posJoml);
+                        ship.getTransform().getWorldToShipMatrix().transformPosition(posJoml);
                         testingPos = new Vec3(posJoml.x, posJoml.y, posJoml.z);
                     } else {
                         testingPos = testingPosWorld;
@@ -385,7 +385,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
                         // 2. Transform to World Space (handles ship rotation)
                         if (ship != null) {
-                            ship.getShipToWorld().transformDirection(artificialGravity);
+                            ship.getTransform().getShipToWorldMatrix().transformDirection(artificialGravity);
                         }
 
                         // 3. Scale by Standard Gravity Strength (approx 0.08 blocks/tick)
@@ -405,14 +405,14 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                         if (Math.abs(living.xxa) < 0.01 && Math.abs(living.zza) < 0.01) {
                             Vec3 worldVel = GravityChangerAPI.getWorldVelocity(entity);
                             Vector3d shipVel = new Vector3d(worldVel.x, worldVel.y, worldVel.z);
-                            ship.getWorldToShip().transformDirection(shipVel);
+                            ship.getTransform().getWorldToShipMatrix().transformDirection(shipVel);
 
                             Vector3d plateNormal = new Vector3d(plateDir.getStepX(), plateDir.getStepY(), plateDir.getStepZ());
                             double dot = shipVel.dot(plateNormal);
 
                             shipVel.set(plateNormal).mul(dot);
 
-                            ship.getShipToWorld().transformDirection(shipVel);
+                            ship.getTransform().getShipToWorldMatrix().transformDirection(shipVel);
                             GravityChangerAPI.setWorldVelocity(entity, new Vec3(shipVel.x, shipVel.y, shipVel.z));
                         }
                     }
@@ -441,7 +441,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
         Vec3 entityPosLocal;
         if (ship != null) {
             Vector3d posJoml = new Vector3d(entity.getX(), entity.getY(), entity.getZ());
-            ship.getWorldToShip().transformPosition(posJoml);
+            ship.getTransform().getWorldToShipMatrix().transformPosition(posJoml);
             entityPosLocal = new Vec3(posJoml.x, posJoml.y, posJoml.z);
         } else {
             entityPosLocal = entity.position();
@@ -471,7 +471,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 // Strictly speaking, we should transform worldVelocity to Ship Local too.
                 if (ship != null) {
                     Vector3d velJoml = new Vector3d(worldVelocity.x, worldVelocity.y, worldVelocity.z);
-                    ship.getWorldToShip().transformDirection(velJoml); // Direction, not Position
+                    ship.getTransform().getWorldToShipMatrix().transformDirection(velJoml); // Direction, not Position
                     worldVelocity = new Vec3(velJoml.x, velJoml.y, velJoml.z);
                 }
 
@@ -494,7 +494,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                     // We must transform it back to World Global to apply it to the entity.
                     if (ship != null) {
                         Vector3d deltaJoml = new Vector3d(deltaWorldVelocity.x, deltaWorldVelocity.y, deltaWorldVelocity.z);
-                        ship.getShipToWorld().transformDirection(deltaJoml);
+                        ship.getTransform().getShipToWorldMatrix().transformDirection(deltaJoml);
                         deltaWorldVelocity = new Vec3(deltaJoml.x, deltaJoml.y, deltaJoml.z);
                     }
 

@@ -70,7 +70,7 @@ description='''A Forge mod and API that allows for changing an entity's gravity 
 [[dependencies.gravityapivs]]
     modId="valkyrienskies"
     mandatory=true
-    versionRange="[2.3.0-beta.12,)"
+    versionRange="[2.4.0,)"
     ordering="AFTER"
     side="BOTH"
 

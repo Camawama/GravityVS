@@ -141,6 +141,12 @@ repositories {
     maven { url = 'https://maven.valkyrienskies.org' }
     maven { url = 'https://thedarkcolour.github.io/KotlinForForge/' }
 
+    // Modrinth Maven for VS 2.4.0
+    maven {
+        name = "Modrinth"
+        url = "https://api.modrinth.com/maven"
+    }
+
     maven { url = "https://maven.bawnorton.com/releases" }
 }
 
@@ -159,7 +165,7 @@ dependencies {
 
     // --- VS2 DEPENDENCIES ---
     implementation fg.deobf("thedarkcolour:kotlinforforge:4.11.0")
-    implementation fg.deobf("org.valkyrienskies:valkyrienskies-120-forge:2.3.0-beta.12")
+    implementation fg.deobf("org.valkyrienskies:valkyrienskies-120-forge:2.4.0")
 
     // Core API: Using '+' allows Gradle to find the version matching the mod automatically
     implementation "org.valkyrienskies.core:api:+"
@@ -167,6 +173,9 @@ dependencies {
     implementation "org.valkyrienskies.core:util:+"
 
     implementation("org.joml:joml:1.10.5")
+
+    // Explicitly add typetools to resolve the missing dependency error
+    implementation "net.jodah:typetools:0.6.3"
 }
 
 tasks.named('processResources', ProcessResources).configure {
