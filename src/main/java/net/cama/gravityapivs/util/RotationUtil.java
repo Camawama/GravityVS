@@ -64,6 +64,15 @@ public abstract class RotationUtil {
     public static Vec3 vecWorldToPlayer(Vec3 vec3d, Direction gravityDirection) {
         return vecWorldToPlayer(vec3d.x, vec3d.y, vec3d.z, gravityDirection);
     }
+
+    public static Vec3 vecWorldToPlayer(Vec3 vec3d, Vec3 gravityVector) {
+        Quaternionf rotation = getWorldRotationQuaternion(gravityVector);
+        return QuaternionUtil.rotate(vec3d, rotation);
+    }
+
+    public static Vec3 vecWorldToPlayer(double x, double y, double z, Vec3 gravityVector) {
+        return vecWorldToPlayer(new Vec3(x, y, z), gravityVector);
+    }
     
     public static Vec3 vecEntityToWorld(double x, double y, double z, Direction gravityDirection) {
         return switch (gravityDirection) {
@@ -93,6 +102,17 @@ public abstract class RotationUtil {
     
     public static Vec3 vecPlayerToWorld(Vec3 vec3d, Direction gravityDirection) {
         return vecPlayerToWorld(vec3d.x, vec3d.y, vec3d.z, gravityDirection);
+    }
+
+    public static Vec3 vecPlayerToWorld(Vec3 vec3d, Vec3 gravityVector) {
+        Quaternionf rotation = getWorldRotationQuaternion(gravityVector);
+        // The rotation rotates World -> Player. So Player -> World is the inverse (conjugate).
+        rotation.conjugate();
+        return QuaternionUtil.rotate(vec3d, rotation);
+    }
+
+    public static Vec3 vecPlayerToWorld(double x, double y, double z, Vec3 gravityVector) {
+        return vecPlayerToWorld(new Vec3(x, y, z), gravityVector);
     }
     
     public static Vector3f vecWorldToPlayer(float x, float y, float z, Direction gravityDirection) {
@@ -155,12 +175,72 @@ public abstract class RotationUtil {
             RotationUtil.vecWorldToPlayer(box.maxX, box.maxY, box.maxZ, gravityDirection)
         );
     }
+
+    public static AABB boxWorldToPlayer(AABB box, Vec3 gravityVector) {
+        // AABB rotation is tricky because it stays axis-aligned.
+        // For arbitrary gravity, the AABB in player space might not be axis aligned if we just rotate corners.
+        // However, Minecraft requires AABBs to be axis aligned.
+        // Usually we rotate the center and dimensions?
+        // Or we rotate all corners and find min/max.
+        
+        Vec3 min = new Vec3(box.minX, box.minY, box.minZ);
+        Vec3 max = new Vec3(box.maxX, box.maxY, box.maxZ);
+        
+        Vec3[] corners = new Vec3[] {
+            new Vec3(min.x, min.y, min.z), new Vec3(max.x, min.y, min.z),
+            new Vec3(min.x, max.y, min.z), new Vec3(max.x, max.y, min.z),
+            new Vec3(min.x, min.y, max.z), new Vec3(max.x, min.y, max.z),
+            new Vec3(min.x, max.y, max.z), new Vec3(max.x, max.y, max.z)
+        };
+        
+        double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
+        
+        for (Vec3 corner : corners) {
+            Vec3 rotated = vecWorldToPlayer(corner, gravityVector);
+            if (rotated.x < minX) minX = rotated.x;
+            if (rotated.y < minY) minY = rotated.y;
+            if (rotated.z < minZ) minZ = rotated.z;
+            if (rotated.x > maxX) maxX = rotated.x;
+            if (rotated.y > maxY) maxY = rotated.y;
+            if (rotated.z > maxZ) maxZ = rotated.z;
+        }
+        
+        return new AABB(minX, minY, minZ, maxX, maxY, maxZ);
+    }
     
     public static AABB boxPlayerToWorld(AABB box, Direction gravityDirection) {
         return new AABB(
             RotationUtil.vecPlayerToWorld(box.minX, box.minY, box.minZ, gravityDirection),
             RotationUtil.vecPlayerToWorld(box.maxX, box.maxY, box.maxZ, gravityDirection)
         );
+    }
+
+    public static AABB boxPlayerToWorld(AABB box, Vec3 gravityVector) {
+        Vec3 min = new Vec3(box.minX, box.minY, box.minZ);
+        Vec3 max = new Vec3(box.maxX, box.maxY, box.maxZ);
+        
+        Vec3[] corners = new Vec3[] {
+            new Vec3(min.x, min.y, min.z), new Vec3(max.x, min.y, min.z),
+            new Vec3(min.x, max.y, min.z), new Vec3(max.x, max.y, min.z),
+            new Vec3(min.x, min.y, max.z), new Vec3(max.x, min.y, max.z),
+            new Vec3(min.x, max.y, max.z), new Vec3(max.x, max.y, max.z)
+        };
+        
+        double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
+        
+        for (Vec3 corner : corners) {
+            Vec3 rotated = vecPlayerToWorld(corner, gravityVector);
+            if (rotated.x < minX) minX = rotated.x;
+            if (rotated.y < minY) minY = rotated.y;
+            if (rotated.z < minZ) minZ = rotated.z;
+            if (rotated.x > maxX) maxX = rotated.x;
+            if (rotated.y > maxY) maxY = rotated.y;
+            if (rotated.z > maxZ) maxZ = rotated.z;
+        }
+        
+        return new AABB(minX, minY, minZ, maxX, maxY, maxZ);
     }
     
     public static Vec2 rotWorldToPlayer(float yaw, float pitch, Direction gravityDirection) {
@@ -234,6 +314,12 @@ public abstract class RotationUtil {
     public static Quaternionf getWorldRotationQuaternion(Direction gravityDirection) {
         return WORLD_ROTATION_QUATERNIONS[gravityDirection.get3DDataValue()];
     }
+
+    public static Quaternionf getWorldRotationQuaternion(Vec3 gravityVector) {
+        // We want a rotation that transforms gravityVector to DOWN (0, -1, 0)
+        // Because "World Rotation" means rotating the world so that gravity points down for the player.
+        return QuaternionUtil.getRotationBetween(gravityVector, new Vec3(0, -1, 0));
+    }
     
     private static final Quaternionf[] ENTITY_ROTATION_QUATERNIONS = new Quaternionf[6];
     
@@ -268,6 +354,13 @@ public abstract class RotationUtil {
     
     public static AABB makeBoxFromDimensions(
         EntityDimensions dimensions, Direction gravityDir, Vec3 pos
+    ) {
+        AABB rawBox = dimensions.makeBoundingBox(0, 0, 0);
+        return boxPlayerToWorld(rawBox, gravityDir).move(pos);
+    }
+
+    public static AABB makeBoxFromDimensions(
+        EntityDimensions dimensions, Vec3 gravityDir, Vec3 pos
     ) {
         AABB rawBox = dimensions.makeBoundingBox(0, 0, 0);
         return boxPlayerToWorld(rawBox, gravityDir).move(pos);

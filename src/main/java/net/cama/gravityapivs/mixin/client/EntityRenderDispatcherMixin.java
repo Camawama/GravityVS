@@ -56,7 +56,7 @@ public abstract class EntityRenderDispatcherMixin {
     )
     private void inject_render_0(Entity entity, double x, double y, double z, float yaw, float tickDelta, PoseStack matrices, MultiBufferSource vertexConsumers, int light, CallbackInfo ci) {
         if (!(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
-            Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
+            Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
             if (!this.shouldRenderShadow) return;
             
             matrices.pushPose();
@@ -96,11 +96,11 @@ public abstract class EntityRenderDispatcherMixin {
     )
     private void inject_render_2(Entity entity, double x, double y, double z, float yaw, float tickDelta, PoseStack matrices, MultiBufferSource vertexConsumers, int light, CallbackInfo ci) {
         if (!(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
-            Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-            if (gravityDirection == Direction.DOWN) return;
+            Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
+            if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
             if (!this.shouldRenderShadow) return;
             
-            matrices.mulPose(RotationUtil.getCameraRotationQuaternion(gravityDirection));
+            matrices.mulPose(RotationUtil.getWorldRotationQuaternion(gravityDirection));
         }
     }
     
@@ -110,8 +110,8 @@ public abstract class EntityRenderDispatcherMixin {
         cancellable = true
     )
     private static void inject_renderShadow(PoseStack matrices, MultiBufferSource vertexConsumers, Entity entity, float opacity, float tickDelta, LevelReader world, float radius, CallbackInfo ci) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) return;
+        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
+        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
         
         ci.cancel();
         
@@ -128,8 +128,8 @@ public abstract class EntityRenderDispatcherMixin {
         }
     }
     
-    private static void gravitychanger$renderShadowPartPlayer(PoseStack.Pose entry, VertexConsumer vertices, LevelReader world, BlockPos pos, double x, double y, double z, float radius, float opacity, Direction gravityDirection) {
-        BlockPos posBelow = pos.relative(gravityDirection);
+    private static void gravitychanger$renderShadowPartPlayer(PoseStack.Pose entry, VertexConsumer vertices, LevelReader world, BlockPos pos, double x, double y, double z, float radius, float opacity, Vec3 gravityDirection) {
+        BlockPos posBelow = pos.relative(Direction.getNearest(gravityDirection.x, gravityDirection.y, gravityDirection.z));
         BlockState blockStateBelow = world.getBlockState(posBelow);
         if (blockStateBelow.getRenderShape() != RenderShape.INVISIBLE && world.getMaxLocalRawBrightness(pos) > 3) {
             if (blockStateBelow.isCollisionShapeFullBlock(world, posBelow)) {
@@ -178,8 +178,8 @@ public abstract class EntityRenderDispatcherMixin {
         ordinal = 0
     )
     private static AABB modify_renderHitbox_Box_0(AABB box, PoseStack matrices, VertexConsumer vertices, Entity entity, float tickDelta) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
+        if (gravityDirection.equals(new Vec3(0, -1, 0))) {
             return box;
         }
         
@@ -196,8 +196,8 @@ public abstract class EntityRenderDispatcherMixin {
     )
     private static Vec3 redirectViewVector(Entity instance, float partialTicks) {
         Vec3 viewVector = instance.getViewVector(partialTicks);
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(instance);
-        if (gravityDirection == Direction.DOWN) {
+        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(instance);
+        if (gravityDirection.equals(new Vec3(0, -1, 0))) {
             return viewVector;
         }
         

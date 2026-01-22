@@ -8,6 +8,7 @@ import org.jetbrains.annotations.Nullable;
 
 import net.cama.gravityapivs.EntityTags;
 import net.cama.gravityapivs.api.GravityChangerAPI;
+import net.cama.gravityapivs.api.RotationParameters;
 import net.cama.gravityapivs.capabilities.GravityCapabilityImpl;
 import net.cama.gravityapivs.config.GravityConfig;
 import net.cama.gravityapivs.init.GravityBlocks;
@@ -49,6 +50,9 @@ import net.minecraft.world.phys.Vec3;
 public class GravityPlatingBlockEntity extends BlockEntity {
 
     private static final int MAX_LEVEL = 64;
+    
+    // rotateVelocity=true, rotateView=true, rotationTime=0 (instant/continuous)
+    private static final RotationParameters PLATING_ROTATION_PARAMS = new RotationParameters(true, true, 0);
 
     // HSRDCODED DIMENSION LIST
     // Artificial gravity from gravity plating will ONLY apply in these dimensions.
@@ -104,7 +108,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
         public AABB getEffectBox(BlockPos blockPos, Direction plateDir, Level world) {
             if (effectBoxCache == null) {
-                double expand = 0.001;
+                double expand = 1.0;
 
                 double minX = blockPos.getX() - expand;
                 double minY = blockPos.getY() - expand;
@@ -310,7 +314,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             boolean applies = false;
 
             GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponent(entity);
-            Direction entityGravityDir = comp.getCurrGravityDirection();
+            Vec3 entityGravityDir = comp.getCurrGravityDirectionVec();
 
             for (Direction plateDir : Direction.values()) {
                 SideData sideDatum = be.sideData[plateDir.ordinal()];
@@ -318,14 +322,14 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                     Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
 
                     // 1. Calculate the 'Real' World Direction required
-                    Direction worldEffectDir = localEffectDir;
+                    Vec3 worldEffectDir = Vec3.atLowerCornerOf(localEffectDir.getNormal());
                     if (ship != null) {
                         Vector3d dirVec = new Vector3d(localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ());
                         ship.getTransform().getShipToWorldMatrix().transformDirection(dirVec);
-                        worldEffectDir = Direction.getNearest(dirVec.x, dirVec.y, dirVec.z);
+                        worldEffectDir = new Vec3(dirVec.x, dirVec.y, dirVec.z);
                     }
 
-                    boolean isOpposite = (entityGravityDir == worldEffectDir.getOpposite());
+                    boolean isOpposite = (entityGravityDir.normalize().dot(worldEffectDir.normalize()) < -0.99);
 
                     // VS2 COMPAT: Transform entity position to Ship Space
                     Vec3 testingPosWorld = isOpposite ? entity.getEyePosition() : entity.position();
@@ -347,7 +351,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                     Vec3 plateDirVec = Vec3.atLowerCornerOf(plateDir.getNormal());
                     Vec3 effectCenter = Vec3.atCenterOf(blockPos).add(plateDirVec.scale(0.5));
 
-                    double adjustment = 0.1;
+                    double adjustment = 1.0;
                     Vec3 effectCenterAdjusted = effectCenter.add(plateDirVec.scale(-adjustment));
 
                     Vec3 deltaVec = testingPos.subtract(effectCenterAdjusted);
@@ -367,7 +371,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                         priority -= 10;
                     }
                     comp.applyGravityDirectionEffect(
-                            worldEffectDir, null, priority
+                            worldEffectDir, PLATING_ROTATION_PARAMS, priority
                     );
                     applies = true;
 

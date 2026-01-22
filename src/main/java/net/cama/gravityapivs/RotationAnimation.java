@@ -24,7 +24,7 @@ public class RotationAnimation {
     private long endTimeMs;
     
     public void startRotationAnimation(
-        Direction newGravity, Direction prevGravity,
+        Vec3 newGravity, Vec3 prevGravity,
         long durationTimeMs, Entity entity, long timeMs,
         boolean rotateView, Vec3 relativeRotationCenter
     ) {
@@ -79,7 +79,7 @@ public class RotationAnimation {
     }
     
     private Vec3 getNewLookingDirection(
-        Direction newGravity, Direction prevGravity, Entity player,
+        Vec3 newGravity, Vec3 prevGravity, Entity player,
         boolean rotateView
     ) {
         Vec3 oldLookingDirection = RotationUtil.vecPlayerToWorld(
@@ -91,13 +91,13 @@ public class RotationAnimation {
             return oldLookingDirection;
         }
         
-        if (newGravity == prevGravity.getOpposite()) {
+        if (newGravity.normalize().dot(prevGravity.normalize()) < -0.99) {
             return oldLookingDirection.scale(-1);
         }
         
         Quaternionf deltaRotation = QuaternionUtil.getRotationBetween(
-            Vec3.atLowerCornerOf(prevGravity.getNormal()),
-            Vec3.atLowerCornerOf(newGravity.getNormal())
+            prevGravity,
+            newGravity
         );
         
         Vector3f lookingDirection = new Vector3f((float) oldLookingDirection.x, (float) oldLookingDirection.y, (float) oldLookingDirection.z);
@@ -110,7 +110,7 @@ public class RotationAnimation {
      * It returns the rotation that applies to world for rendering.
      * To get the rotation that applies entity, conjugate it.
      */
-    public Quaternionf getCurrentGravityRotation(Direction currentGravity, long timeMs) {
+    public Quaternionf getCurrentGravityRotation(Vec3 currentGravity, long timeMs) {
         
         update(timeMs);
         
@@ -139,7 +139,7 @@ public class RotationAnimation {
      * Note when rotateView is false, it will cause non-smooth eye offset change
      */
     public Vec3 getEyeOffset(
-        Quaternionf gravityRot, Vec3 localEyeOffset, Direction newGravity
+        Quaternionf gravityRot, Vec3 localEyeOffset, Vec3 newGravity
     ) {
         Quaternionf gravityRotForEntity = new Quaternionf(gravityRot).conjugate();
         

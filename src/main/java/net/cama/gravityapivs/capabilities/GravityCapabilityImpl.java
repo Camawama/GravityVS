@@ -1,5 +1,8 @@
 package net.cama.gravityapivs.capabilities;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import net.cama.gravityapivs.EntityTags;
 import net.cama.gravityapivs.RotationAnimation;
 import net.cama.gravityapivs.api.GravityChangerAPI;
@@ -13,6 +16,7 @@ import net.cama.gravityapivs.network.GravityNetwork;
 import net.cama.gravityapivs.network.UpdateGravityCapabilityPacket;
 import net.cama.gravityapivs.network.UpdateGravitySyncStatePacket;
 import net.cama.gravityapivs.util.GCUtil;
+import net.cama.gravityapivs.util.QuaternionUtil;
 import net.cama.gravityapivs.util.RotationUtil;
 import org.apache.commons.lang3.Validate;
 import org.jetbrains.annotations.NotNull;
@@ -53,11 +57,11 @@ public class GravityCapabilityImpl implements IGravityCapability {
     public boolean initialized = false;
     
     // not synchronized
-    private Direction prevGravityDirection = Direction.DOWN;
+    private Vec3 prevGravityDirection = new Vec3(0, -1, 0);
     private double prevGravityStrength = 1.0;
     
     // the base gravity direction
-    Direction baseGravityDirection = Direction.DOWN;
+    Vec3 baseGravityDirection = new Vec3(0, -1, 0);
     
     // the base gravity strength
     double baseGravityStrength = 1.0;
@@ -70,13 +74,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
     
     public Entity entity;
     
-    private Direction currGravityDirection = Direction.DOWN;
+    private Vec3 currGravityDirection = new Vec3(0, -1, 0);
     private double currGravityStrength = 1.0;
-    private double currentEffectPriority = Double.MIN_VALUE;
     
     private boolean isFiringUpdateEvent = false;
     
-    private @Nullable GravityCapabilityImpl.GravityDirEffect delayApplyDirEffect = null;
+    private List<GravityDirEffect> delayApplyDirEffects = new ArrayList<>();
+    private List<GravityDirEffect> tempEffects = new ArrayList<>();
+    
     private double delayApplyStrengthEffect = 1.0;
     
     // only used on server side
@@ -99,11 +104,22 @@ public class GravityCapabilityImpl implements IGravityCapability {
     
     @Override
     public void deserializeNBT(CompoundTag tag) {
-        if (tag.contains("baseGravityDirection")) {
-            baseGravityDirection = Direction.byName(tag.getString("baseGravityDirection"));
+        if (tag.contains("baseGravityDirectionX")) {
+            baseGravityDirection = new Vec3(
+                tag.getDouble("baseGravityDirectionX"),
+                tag.getDouble("baseGravityDirectionY"),
+                tag.getDouble("baseGravityDirectionZ")
+            );
+        }
+        else if (tag.contains("baseGravityDirection")) {
+            // Legacy support
+            Direction dir = Direction.byName(tag.getString("baseGravityDirection"));
+            if (dir != null) {
+                baseGravityDirection = Vec3.atLowerCornerOf(dir.getNormal());
+            }
         }
         else {
-            baseGravityDirection = Direction.DOWN;
+            baseGravityDirection = new Vec3(0, -1, 0);
         }
         
         if (tag.contains("baseGravityStrength")) {
@@ -116,11 +132,22 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // the current gravity is serialized to avoid unnecessary gravity rotation when entering world
         // do not deserialize it when for client player when not initializing
         if (!initialized || shouldAcceptServerSync()) {
-            if (tag.contains("currentGravityDirection")) {
-                currGravityDirection = Direction.byName(tag.getString("currentGravityDirection"));
+            if (tag.contains("currentGravityDirectionX")) {
+                currGravityDirection = new Vec3(
+                    tag.getDouble("currentGravityDirectionX"),
+                    tag.getDouble("currentGravityDirectionY"),
+                    tag.getDouble("currentGravityDirectionZ")
+                );
+            }
+            else if (tag.contains("currentGravityDirection")) {
+                // Legacy support
+                Direction dir = Direction.byName(tag.getString("currentGravityDirection"));
+                if (dir != null) {
+                    currGravityDirection = Vec3.atLowerCornerOf(dir.getNormal());
+                }
             }
             else {
-                currGravityDirection = Direction.DOWN;
+                currGravityDirection = new Vec3(0, -1, 0);
             }
             
             if (tag.contains("currentGravityStrength")) {
@@ -150,8 +177,13 @@ public class GravityCapabilityImpl implements IGravityCapability {
     @Override
     public CompoundTag serializeNBT() {
 		CompoundTag tag = new CompoundTag();
-        tag.putString("baseGravityDirection", baseGravityDirection.getName());
-        tag.putString("currentGravityDirection", currGravityDirection.getName());
+        tag.putDouble("baseGravityDirectionX", baseGravityDirection.x);
+        tag.putDouble("baseGravityDirectionY", baseGravityDirection.y);
+        tag.putDouble("baseGravityDirectionZ", baseGravityDirection.z);
+        
+        tag.putDouble("currentGravityDirectionX", currGravityDirection.x);
+        tag.putDouble("currentGravityDirectionY", currGravityDirection.y);
+        tag.putDouble("currentGravityDirectionZ", currGravityDirection.z);
         
         tag.putDouble("baseGravityStrength", baseGravityStrength);
         tag.putDouble("currentGravityStrength", currGravityStrength);
@@ -184,69 +216,58 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return;
         }
         
-        Direction oldGravityDirection = currGravityDirection;
+        Vec3 oldGravityDirection = currGravityDirection;
         double oldGravityStrength = currGravityStrength;
         
         Entity vehicle = entity.getVehicle();
         if (vehicle != null) {
-            currGravityDirection = GravityChangerAPI.getGravityDirection(vehicle);
+            currGravityDirection = GravityChangerAPI.getGravityDirectionVec(vehicle);
             currGravityStrength = GravityChangerAPI.getGravityStrength(vehicle);
         }
         else {
             currGravityDirection = baseGravityDirection;
             currGravityStrength = baseGravityStrength;
             currGravityStrength *= GravityConfig.gravityStrengthMultiplier.get();
-            // the rotation parameters is not being reset here
-            // the rotation parameter is kept when an effect vanishes
-            currentEffectPriority = Double.MIN_VALUE;
             
+            tempEffects.clear();
             isFiringUpdateEvent = true;
             try {
                 for (ItemStack handSlot : entity.getHandSlots()) {
                     Item item = handSlot.getItem();
                     if (item instanceof GravityAnchorItem anchorItem) {
                         this.applyGravityDirectionEffect(
-                            anchorItem.direction,
+                            Vec3.atLowerCornerOf(anchorItem.direction.getNormal()),
                             null, 1000000
                         );
                     }
                 }
-                if (!(entity instanceof LivingEntity livingEntity)) {
-                    return;
-                }
-                
-                for (GravityDirectionMobEffect dirEffect : GravityDirectionMobEffect.EFFECT_MAP.values()) {
-                    MobEffectInstance effectInstance = livingEntity.getEffect(dirEffect);
-                    if (effectInstance != null) {
-                        int amplifier = effectInstance.getAmplifier();
-                        
-                        this.applyGravityDirectionEffect(
-                            dirEffect.gravityDirection,
-                            null,
-                            amplifier + 1.0
-                        );
+                if (entity instanceof LivingEntity livingEntity) {
+                    for (GravityDirectionMobEffect dirEffect : GravityDirectionMobEffect.EFFECT_MAP.values()) {
+                        MobEffectInstance effectInstance = livingEntity.getEffect(dirEffect);
+                        if (effectInstance != null) {
+                            int amplifier = effectInstance.getAmplifier();
+                            
+                            this.applyGravityDirectionEffect(
+                                Vec3.atLowerCornerOf(dirEffect.gravityDirection.getNormal()),
+                                null,
+                                amplifier + 1.0
+                            );
+                        }
                     }
-                }
-                if (entity instanceof LivingEntity living) {
-                    if (living.hasEffect(GravityMobEffects.INVERT.get())) {
+                    if (livingEntity.hasEffect(GravityMobEffects.INVERT.get())) {
                         this.applyGravityDirectionEffect(
-                        		this.getCurrGravityDirection().getOpposite(),
+                        		this.getCurrGravityDirectionVec().scale(-1),
                             null, 5
                         );
                     }
+                    GravityMobEffects.INCREASE.get().apply(livingEntity, this);
+                    GravityMobEffects.DECREASE.get().apply(livingEntity, this);
+                    GravityMobEffects.REVERSE.get().apply(livingEntity, this);
                 }
-                if (entity instanceof LivingEntity living) {
-                	GravityMobEffects.INCREASE.get().apply(living, this);
-                    GravityMobEffects.DECREASE.get().apply(living, this);
-                    GravityMobEffects.REVERSE.get().apply(living, this);
-                }
-                if (delayApplyDirEffect != null) {
-                    applyGravityDirectionEffect(
-                        delayApplyDirEffect.direction(),
-                        delayApplyDirEffect.rotationParameters(), delayApplyDirEffect.priority()
-                    );
-                    delayApplyDirEffect = null;
-                }
+                
+                tempEffects.addAll(delayApplyDirEffects);
+                delayApplyDirEffects.clear();
+                
                 currGravityStrength *= delayApplyStrengthEffect;
                 delayApplyStrengthEffect = 1.0;
             }
@@ -254,18 +275,65 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 isFiringUpdateEvent = false;
             }
             
-            if (currentEffectPriority == Double.MIN_VALUE) {
-                // if no effect is applied, reset the rotation parameters
-                currentRotationParameters = RotationParameters.getDefault();
-            }
+            resolveGravityDirection();
         }
         
         if (sendPacketIfNecessary) {
-            boolean changed = oldGravityDirection != currGravityDirection ||
+            boolean changed = !oldGravityDirection.equals(currGravityDirection) ||
                 Math.abs(oldGravityStrength - currGravityStrength) > 0.0001;
             if (changed) {
                 sendSyncPacketToOtherPlayers();
             }
+        }
+    }
+    
+    private void resolveGravityDirection() {
+        if (tempEffects.isEmpty()) {
+            currentRotationParameters = RotationParameters.getDefault();
+            return;
+        }
+        
+        // Find max priority
+        double maxPriority = -Double.MAX_VALUE;
+        for (GravityDirEffect effect : tempEffects) {
+            if (effect.priority > maxPriority) {
+                maxPriority = effect.priority;
+            }
+        }
+        
+        // Blend effects within range
+        double BLEND_RANGE = 5.0;
+        Vec3 accumulatedGravity = Vec3.ZERO;
+        double totalWeight = 0;
+        RotationParameters bestParams = null;
+        double bestParamPriority = -Double.MAX_VALUE;
+        
+        for (GravityDirEffect effect : tempEffects) {
+            if (effect.priority >= maxPriority - BLEND_RANGE) {
+                double weight = 1.0 - (maxPriority - effect.priority) / BLEND_RANGE;
+                // Clamp weight to be safe, though logic guarantees >= 0
+                weight = Math.max(0, weight);
+                
+                accumulatedGravity = accumulatedGravity.add(effect.direction.scale(weight));
+                totalWeight += weight;
+                
+                if (effect.priority > bestParamPriority) {
+                    bestParamPriority = effect.priority;
+                    if (effect.rotationParameters != null) {
+                        bestParams = effect.rotationParameters;
+                    }
+                }
+            }
+        }
+        
+        if (totalWeight > 0.0001 && accumulatedGravity.lengthSqr() > 0.0001) {
+            currGravityDirection = accumulatedGravity.normalize();
+        }
+        
+        if (bestParams != null) {
+            currentRotationParameters = bestParams;
+        } else {
+            currentRotationParameters = RotationParameters.getDefault();
         }
     }
     
@@ -277,7 +345,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
 		}
     }
 	
-	public void sync(boolean noAnimation, Direction baseGravityDirection, Direction currentGravityDirection, double baseGravityStrength, double currentGravityStrength)
+	public void sync(boolean noAnimation, Vec3 baseGravityDirection, Vec3 currentGravityDirection, double baseGravityStrength, double currentGravityStrength)
     {
 		this.baseGravityDirection = baseGravityDirection;
 		this.currGravityDirection = currentGravityDirection;
@@ -291,30 +359,16 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
     
     public void applyGravityDirectionEffect(
-        @NotNull Direction direction,
+        @NotNull Vec3 direction,
         @Nullable RotationParameters rotationParameters,
         double priority
     ) {
+        GravityDirEffect effect = new GravityDirEffect(direction, rotationParameters, priority);
         if (isFiringUpdateEvent) {
-            if (priority > currentEffectPriority) {
-                currentEffectPriority = priority;
-                currGravityDirection = direction;
-                
-                if (rotationParameters != null) {
-                    currentRotationParameters = rotationParameters;
-                }
-            }
+            tempEffects.add(effect);
         }
         else {
-            // When not firing event, store it on delayApplyEffect.
-            // The effect could come from another entity ticking,
-            // but there is no guarantee for ticking order between entities.
-            // (the ticking order does not change according to EntityTickList)
-            if (delayApplyDirEffect == null || priority > delayApplyDirEffect.priority()) {
-                delayApplyDirEffect = new GravityDirEffect(
-                    direction, rotationParameters, priority
-                );
-            }
+            delayApplyDirEffects.add(effect);
         }
     }
     
@@ -330,7 +384,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
     
     public void applyGravityDirectionChange(
-        Direction oldGravity, Direction newGravity,
+        Vec3 oldGravity, Vec3 newGravity,
         RotationParameters rotationParameters, boolean isInitialization
     ) {
         if (!canChangeGravity()) {
@@ -394,7 +448,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         if (rotationParameters.rotateVelocity()) {
             // Rotate velocity with gravity, this will cause things to appear to take a sharp turn
             Vector3f worldSpaceVec = realWorldVelocity.toVector3f();
-            worldSpaceVec.rotate(RotationUtil.getRotationBetween(oldGravity, newGravity));
+            worldSpaceVec.rotate(QuaternionUtil.getRotationBetween(oldGravity, newGravity));
             entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(new Vec3(worldSpaceVec), newGravity));
         }
         else {
@@ -406,7 +460,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // getVelocity() does not return the actual velocity. It returns the velocity plus acceleration.
     // Even if the entity is standing still, getVelocity() will still give a downwards vector.
     // The real velocity is this tick position subtract last tick position
-    private static Vec3 getRealWorldVelocity(Entity entity, Direction prevGravityDirection) {
+    private static Vec3 getRealWorldVelocity(Entity entity, Vec3 prevGravityDirection) {
         if (entity.isControlledByLocalInstance()) {
             return new Vec3(
                 entity.getX() - entity.xo,
@@ -421,7 +475,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
     @NotNull
     private static Vec3 getLocalRotationCenter(
         Entity entity,
-        Direction oldGravity, Direction newGravity, RotationParameters rotationParameters
+        Vec3 oldGravity, Vec3 newGravity, RotationParameters rotationParameters
     ) {
         if (entity instanceof EndCrystal) {
             //In the middle of the block below
@@ -429,7 +483,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
         
         EntityDimensions dimensions = entity.getDimensions(entity.getPose());
-        if (newGravity.getOpposite() == oldGravity) {
+        if (newGravity.normalize().dot(oldGravity.normalize()) < -0.99) {
             // In the center of the hit-box
             return new Vec3(0, dimensions.height / 2, 0);
         }
@@ -439,7 +493,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
     
     // Adjust position to avoid suffocation in blocks when changing gravity
-    private void adjustEntityPosition(Direction oldGravity, Direction newGravity, AABB entityBoundingBox) {
+    private void adjustEntityPosition(Vec3 oldGravity, Vec3 newGravity, AABB entityBoundingBox) {
         if (!GravityConfig.adjustPositionAfterChangingGravity.get()) {
             return;
         }
@@ -450,7 +504,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         
         // for example, if gravity changed from down to north, move up
         // if gravity changed from down to up, also move up
-        Direction movingDirection = oldGravity.getOpposite();
+        Vec3 movingDirection = oldGravity.scale(-1);
         
         Iterable<VoxelShape> collisions = entity.level().getCollisions(
             entity,
@@ -481,11 +535,12 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
     
     private static Vec3 getPositionAdjustmentOffset(
-        AABB entityBoundingBox, AABB nearbyCollisionUnion, Direction movingDirection
+        AABB entityBoundingBox, AABB nearbyCollisionUnion, Vec3 movingDirection
     ) {
-        Direction.Axis axis = movingDirection.getAxis();
+        Direction nearestDir = Direction.getNearest(movingDirection.x, movingDirection.y, movingDirection.z);
+        Direction.Axis axis = nearestDir.getAxis();
         double offset = 0;
-        if (movingDirection.getAxisDirection() == Direction.AxisDirection.POSITIVE) {
+        if (nearestDir.getAxisDirection() == Direction.AxisDirection.POSITIVE) {
             double pushing = nearbyCollisionUnion.max(axis);
             double pushed = entityBoundingBox.min(axis);
             if (pushing > pushed) {
@@ -500,7 +555,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             }
         }
         
-        return new Vec3(movingDirection.step()).scale(offset);
+        return new Vec3(nearestDir.step()).scale(offset);
     }
     
     public double getBaseGravityStrength() {
@@ -517,6 +572,10 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
     
     public Direction getCurrGravityDirection() {
+        return Direction.getNearest(currGravityDirection.x, currGravityDirection.y, currGravityDirection.z);
+    }
+    
+    public Vec3 getCurrGravityDirectionVec() {
         return currGravityDirection;
     }
     
@@ -529,19 +588,23 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
     
     public Direction getPrevGravityDirection() {
-        return prevGravityDirection;
+        return Direction.getNearest(prevGravityDirection.x, prevGravityDirection.y, prevGravityDirection.z);
     }
     
     public Direction getBaseGravityDirection() {
-        return baseGravityDirection;
+        return Direction.getNearest(baseGravityDirection.x, baseGravityDirection.y, baseGravityDirection.z);
     }
     
     public void setBaseGravityDirection(Direction gravityDirection) {
+        setBaseGravityDirection(Vec3.atLowerCornerOf(gravityDirection.getNormal()));
+    }
+    
+    public void setBaseGravityDirection(Vec3 gravityDirection) {
         if (!canChangeGravity()) {
             return;
         }
         
-        if (baseGravityDirection != gravityDirection) {
+        if (!baseGravityDirection.equals(gravityDirection)) {
             baseGravityDirection = gravityDirection;
             needsSync = true;
             
@@ -552,7 +615,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
     
     public void reset() {
-        baseGravityDirection = Direction.DOWN;
+        baseGravityDirection = new Vec3(0, -1, 0);
         baseGravityStrength = 1.0;
         needsSync = true;
     }
@@ -568,7 +631,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             currentRotationParameters = RotationParameters.getDefault();
         }
         
-        if (prevGravityDirection != currGravityDirection) {
+        if (!prevGravityDirection.equals(currGravityDirection)) {
             applyGravityDirectionChange(
                 prevGravityDirection, currGravityDirection,
                 currentRotationParameters, false
@@ -592,7 +655,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
     
     private static record GravityDirEffect(
-        @NotNull Direction direction,
+        @NotNull Vec3 direction,
         @Nullable RotationParameters rotationParameters,
         double priority
     ) {

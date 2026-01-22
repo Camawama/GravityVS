@@ -52,7 +52,7 @@ public abstract class CameraMixin {
         Operation<Void> original, BlockGetter area, Entity focusedEntity,
         boolean thirdPerson, boolean inverseView, float tickDelta
     ) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(focusedEntity);
+        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(focusedEntity);
         RotationAnimation animation = GravityChangerAPI.getRotationAnimation(focusedEntity);
         
         if (animation == null) {
@@ -63,7 +63,7 @@ public abstract class CameraMixin {
         float partialTick = Minecraft.getInstance().getFrameTime();
         long timeMs = focusedEntity.level().getGameTime() * 50 + (long) (partialTick * 50);
         animation.update(timeMs);
-        if (gravityDirection == Direction.DOWN && !animation.isInAnimation()) {
+        if (gravityDirection.equals(new Vec3(0, -1, 0)) && !animation.isInAnimation()) {
             original.call(this, x, y, z);
             return;
         }
@@ -101,12 +101,12 @@ public abstract class CameraMixin {
     )
     private void inject_setRotation(CallbackInfo ci) {
         if (this.entity != null) {
-            Direction gravityDirection = GravityChangerAPI.getGravityDirection(this.entity);
+            Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(this.entity);
             RotationAnimation animation = GravityChangerAPI.getRotationAnimation(entity);
             if (animation == null) {
                 return;
             }
-            if (gravityDirection == Direction.DOWN && !animation.isInAnimation()) {
+            if (gravityDirection.equals(new Vec3(0, -1, 0)) && !animation.isInAnimation()) {
                 return;
             }
             float partialTick = Minecraft.getInstance().getFrameTime();

@@ -25,6 +25,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.Vec3;
 
 @Mixin(GameRenderer.class)
 public abstract class GameRendererMixin {
@@ -53,10 +54,10 @@ public abstract class GameRendererMixin {
     private void renderLevel(float p_109090_, long p_109091_, PoseStack p_109092_, CallbackInfo ci) {
         if (this.mainCamera.getEntity() != null) {
             Entity focusedEntity = this.mainCamera.getEntity();
-            Direction gravityDirection = GravityChangerAPI.getGravityDirection(focusedEntity);
+            Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(focusedEntity);
             RotationAnimation animation = GravityChangerAPI.getRotationAnimation(focusedEntity);
             // Only override vanilla when a gravity transform/animation is active
-            if (animation == null || (gravityDirection == Direction.DOWN && !animation.isInAnimation())) {
+            if (animation == null || (gravityDirection.equals(new Vec3(0, -1, 0)) && !animation.isInAnimation())) {
                 return;
             }
             ci.cancel();

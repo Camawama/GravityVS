@@ -9,18 +9,19 @@ import net.cama.gravityapivs.util.GCUtil;
 import net.minecraft.core.Direction;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkEvent;
 
 public class UpdateGravityCapabilityPacket 
 {
 	private final UUID entityUUID;
 	private final boolean noAnimation;
-	private final Direction baseGravityDirection;
-	private final Direction currentGravityDirection;
+	private final Vec3 baseGravityDirection;
+	private final Vec3 currentGravityDirection;
 	private final double baseGravityStrength;
 	private final double currentGravityStrength;
 	
-	public UpdateGravityCapabilityPacket(boolean noAnimation, UUID entityUUID, Direction baseGravityDirection, Direction currentGravityDirection, double baseGravityStrength, double currentGravityStrength) 
+	public UpdateGravityCapabilityPacket(boolean noAnimation, UUID entityUUID, Vec3 baseGravityDirection, Vec3 currentGravityDirection, double baseGravityStrength, double currentGravityStrength) 
 	{
 		this.noAnimation = noAnimation;
 		this.entityUUID = entityUUID;
@@ -34,8 +35,8 @@ public class UpdateGravityCapabilityPacket
 	{
 		this.noAnimation = buf.readBoolean();
 		this.entityUUID = buf.readUUID();
-		this.baseGravityDirection = buf.readEnum(Direction.class);
-		this.currentGravityDirection = buf.readEnum(Direction.class);
+		this.baseGravityDirection = new Vec3(buf.readDouble(), buf.readDouble(), buf.readDouble());
+		this.currentGravityDirection = new Vec3(buf.readDouble(), buf.readDouble(), buf.readDouble());
 		this.baseGravityStrength = buf.readDouble();
 		this.currentGravityStrength = buf.readDouble();
 	}
@@ -44,8 +45,12 @@ public class UpdateGravityCapabilityPacket
 	{
 		buf.writeBoolean(this.noAnimation);
 		buf.writeUUID(this.entityUUID);
-		buf.writeEnum(this.baseGravityDirection);
-		buf.writeEnum(this.currentGravityDirection);
+		buf.writeDouble(this.baseGravityDirection.x);
+		buf.writeDouble(this.baseGravityDirection.y);
+		buf.writeDouble(this.baseGravityDirection.z);
+		buf.writeDouble(this.currentGravityDirection.x);
+		buf.writeDouble(this.currentGravityDirection.y);
+		buf.writeDouble(this.currentGravityDirection.z);
 		buf.writeDouble(this.baseGravityStrength);
 		buf.writeDouble(this.currentGravityStrength);
 	}

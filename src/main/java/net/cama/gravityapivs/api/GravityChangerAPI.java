@@ -28,6 +28,15 @@ public abstract class GravityChangerAPI {
         return comp.getCurrGravityDirection();
     }
     
+    public static Vec3 getGravityDirectionVec(Entity entity) {
+        GravityCapabilityImpl comp = getGravityComponentEarly(entity);
+        if (comp == null) {
+            return new Vec3(0, -1, 0);
+        }
+        
+        return comp.getCurrGravityDirectionVec();
+    }
+    
     public static double getGravityStrength(Entity entity) {
         return getGravityComponent(entity).getCurrGravityStrength();
     }
@@ -63,6 +72,13 @@ public abstract class GravityChangerAPI {
         component.setBaseGravityDirection(gravityDirection);
     }
     
+    public static void setBaseGravityDirection(
+        Entity entity, Vec3 gravityDirection
+    ) {
+        GravityCapabilityImpl component = getGravityComponent(entity);
+        component.setBaseGravityDirection(gravityDirection);
+    }
+    
     @Nullable
     @OnlyIn(Dist.CLIENT)
     public static RotationAnimation getRotationAnimation(Entity entity) {
@@ -75,6 +91,10 @@ public abstract class GravityChangerAPI {
      * (Used by iPortal)
      */
     public static void instantlySetClientBaseGravityDirection(Entity entity, Direction direction) {
+        instantlySetClientBaseGravityDirection(entity, Vec3.atLowerCornerOf(direction.getNormal()));
+    }
+    
+    public static void instantlySetClientBaseGravityDirection(Entity entity, Vec3 direction) {
         Validate.isTrue(entity.level().isClientSide(), "should only be used on client");
         
         GravityCapabilityImpl component = getGravityComponent(entity);
@@ -100,7 +120,7 @@ public abstract class GravityChangerAPI {
      * Using minecraft's methods to get the velocity will return entity local velocity
      */
     public static Vec3 getWorldVelocity(Entity entity) {
-        return RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), getGravityDirection(entity));
+        return RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), getGravityDirectionVec(entity));
     }
     
     /**
@@ -108,7 +128,7 @@ public abstract class GravityChangerAPI {
      * Using minecraft's methods to set the velocity of an entity will set player relative velocity
      */
     public static void setWorldVelocity(Entity entity, Vec3 worldVelocity) {
-        entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(worldVelocity, getGravityDirection(entity)));
+        entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(worldVelocity, getGravityDirectionVec(entity)));
     }
     
     /**
