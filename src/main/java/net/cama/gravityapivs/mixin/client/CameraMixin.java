@@ -60,8 +60,7 @@ public abstract class CameraMixin {
             return;
         }
         
-        float partialTick = Minecraft.getInstance().getFrameTime();
-        long timeMs = focusedEntity.level().getGameTime() * 50 + (long) (partialTick * 50);
+        long timeMs = focusedEntity.level().getGameTime() * 50 + (long) (tickDelta * 50);
         animation.update(timeMs);
         if (gravityDirection.equals(new Vec3(0, -1, 0)) && !animation.isInAnimation()) {
             original.call(this, x, y, z);

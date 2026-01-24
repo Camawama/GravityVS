@@ -436,10 +436,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
             
             int rotationTimeMS = rotationParameters.rotationTimeMS();
             
+            // Use frame-based time for animation start
+            float partialTick = net.minecraft.client.Minecraft.getInstance().getFrameTime();
+            long frameTimeMs = entity.level().getGameTime() * 50 + (long) (partialTick * 50);
+            
             animation.startRotationAnimation(
                 newGravity, oldGravity,
                 rotationTimeMS,
-                entity, timeMs, rotationParameters.rotateView(),
+                entity, frameTimeMs, rotationParameters.rotateView(),
                 relativeRotationCenter
             );
         }
