@@ -153,7 +153,10 @@ repositories {
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
 
-    compileOnly(annotationProcessor("com.github.bawnorton.mixinsquared:mixinsquared-common:0.3.3"))
+    implementation(jarJar("com.github.bawnorton.mixinsquared:mixinsquared-common:0.3.3")) {
+        jarJar.ranged(it, "[0.3.3,)")
+    }
+    annotationProcessor "com.github.bawnorton.mixinsquared:mixinsquared-common:0.3.3"
     implementation(jarJar("com.github.bawnorton.mixinsquared:mixinsquared-forge:0.3.3")) {
         jarJar.ranged(it, "[0.3.3,)")
     }
@@ -165,7 +168,7 @@ dependencies {
 
     // --- VS2 DEPENDENCIES ---
     implementation fg.deobf("thedarkcolour:kotlinforforge:4.11.0")
-    implementation fg.deobf("org.valkyrienskies:valkyrienskies-120-forge:2.4.6")
+    implementation fg.deobf("org.valkyrienskies:valkyrienskies-120-forge:2.4.9")
 
     // Core API: Using '+' allows Gradle to find the version matching the mod automatically
     implementation "org.valkyrienskies.core:api:+"
