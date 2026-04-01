@@ -206,6 +206,12 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     }
 
     public void refreshCache() {
+        if (getLevel() != null) {
+            refreshCache(getLevel().getBlockState(getBlockPos()));
+        }
+    }
+
+    public void refreshCache(BlockState blockState) {
         Level world = getLevel();
 
         if (world == null) {
@@ -216,7 +222,10 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             sideData = new SideData[6];
         }
 
-        BlockState blockState = world.getBlockState(this.getBlockPos());
+        if (!(blockState.getBlock() instanceof GravityPlatingBlock)) {
+            return;
+        }
+
         for (Direction dir : Direction.values()) {
             if (GravityPlatingBlock.hasDir(blockState, dir)) {
                 if (sideData[dir.ordinal()] == null) {
@@ -263,7 +272,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             return;
         }
 
-        be.refreshCache();
+        be.refreshCache(blockState);
 
         AABB roughBox = be.getRoughEffectBox();
         AABB searchBox = roughBox;

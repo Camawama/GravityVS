@@ -236,11 +236,17 @@ public class GravityPlatingBlock extends BaseEntityBlock {
     
     // Note: the direction is gravity field direction. the facing is the opposite
     public static boolean hasDir(BlockState blockState, Direction dir) {
-        return blockState.getValue(directionToProperty(dir));
+        if (blockState.getBlock() instanceof GravityPlatingBlock) {
+            return blockState.getValue(directionToProperty(dir));
+        }
+        return false;
     }
     
     public static ArrayList<Direction> getDirections(BlockState blockState) {
         ArrayList<Direction> list = new ArrayList<>();
+        if (!(blockState.getBlock() instanceof GravityPlatingBlock)) {
+            return list;
+        }
         //Iterate directions
         for (int directionId = 0; directionId < 6; directionId++) {
             //Convert ID to Direction
