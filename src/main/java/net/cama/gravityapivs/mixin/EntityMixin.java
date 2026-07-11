@@ -165,23 +165,35 @@ public abstract class EntityMixin {
         Entity self = (Entity) (Object) this;
         Vec3 up = comp.getUpVector();
 
-        // ride the surface of the ship we're standing on (drag)
-        Vec3 totalMovement = movement;
-        if (comp.capsuleGroundShip != null) {
-            totalMovement = totalMovement.add(
-                net.cama.gravityapivs.util.CapsuleCollider
-                    .shipSurfaceVelocity(comp.capsuleGroundShip, self.position())
-                    .scale(1.0 / 20.0)
-            );
+        net.cama.gravityapivs.util.CapsuleCollider.Result result =
+            net.cama.gravityapivs.util.CapsuleCollider.collide(self, up, movement, comp.capsuleGrounded);
+
+        Vec3 total = result.collidedMovement;
+        boolean grounded = result.grounded;
+        org.valkyrienskies.core.api.ships.Ship groundShip = result.groundShip;
+
+        // ride the surface of the ship we're standing on (drag) — resolved as a
+        // second collision pass so it can never fire while airborne
+        if (grounded && groundShip != null) {
+            Vec3 drag = net.cama.gravityapivs.util.CapsuleCollider
+                .shipSurfaceVelocity(groundShip, self.position())
+                .scale(1.0 / 20.0);
+            if (drag.lengthSqr() > 1.0E-12) {
+                net.cama.gravityapivs.util.CapsuleCollider.Result dragResult =
+                    net.cama.gravityapivs.util.CapsuleCollider.collide(
+                        self, self.position().add(total), up, drag, true
+                    );
+                total = total.add(dragResult.collidedMovement);
+                if (dragResult.groundShip != null) {
+                    groundShip = dragResult.groundShip;
+                }
+            }
         }
 
-        net.cama.gravityapivs.util.CapsuleCollider.Result result =
-            net.cama.gravityapivs.util.CapsuleCollider.collide(self, up, totalMovement, comp.capsuleGrounded);
+        comp.capsuleGrounded = grounded;
+        comp.capsuleGroundShip = grounded ? groundShip : null;
 
-        comp.capsuleGrounded = result.grounded;
-        comp.capsuleGroundShip = result.groundShip;
-
-        cir.setReturnValue(result.collidedMovement);
+        cir.setReturnValue(total);
     }
 
     @Inject(method = "tick", at = @At("HEAD"))
@@ -303,6 +315,14 @@ public abstract class EntityMixin {
         cir.setReturnValue(this.level.hasChunkAt(this.getBlockX(), this.getBlockZ()) ? this.level.getLightLevelDependentMagicValue(BlockPos.containing(this.getEyePosition())) : 0.0F);
     }
 
+    // the movement passed into move() this call, in local and world form, so the
+    // post-collide transforms can restore/compare BIT-EXACTLY (vanilla decides
+    // onGround and collision flags with exact float comparisons)
+    @org.spongepowered.asm.mixin.Unique
+    private Vec3 gravityapivs$moveLocalArg = Vec3.ZERO;
+    @org.spongepowered.asm.mixin.Unique
+    private Vec3 gravityapivs$moveWorldArg = Vec3.ZERO;
+
     // transform move vector from local to world (the velocity is local)
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;move(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V",
@@ -316,22 +336,26 @@ public abstract class EntityMixin {
             return vec3d;
         }
 
-        if (!((Entity) (Object) this instanceof Player)) {
+        Vec3 world;
+        if (!((Entity) (Object) this instanceof Player) && comp.getSettledCardinal() != null) {
             // preserve the original mod's non-player movement convention at
             // settled cardinal directions (vecEntityToWorld differs from the
             // frame transform for UP gravity)
-            Direction settled = comp.getSettledCardinal();
-            if (settled != null) {
-                return RotationUtil.vecEntityToWorld(vec3d, settled);
-            }
+            world = RotationUtil.vecEntityToWorld(vec3d, comp.getSettledCardinal());
+        }
+        else {
+            // local velocity is interpreted through the continuous visual frame,
+            // so gravity pulls along the true (arbitrary-angle) field vector
+            world = RotationUtil.vecPlayerToWorld(vec3d, comp.getVisualRotation());
         }
 
-        // local velocity is interpreted through the continuous visual frame, so
-        // gravity pulls along the true (arbitrary-angle) field vector
-        return RotationUtil.vecPlayerToWorld(vec3d, comp.getVisualRotation());
+        gravityapivs$moveLocalArg = vec3d;
+        gravityapivs$moveWorldArg = world;
+        return world;
     }
 
-    // transform the argument vector back to local coordinate
+    // transform the argument vector back to local coordinate: the argument is
+    // unchanged between HEAD and here, so restore the stashed local exactly
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;move(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V",
         at = @At(
@@ -348,16 +372,41 @@ public abstract class EntityMixin {
             return vec3d;
         }
 
-        return RotationUtil.vecWorldToPlayer(vec3d, comp.getVisualRotation());
+        if (!((Entity) (Object) this instanceof Player)) {
+            // legacy non-player path (exact switch math at settled cardinals)
+            return RotationUtil.vecWorldToPlayer(vec3d, comp.getVisualRotation());
+        }
+
+        if (!vec3d.equals(gravityapivs$moveWorldArg)) {
+            // vanilla modified the movement between HEAD and here (e.g. cobweb
+            // stuck-multiplier); refresh the stash from the modified vector
+            gravityapivs$moveWorldArg = vec3d;
+            gravityapivs$moveLocalArg = RotationUtil.vecWorldToPlayer(vec3d, comp.getVisualRotation());
+        }
+
+        return gravityapivs$moveLocalArg;
     }
 
-    // transform the local variable (result from collide()) to local coordinate
+    // Transform the local variable (result from collide()) to local coordinate.
+    //
+    // ANCHOR IS CRITICAL: this must happen at the FIRST profiler.pop() — after
+    // setPos() consumed the world-space result, but BEFORE vanilla computes
+    // horizontalCollision/verticalCollision/onGround by comparing this variable
+    // against the (already local) movement argument. The fork anchored this at
+    // pop ordinal 1, which on 1.20.1 is after those comparisons — so vanilla
+    // compared a LOCAL vector against a WORLD vector, making verticalCollision
+    // (onGround!) and horizontalCollision fire almost every tick under any
+    // non-down gravity: mid-air jumping, elytra/creative flight cancelling,
+    // missing ground friction, and velocity being zeroed while walking.
+    //
+    // Computed as originalLocal + rotate(delta) so an untouched movement comes
+    // back BIT-IDENTICAL to what went in (the comparisons are exact).
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;move(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V",
         at = @At(
             value = "INVOKE",
             target = "Lnet/minecraft/util/profiling/ProfilerFiller;pop()V",
-            ordinal = 1
+            ordinal = 0
         ),
         ordinal = 1
     )
@@ -367,7 +416,18 @@ public abstract class EntityMixin {
             return vec3d;
         }
 
-        return RotationUtil.vecWorldToPlayer(vec3d, comp.getVisualRotation());
+        if (!((Entity) (Object) this instanceof Player)) {
+            // legacy non-player path (exact switch math at settled cardinals)
+            return RotationUtil.vecWorldToPlayer(vec3d, comp.getVisualRotation());
+        }
+
+        if (vec3d.equals(gravityapivs$moveWorldArg)) {
+            return gravityapivs$moveLocalArg;
+        }
+
+        Vec3 deltaWorld = vec3d.subtract(gravityapivs$moveWorldArg);
+        Vec3 deltaLocal = RotationUtil.vecWorldToPlayer(deltaWorld, comp.getVisualRotation());
+        return gravityapivs$moveLocalArg.add(deltaLocal);
     }
 
     @Inject(

@@ -248,19 +248,113 @@ public class GravityCapabilityImpl implements IGravityCapability {
         float angle = angleBetween(visualRotation, visualTarget);
         if (angle < 1.0E-3f) {
             visualRotation.set(visualTarget);
+        }
+        else {
+            float t = angle <= VISUAL_TURN_PER_TICK ? 1.0f : VISUAL_TURN_PER_TICK / angle;
+            visualRotation.slerp(visualTarget, t).normalize();
+            if (t >= 1.0f) {
+                visualRotation.set(visualTarget);
+            }
+        }
+
+        normalizeTwist();
+    }
+
+    // how fast the invisible twist normalization runs
+    private static final float TWIST_SETTLE_PER_TICK = (float) Math.toRadians(4);
+
+    /**
+     * Parallel transport is twist-free but path-dependent: after walking around
+     * a cube the frame's yaw reference has rotated. When the field rests on a
+     * cardinal direction, quietly rotate the frame's twist back to the canonical
+     * cardinal frame while compensating yaw/pitch and local velocity, so the
+     * player sees and feels NOTHING — the frame just re-anchors underneath them.
+     */
+    private void normalizeTwist() {
+        if (!(entity instanceof Player) || shouldAcceptServerSync()) {
             return;
         }
-        float t = angle <= VISUAL_TURN_PER_TICK ? 1.0f : VISUAL_TURN_PER_TICK / angle;
-        visualRotation.slerp(visualTarget, t).normalize();
-        if (t >= 1.0f) {
-            visualRotation.set(visualTarget);
+
+        Vec3 cardinal = getCurrGravityDirectionVec();
+        Vec3 target = targetGravityVector != null && targetGravityVector.lengthSqr() > 1.0E-6
+            ? targetGravityVector.normalize() : cardinal;
+
+        // only when the field is resting on the cardinal and the frame's up has
+        // already aligned with it (pure twist difference remains)
+        if (QuaternionUtil.angleBetween(target, cardinal) > Math.toRadians(2)) {
+            return;
         }
+        if (QuaternionUtil.angleBetween(getUpVector(), cardinal.scale(-1)) > Math.toRadians(1)) {
+            return;
+        }
+
+        Quaternionf canonical = RotationUtil.getWorldRotationQuaternion(currGravityDirection);
+        float twist = angleBetween(visualRotation, canonical);
+        if (twist < 1.0E-5f) {
+            if (!visualRotation.equals(canonical)) {
+                Quaternionf old = new Quaternionf(visualRotation);
+                visualRotation.set(canonical);
+                visualTarget.set(canonical);
+                compensateFrameChange(old, visualRotation);
+            }
+            return;
+        }
+
+        Quaternionf old = new Quaternionf(visualRotation);
+        float t = twist <= TWIST_SETTLE_PER_TICK ? 1.0f : TWIST_SETTLE_PER_TICK / twist;
+        visualRotation.slerp(canonical, t).normalize();
+        if (t >= 1.0f) {
+            visualRotation.set(canonical);
+        }
+        compensateFrameChange(old, visualRotation);
+
+        // keep the render interpolation and the chase target consistent with the
+        // compensated state so the adjustment stays invisible
+        prevVisualRotation.set(visualRotation);
+        visualTarget.set(visualRotation);
     }
 
     /**
-     * The frame that maps the true field vector onto local down, with its twist
-     * anchored to the canonical frame of the current cardinal direction. The
-     * tilt is always < 90 degrees, so the shortest-arc rotation is unambiguous.
+     * Adjust yaw/pitch and local velocity for a frame change so that the
+     * world-space look direction and world-space velocity are preserved exactly
+     * — the camera and motion do not move at all.
+     */
+    private void compensateFrameChange(Quaternionf oldFrame, Quaternionf newFrame) {
+        // A pure twist never changes pitch, so compute the yaw delta from the
+        // HORIZONTAL look direction (pitch 0). Using the real pitched look would
+        // degenerate when looking straight up/down and slam yaw to 0.
+        Vec3 worldLookFlat = RotationUtil.vecPlayerToWorld(
+            RotationUtil.rotToVec(entity.getYRot(), 0), oldFrame
+        );
+        var newRot = RotationUtil.vecToRot(RotationUtil.vecWorldToPlayer(worldLookFlat, newFrame));
+
+        float deltaYaw = Mth.wrapDegrees(newRot.x - entity.getYRot());
+
+        entity.setYRot(entity.getYRot() + deltaYaw);
+        entity.yRotO += deltaYaw;
+        if (entity instanceof LivingEntity livingEntity) {
+            livingEntity.yBodyRot += deltaYaw;
+            livingEntity.yBodyRotO += deltaYaw;
+            livingEntity.yHeadRot += deltaYaw;
+            livingEntity.yHeadRotO += deltaYaw;
+        }
+
+        Vec3 worldVelocity = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), oldFrame);
+        entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(worldVelocity, newFrame));
+    }
+
+    /**
+     * The frame that maps the true field vector onto local down.
+     *
+     * For players this is PARALLEL TRANSPORT from the current frame: rotate only
+     * by the change in the up direction, introducing no twist — so a gravity
+     * flip pivots naturally instead of cartwheeling through the cardinal frames'
+     * differing yaw conventions. On an exact 180 degree flip the pivot axis is
+     * the player's look direction (a roll), which keeps them looking the same
+     * way through the flip.
+     *
+     * Non-player entities keep the cardinal-anchored frame (their movement is
+     * cardinal anyway and they have no camera).
      */
     private void computeVisualTarget(Quaternionf out) {
         Quaternionf canonical = RotationUtil.getWorldRotationQuaternion(currGravityDirection);
@@ -268,13 +362,35 @@ public class GravityCapabilityImpl implements IGravityCapability {
         Vec3 target = targetGravityVector != null && targetGravityVector.lengthSqr() > 1.0E-6
             ? targetGravityVector.normalize() : cardinal;
 
-        if (QuaternionUtil.angleBetween(target, cardinal) < 1.0E-3) {
-            out.set(canonical);
+        if (!(entity instanceof Player)) {
+            if (QuaternionUtil.angleBetween(target, cardinal) < 1.0E-3) {
+                out.set(canonical);
+            }
+            else {
+                // F = canonical ∘ R, where R rotates the target vector onto the cardinal
+                out.set(canonical).mul(QuaternionUtil.getRotationBetween(target, cardinal)).normalize();
+            }
             return;
         }
 
-        // F = canonical ∘ R, where R rotates the target vector onto the cardinal
-        out.set(canonical).mul(QuaternionUtil.getRotationBetween(target, cardinal)).normalize();
+        Vec3 targetUp = target.scale(-1);
+        Vec3 currentUp = getUpVector();
+
+        double angle = QuaternionUtil.angleBetween(currentUp, targetUp);
+        if (angle < 1.0E-4) {
+            out.set(visualRotation);
+            return;
+        }
+
+        // pivot axis for exact flips: the player's current look direction, so a
+        // 180 degree gravity change rolls around where they are looking
+        Vec3 lookWorld = RotationUtil.vecPlayerToWorld(
+            RotationUtil.rotToVec(entity.getYRot(), 0), visualRotation
+        );
+
+        Quaternionf delta = QuaternionUtil.getRotationBetween(currentUp, targetUp, lookWorld);
+        // F_new = F_old ∘ delta^-1  (delta rotates old up onto new up in world space)
+        out.set(visualRotation).mul(delta.conjugate()).normalize();
     }
 
     private static float angleBetween(Quaternionf a, Quaternionf b) {

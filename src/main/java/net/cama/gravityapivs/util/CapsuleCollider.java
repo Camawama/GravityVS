@@ -54,6 +54,7 @@ public final class CapsuleCollider {
 
     private static final class ResolveState {
         boolean grounded = false;
+        boolean touched = false;
         @Nullable Ship groundShip = null;
     }
 
@@ -66,15 +67,27 @@ public final class CapsuleCollider {
      * @return collided movement plus ground contact info
      */
     public static Result collide(Entity entity, Vec3 up, Vec3 movement, boolean wasGrounded) {
+        return collide(entity, entity.position(), up, movement, wasGrounded);
+    }
+
+    public static Result collide(Entity entity, Vec3 start, Vec3 up, Vec3 movement, boolean wasGrounded) {
         double radius = Math.max(0.1, entity.getBbWidth() / 2.0 - 0.02);
         double height = Math.max(entity.getBbHeight(), radius * 2.0 + 0.02);
         double[] sphereOffsets = sphereOffsets(height, radius);
 
-        Vec3 start = entity.position();
         List<Obstacle> obstacles = gatherObstacles(entity.level(), start, movement, up, radius, height);
 
         ResolveState state = new ResolveState();
         Vec3 end = sweep(start, movement, up, radius, sphereOffsets, obstacles, state);
+
+        if (!state.touched) {
+            // Nothing was hit: return the movement BIT-EXACTLY. Vanilla decides
+            // onGround/collision flags with exact float comparisons, so even a
+            // 1e-8 substep-summation error would register as a phantom collision
+            // (which manifests as jumping on air, elytra/flight cancelling, and
+            // ground friction flickering).
+            return new Result(movement, false, null);
+        }
 
         // step assist: when walking along the ground into a low obstacle, retry the
         // move lifted by the step height, then settle back down
@@ -221,6 +234,7 @@ public final class CapsuleCollider {
                 break;
             }
 
+            state.touched = true;
             pos = pos.add(worstNormal.scale(worstDepth + SKIN));
 
             if (worstNormal.dot(up) > GROUND_NORMAL_DOT) {
