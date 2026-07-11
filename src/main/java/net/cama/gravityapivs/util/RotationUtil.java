@@ -65,13 +65,149 @@ public abstract class RotationUtil {
         return vecWorldToPlayer(vec3d.x, vec3d.y, vec3d.z, gravityDirection);
     }
 
+    /**
+     * @deprecated the frame derived statelessly from a gravity vector has an
+     * unstable twist; use the entity's persistent frame quaternion instead
+     * (see {@code GravityChangerAPI.getGravityRotation}).
+     */
+    @Deprecated
     public static Vec3 vecWorldToPlayer(Vec3 vec3d, Vec3 gravityVector) {
         Quaternionf rotation = getWorldRotationQuaternion(gravityVector);
         return QuaternionUtil.rotate(vec3d, rotation);
     }
 
+    @Deprecated
     public static Vec3 vecWorldToPlayer(double x, double y, double z, Vec3 gravityVector) {
         return vecWorldToPlayer(new Vec3(x, y, z), gravityVector);
+    }
+
+    // ---- frame (quaternion) transforms ----
+    // `frame` is the world->player rotation (the rotation that maps the entity's
+    // gravity direction onto local down). In the cardinal-physics architecture
+    // the frame handed out by the capability is always one of the six canonical
+    // cardinal frames; these helpers recognize those instances and route to the
+    // exact switch-based cardinal math (no floating point drift).
+
+    /**
+     * If the frame is one of the canonical cardinal frames, its direction.
+     */
+    @org.jetbrains.annotations.Nullable
+    public static Direction canonicalDirectionOf(Quaternionf frame) {
+        for (int i = 0; i < 6; i++) {
+            if (WORLD_ROTATION_QUATERNIONS[i] == frame || WORLD_ROTATION_QUATERNIONS[i].equals(frame)) {
+                return Direction.from3DDataValue(i);
+            }
+        }
+        return null;
+    }
+
+    public static Vec3 vecWorldToPlayer(Vec3 vec3d, Quaternionf frame) {
+        Direction dir = canonicalDirectionOf(frame);
+        if (dir != null) {
+            return vecWorldToPlayer(vec3d, dir);
+        }
+        return QuaternionUtil.rotate(vec3d, frame);
+    }
+
+    public static Vec3 vecWorldToPlayer(double x, double y, double z, Quaternionf frame) {
+        return vecWorldToPlayer(new Vec3(x, y, z), frame);
+    }
+
+    public static Vec3 vecPlayerToWorld(Vec3 vec3d, Quaternionf frame) {
+        Direction dir = canonicalDirectionOf(frame);
+        if (dir != null) {
+            return vecPlayerToWorld(vec3d, dir);
+        }
+        return QuaternionUtil.rotate(vec3d, new Quaternionf(frame).conjugate());
+    }
+
+    public static Vec3 vecPlayerToWorld(double x, double y, double z, Quaternionf frame) {
+        return vecPlayerToWorld(new Vec3(x, y, z), frame);
+    }
+
+    public static Vec3 maskWorldToPlayer(Vec3 vec3d, Quaternionf frame) {
+        Direction dir = canonicalDirectionOf(frame);
+        if (dir != null) {
+            return maskWorldToPlayer(vec3d, dir);
+        }
+        Vec3 rotated = QuaternionUtil.rotate(vec3d, frame);
+        return new Vec3(Math.abs(rotated.x), Math.abs(rotated.y), Math.abs(rotated.z));
+    }
+
+    public static Vec3 maskPlayerToWorld(Vec3 vec3d, Quaternionf frame) {
+        Direction dir = canonicalDirectionOf(frame);
+        if (dir != null) {
+            return maskPlayerToWorld(vec3d, dir);
+        }
+        Vec3 rotated = QuaternionUtil.rotate(vec3d, new Quaternionf(frame).conjugate());
+        return new Vec3(Math.abs(rotated.x), Math.abs(rotated.y), Math.abs(rotated.z));
+    }
+
+    public static Vec2 rotWorldToPlayer(float yaw, float pitch, Quaternionf frame) {
+        Direction dir = canonicalDirectionOf(frame);
+        if (dir != null) {
+            return rotWorldToPlayer(yaw, pitch, dir);
+        }
+        Vec3 vec3d = QuaternionUtil.rotate(rotToVec(yaw, pitch), frame);
+        return vecToRot(vec3d.x, vec3d.y, vec3d.z);
+    }
+
+    public static Vec2 rotPlayerToWorld(float yaw, float pitch, Quaternionf frame) {
+        Direction dir = canonicalDirectionOf(frame);
+        if (dir != null) {
+            return rotPlayerToWorld(yaw, pitch, dir);
+        }
+        Vec3 vec3d = QuaternionUtil.rotate(rotToVec(yaw, pitch), new Quaternionf(frame).conjugate());
+        return vecToRot(vec3d.x, vec3d.y, vec3d.z);
+    }
+
+    public static AABB boxWorldToPlayer(AABB box, Quaternionf frame) {
+        Direction dir = canonicalDirectionOf(frame);
+        if (dir != null) {
+            return boxWorldToPlayer(box, dir);
+        }
+        return rotatedBoxEnvelope(box, frame, true);
+    }
+
+    public static AABB boxPlayerToWorld(AABB box, Quaternionf frame) {
+        Direction dir = canonicalDirectionOf(frame);
+        if (dir != null) {
+            return boxPlayerToWorld(box, dir);
+        }
+        return rotatedBoxEnvelope(box, frame, false);
+    }
+
+    public static AABB makeBoxFromDimensions(
+        EntityDimensions dimensions, Quaternionf frame, Vec3 pos
+    ) {
+        AABB rawBox = dimensions.makeBoundingBox(0, 0, 0);
+        return boxPlayerToWorld(rawBox, frame).move(pos);
+    }
+
+    // Axis-aligned envelope of the rotated box. Note: for non-cardinal frames
+    // this necessarily over-approximates the entity's true extent.
+    private static AABB rotatedBoxEnvelope(AABB box, Quaternionf frame, boolean worldToPlayer) {
+        Vec3[] corners = new Vec3[] {
+            new Vec3(box.minX, box.minY, box.minZ), new Vec3(box.maxX, box.minY, box.minZ),
+            new Vec3(box.minX, box.maxY, box.minZ), new Vec3(box.maxX, box.maxY, box.minZ),
+            new Vec3(box.minX, box.minY, box.maxZ), new Vec3(box.maxX, box.minY, box.maxZ),
+            new Vec3(box.minX, box.maxY, box.maxZ), new Vec3(box.maxX, box.maxY, box.maxZ)
+        };
+
+        double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
+
+        for (Vec3 corner : corners) {
+            Vec3 rotated = worldToPlayer ? vecWorldToPlayer(corner, frame) : vecPlayerToWorld(corner, frame);
+            if (rotated.x < minX) minX = rotated.x;
+            if (rotated.y < minY) minY = rotated.y;
+            if (rotated.z < minZ) minZ = rotated.z;
+            if (rotated.x > maxX) maxX = rotated.x;
+            if (rotated.y > maxY) maxY = rotated.y;
+            if (rotated.z > maxZ) maxZ = rotated.z;
+        }
+
+        return new AABB(minX, minY, minZ, maxX, maxY, maxZ);
     }
     
     public static Vec3 vecEntityToWorld(double x, double y, double z, Direction gravityDirection) {
@@ -272,9 +408,13 @@ public abstract class RotationUtil {
     }
     
     public static Vec2 vecToRot(double x, double y, double z) {
-        double sinPitch = -y;
+        double sinPitch = Mth.clamp(-y, -1.0, 1.0);
         double radPitch = Math.asin(sinPitch);
         double cosPitch = Math.cos(radPitch);
+        if (cosPitch < 1.0E-7) {
+            // looking straight along the gravity axis; yaw is degenerate, keep 0
+            return new Vec2(0.0F, (float) (radPitch) / 0.017453292F);
+        }
         double sinNegYaw = x / cosPitch;
         double cosNegYaw = Mth.clamp(z / cosPitch, -1, 1);
         double radNegYaw = Math.acos(cosNegYaw);
@@ -315,6 +455,12 @@ public abstract class RotationUtil {
         return WORLD_ROTATION_QUATERNIONS[gravityDirection.get3DDataValue()];
     }
 
+    /**
+     * @deprecated stateless shortest-arc frame; its twist is arbitrary and unstable
+     * (especially near-antiparallel to down). Use the entity's persistent frame
+     * quaternion from the gravity capability instead.
+     */
+    @Deprecated
     public static Quaternionf getWorldRotationQuaternion(Vec3 gravityVector) {
         // We want a rotation that transforms gravityVector to DOWN (0, -1, 0)
         // Because "World Rotation" means rotating the world so that gravity points down for the player.

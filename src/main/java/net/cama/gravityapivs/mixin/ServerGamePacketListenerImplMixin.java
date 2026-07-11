@@ -145,12 +145,11 @@ public abstract class ServerGamePacketListenerImplMixin {
         )
     )
     private Vec3 modify_onPlayerMove_move_1(Vec3 vec3d) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(this.player);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isAimDefault(this.player)) {
             return vec3d;
         }
-        
-        return RotationUtil.vecWorldToPlayer(vec3d, gravityDirection);
+
+        return RotationUtil.vecWorldToPlayer(vec3d, GravityChangerAPI.getAimRotation(this.player));
     }
     
     //@Redirect(
@@ -196,12 +195,11 @@ public abstract class ServerGamePacketListenerImplMixin {
         index = 1
     )
     private Vec3 modify_onVehicleMove_move_0(Vec3 vec3d) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(this.player);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isAimDefault(this.player)) {
             return vec3d;
         }
-        
-        return RotationUtil.vecWorldToPlayer(vec3d, gravityDirection);
+
+        return RotationUtil.vecWorldToPlayer(vec3d, GravityChangerAPI.getAimRotation(this.player));
     }
     
     //@ModifyVariable(
@@ -230,9 +228,9 @@ public abstract class ServerGamePacketListenerImplMixin {
         )
     )
     private AABB modify_onVehicleMove_move_0(AABB instance, double x, double y, double z, Operation<AABB> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(this.player);
-        Vec3 argVec = new Vec3(x, y, z);
-        argVec = RotationUtil.vecWorldToPlayer(argVec, gravityDirection);
+        Vec3 argVec = RotationUtil.vecWorldToPlayer(
+            new Vec3(x, y, z), GravityChangerAPI.getGravityRotation(this.player)
+        );
         return original.call(instance, argVec.x, argVec.y, argVec.z);
     }
     

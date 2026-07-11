@@ -57,15 +57,14 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private Vec3 wrapOperation_travel_getRotationVector_0(Player playerEntity, Operation<Vec3> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(playerEntity);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isAimDefault(playerEntity)) {
             return original.call(playerEntity);
         }
-        
-        return RotationUtil.vecWorldToPlayer(original.call(playerEntity), gravityDirection);
+
+        return RotationUtil.vecWorldToPlayer(original.call(playerEntity), GravityChangerAPI.getAimRotation(playerEntity));
     }
-    
-    
+
+
     @WrapOperation(
         method = "travel",
         at = @At(
@@ -74,26 +73,11 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private BlockPos modify_move_multiply_0(double x, double y, double z, Operation<BlockPos> original) {
-        Vec3 rotate = new Vec3(0.0D, 1.0D - 0.1D, 0.0D);
-        rotate = RotationUtil.vecPlayerToWorld(rotate, GravityChangerAPI.getGravityDirection(this));
+        Vec3 rotate = RotationUtil.vecPlayerToWorld(
+            new Vec3(0.0D, 1.0D - 0.1D, 0.0D), GravityChangerAPI.getGravityRotation(this)
+        );
         return original.call((double) x - rotate.x, (double) y - rotate.y + (1.0D - 0.1D), (double) z - rotate.z);
     }
-    //@Redirect(
-    //        method = "travel",
-    //        at = @At(
-    //                value = "NEW",
-    //                target = "Lnet/minecraft/util/math/BlockPos;<init>(DDD)V",
-    //                ordinal = 0
-    //        )
-    //)
-    //private BlockPos redirect_travel_new_0(double x, double y, double z) {
-    //    Direction gravityDirection = GravityChangerAPI.getGravityDirection((Entity)(Object)this);
-    //    if(gravityDirection == Direction.DOWN) {
-    //        return new BlockPos(x, y, z);
-    //    }
-//
-    //    return new BlockPos(this.getPos().add(RotationUtil.vecPlayerToWorld(0.0D, 1.0D - 0.1D, 0.0D, gravityDirection)));
-    //}
     
     @Redirect(
         method = "Lnet/minecraft/world/entity/player/Player;drop(Lnet/minecraft/world/item/ItemStack;ZZ)Lnet/minecraft/world/entity/item/ItemEntity;",
@@ -106,13 +90,12 @@ public abstract class PlayerMixin extends LivingEntity {
     private ItemEntity redirect_dropItem_new_0(
         Level world, double x, double y, double z, ItemStack stack
     ) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection((Entity) (Object) this);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isGravityDefault(this)) {
             return new ItemEntity(world, x, y, z, stack);
         }
-        
+
         Vec3 vec3d = this.getEyePosition()
-            .subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.3D, 0.0D, gravityDirection));
+            .subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.3D, 0.0D, GravityChangerAPI.getGravityRotation(this)));
         
         ItemEntity itemEntity = new ItemEntity(world, vec3d.x, vec3d.y, vec3d.z, stack);
         
@@ -135,13 +118,12 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private void wrapOperation_dropItem_setVelocity(ItemEntity itemEntity, double x, double y, double z, Operation<Void> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection((Entity) (Object) this);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isGravityDefault(this)) {
             original.call(itemEntity, x, y, z);
             return;
         }
-        
-        Vec3 world = RotationUtil.vecPlayerToWorld(x, y, z, gravityDirection);
+
+        Vec3 world = RotationUtil.vecPlayerToWorld(x, y, z, GravityChangerAPI.getGravityRotation(this));
         GravityChangerAPI.setWorldVelocity(itemEntity, world);
     }
     
@@ -152,17 +134,20 @@ public abstract class PlayerMixin extends LivingEntity {
     )
     private void inject_adjustMovementForSneaking(Vec3 movement, MoverType type, CallbackInfoReturnable<Vec3> cir) {
         Entity this_ = (Entity) (Object) this;
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(this_);
-        if (gravityDirection == Direction.DOWN) return;
-        
-        Vec3 playerMovement = RotationUtil.vecWorldToPlayer(movement, gravityDirection);
-        
+        if (GravityChangerAPI.isGravityDefault(this_)) return;
+        // capsule players: the box-based sneak edge-backoff does not apply
+        cir.setReturnValue(movement);
+        if (true) return;
+        org.joml.Quaternionf gravityRotation = GravityChangerAPI.getGravityRotation(this_);
+
+        Vec3 playerMovement = RotationUtil.vecWorldToPlayer(movement, gravityRotation);
+
         if (!this.abilities.flying && (type == MoverType.SELF || type == MoverType.PLAYER) && this.isStayingOnGroundSurface() && this.isAboveGround()) {
             double d = playerMovement.x;
             double e = playerMovement.z;
             double var7 = 0.05D;
-            
-            while (d != 0.0D && this_.level().noCollision(this, this.getBoundingBox().move(RotationUtil.vecPlayerToWorld(d, (double) (-this.maxUpStep()), 0.0D, gravityDirection)))) {
+
+            while (d != 0.0D && this_.level().noCollision(this, this.getBoundingBox().move(RotationUtil.vecPlayerToWorld(d, (double) (-this.maxUpStep()), 0.0D, gravityRotation)))) {
                 if (d < 0.05D && d >= -0.05D) {
                     d = 0.0D;
                 }
@@ -174,7 +159,7 @@ public abstract class PlayerMixin extends LivingEntity {
                 }
             }
             
-            while (e != 0.0D && this_.level().noCollision(this, this.getBoundingBox().move(RotationUtil.vecPlayerToWorld(0.0D, (double) (-this.maxUpStep()), e, gravityDirection)))) {
+            while (e != 0.0D && this_.level().noCollision(this, this.getBoundingBox().move(RotationUtil.vecPlayerToWorld(0.0D, (double) (-this.maxUpStep()), e, gravityRotation)))) {
                 if (e < 0.05D && e >= -0.05D) {
                     e = 0.0D;
                 }
@@ -186,7 +171,7 @@ public abstract class PlayerMixin extends LivingEntity {
                 }
             }
             
-            while (d != 0.0D && e != 0.0D && this_.level().noCollision(this, this.getBoundingBox().move(RotationUtil.vecPlayerToWorld(d, (double) (-this.maxUpStep()), e, gravityDirection)))) {
+            while (d != 0.0D && e != 0.0D && this_.level().noCollision(this, this.getBoundingBox().move(RotationUtil.vecPlayerToWorld(d, (double) (-this.maxUpStep()), e, gravityRotation)))) {
                 if (d < 0.05D && d >= -0.05D) {
                     d = 0.0D;
                 }
@@ -208,7 +193,7 @@ public abstract class PlayerMixin extends LivingEntity {
                 }
             }
             
-            cir.setReturnValue(RotationUtil.vecPlayerToWorld(d, playerMovement.y, e, gravityDirection));
+            cir.setReturnValue(RotationUtil.vecPlayerToWorld(d, playerMovement.y, e, gravityRotation));
         }
         else {
             cir.setReturnValue(movement);
@@ -223,12 +208,11 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private AABB wrapOperation_method_30263_offset_0(AABB box, double x, double y, double z, Operation<AABB> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection((Entity) (Object) this);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isGravityDefault(this)) {
             return original.call(box, x, y, z);
         }
-        
-        Vec3 world = RotationUtil.vecPlayerToWorld(x, y, z, gravityDirection);
+
+        Vec3 world = RotationUtil.vecPlayerToWorld(x, y, z, GravityChangerAPI.getGravityRotation(this));
         return original.call(box, world.x, world.y, world.z);
     }
     
@@ -241,13 +225,16 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private float wrapOperation_attack_getYaw_0(Player attacker, Operation<Float> original, Entity target) {
-        Direction targetGravityDirection = GravityChangerAPI.getGravityDirection(target);
-        Direction attackerGravityDirection = GravityChangerAPI.getGravityDirection(attacker);
-        if (targetGravityDirection == attackerGravityDirection) {
+        org.joml.Quaternionf targetRotation = GravityChangerAPI.getAimRotation(target);
+        org.joml.Quaternionf attackerRotation = GravityChangerAPI.getAimRotation(attacker);
+        if (targetRotation.equals(attackerRotation)) {
             return original.call(attacker);
         }
-        
-        return RotationUtil.rotWorldToPlayer(RotationUtil.rotPlayerToWorld(original.call(attacker), attacker.getXRot(), attackerGravityDirection), targetGravityDirection).x;
+
+        Vec3 worldLook = RotationUtil.vecPlayerToWorld(
+            RotationUtil.rotToVec(original.call(attacker), attacker.getXRot()), attackerRotation
+        );
+        return RotationUtil.vecToRot(RotationUtil.vecWorldToPlayer(worldLook, targetRotation)).x;
     }
     
     @WrapOperation(
@@ -259,13 +246,16 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private float wrapOperation_attack_getYaw_1(Player attacker, Operation<Float> original, Entity target) {
-        Direction targetGravityDirection = GravityChangerAPI.getGravityDirection(target);
-        Direction attackerGravityDirection = GravityChangerAPI.getGravityDirection(attacker);
-        if (targetGravityDirection == attackerGravityDirection) {
+        org.joml.Quaternionf targetRotation = GravityChangerAPI.getAimRotation(target);
+        org.joml.Quaternionf attackerRotation = GravityChangerAPI.getAimRotation(attacker);
+        if (targetRotation.equals(attackerRotation)) {
             return original.call(attacker);
         }
-        
-        return RotationUtil.rotWorldToPlayer(RotationUtil.rotPlayerToWorld(original.call(attacker), attacker.getXRot(), attackerGravityDirection), targetGravityDirection).x;
+
+        Vec3 worldLook = RotationUtil.vecPlayerToWorld(
+            RotationUtil.rotToVec(original.call(attacker), attacker.getXRot()), attackerRotation
+        );
+        return RotationUtil.vecToRot(RotationUtil.vecWorldToPlayer(worldLook, targetRotation)).x;
     }
     
     @WrapOperation(
@@ -277,12 +267,11 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private float wrapOperation_attack_getYaw_2(Player attacker, Operation<Float> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(attacker);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isAimDefault(attacker)) {
             return original.call(attacker);
         }
-        
-        return RotationUtil.rotPlayerToWorld(original.call(attacker), attacker.getXRot(), gravityDirection).x;
+
+        return RotationUtil.rotPlayerToWorld(original.call(attacker), attacker.getXRot(), GravityChangerAPI.getAimRotation(attacker)).x;
     }
     
     @WrapOperation(
@@ -294,12 +283,11 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private float wrapOperation_attack_getYaw_3(Player attacker, Operation<Float> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(attacker);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isAimDefault(attacker)) {
             return original.call(attacker);
         }
-        
-        return RotationUtil.rotPlayerToWorld(original.call(attacker), attacker.getXRot(), gravityDirection).x;
+
+        return RotationUtil.rotPlayerToWorld(original.call(attacker), attacker.getXRot(), GravityChangerAPI.getAimRotation(attacker)).x;
     }
     
     @WrapOperation(
@@ -310,13 +298,11 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private void modify_addDeathParticless_addParticle_0(Level instance, ParticleOptions particle, double x, double y, double z, double dx, double dy, double dz, Operation<Void> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection((Entity) (Object) this);
-
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isGravityDefault(this)) {
             original.call(instance, particle, x, y, z, dx, dy, dz);
         }
         else {
-            Vec3 vec3d = this.position().subtract(RotationUtil.vecPlayerToWorld(this.position().subtract(x, y, z), gravityDirection));
+            Vec3 vec3d = this.position().subtract(RotationUtil.vecPlayerToWorld(this.position().subtract(x, y, z), GravityChangerAPI.getGravityRotation(this)));
             original.call(instance, particle, vec3d.x, vec3d.y, vec3d.z, dx, dy, dz);
         }
     }
@@ -329,10 +315,9 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private AABB modify_tickMovement_expand_0(AABB instance, double x, double y, double z, Operation<AABB> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection((Entity) (Object) this);
-        if (gravityDirection == Direction.DOWN) return original.call(instance, x, y, z);
-        
-        Vec3 vec3d = RotationUtil.maskPlayerToWorld(x, y, z, gravityDirection);
+        if (GravityChangerAPI.isGravityDefault(this)) return original.call(instance, x, y, z);
+
+        Vec3 vec3d = RotationUtil.maskPlayerToWorld(new Vec3(x, y, z), GravityChangerAPI.getGravityRotation(this));
         return original.call(instance, vec3d.x, vec3d.y, vec3d.z);
     }
 }

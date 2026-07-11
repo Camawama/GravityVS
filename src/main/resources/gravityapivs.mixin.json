@@ -35,7 +35,6 @@
       "PiglinMixin",
       "PillagerMixin",
       "PistonMovingBlockEntityMixin",
-      "PlayerListMixin",
       "PlayerMixin",
       "PointedDripstoneBlockMixin",
       "PrimedTntMixin",
@@ -56,8 +55,7 @@
       "fall_distance.ServerGamePacketListenerImplMixin",
       "item.BehaviorUtilsMixin",
       "forge.MixinForgeHooks",
-      "compat.ACEntityMixin",
-      "MixinServerLevel"
+      "compat.ACEntityMixin"
 	],
 	"client": [
       "client.CameraMixin",

@@ -3,7 +3,9 @@ package net.cama.gravityapivs.mixin;
 import java.util.List;
 
 import net.cama.gravityapivs.api.GravityChangerAPI;
+import net.cama.gravityapivs.capabilities.GravityCapabilityImpl;
 import net.cama.gravityapivs.util.RotationUtil;
+import org.joml.Quaternionf;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -43,192 +45,264 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 public abstract class EntityMixin {
     @Shadow
     private Vec3 position;
-    
+
     @Shadow
     private EntityDimensions dimensions;
-    
+
     @Shadow
     private float eyeHeight;
-    
+
     @Shadow
     public double xo;
-    
+
     @Shadow
     public double yo;
-    
+
     @Shadow
     public double zo;
-    
+
     @Shadow
     public abstract double getX();
-    
+
     @Shadow
     public abstract Vec3 getEyePosition();
-    
+
     @Shadow
     public abstract double getY();
-    
+
     @Shadow
     public abstract double getZ();
-    
+
     @Shadow
     public Level level;
-    
+
     @Shadow
     public abstract int getBlockX();
-    
+
     @Shadow
     public abstract int getBlockZ();
-    
+
     @Shadow
     public boolean noPhysics;
-    
+
     @Shadow
     public abstract Vec3 getDeltaMovement();
-    
+
     @Shadow
     public abstract boolean isVehicle();
-    
+
     @Shadow
     public abstract AABB getBoundingBox();
-    
+
     @Shadow
     public static Vec3 collideWithShapes(Vec3 movement, AABB entityBoundingBox, List<VoxelShape> collisions) {
         return null;
     }
-    
+
     @Shadow
     public abstract Vec3 position();
-    
-    
+
+
     @Shadow
     public abstract boolean isPassengerOfSameVehicle(Entity entity);
-    
+
     @Shadow
     public abstract void push(double deltaX, double deltaY, double deltaZ);
-    
+
     @Shadow
     protected abstract void onBelowWorld();
-    
+
     @Shadow
     public abstract double getEyeY();
-    
+
     @Shadow
     public abstract float getViewYRot(float tickDelta);
-    
+
     @Shadow
     public abstract float getYRot();
-    
+
     @Shadow
     public abstract float getXRot();
-    
+
     @Shadow
     @Final
     protected RandomSource random;
-    
+
     @Shadow
     public float fallDistance;
-    
-	@Inject(method = "tick", at = @At("HEAD"))
-	private void tick(CallbackInfo ci) 
-	{
-		Entity entity = Entity.class.cast(this);
-		entity.getCapability(GravityCapabilities.GRAVITY).ifPresent(IGravityCapability::tick);
-	}
-    
-    @WrapOperation(method = "Lnet/minecraft/world/entity/Entity;makeBoundingBox()Lnet/minecraft/world/phys/AABB;", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/EntityDimensions;makeBoundingBox(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/AABB;"))
-    private AABB wrapOperation_canChangeIntoPose_getBoundingBox(EntityDimensions dimensions, Vec3 pos, Operation<AABB> original) {
-    	Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-    	if (gravityDirection.equals(new Vec3(0, -1, 0))) {
-    		return original.call(dimensions, pos);
-    	}
 
-    	AABB box = dimensions.makeBoundingBox(0, 0, 0);
-    	//Box box = original.call(dimensions, pos).offset(pos.negate());
-    	if (gravityDirection.y > 0) {
-    		box = box.move(0.0D, -1.0E-6D, 0.0D);
-    	}
-    	return RotationUtil.boxPlayerToWorld(box, gravityDirection).move(pos);
+    // convenience: the capability, or null when gravity is fully default (fast path)
+    private GravityCapabilityImpl gravityapivs$comp() {
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull((Entity) (Object) this);
+        if (comp == null || comp.isVisuallyDefault()) {
+            return null;
+        }
+        return comp;
     }
-    
+
+    // players move/measure in the continuous visual frame; other entities keep
+    // the cardinal physics frame
+    private org.joml.Quaternionf gravityapivs$movementRotation(GravityCapabilityImpl comp) {
+        return (Object) this instanceof Player ? comp.getVisualRotation() : comp.getCurrentRotation();
+    }
+
+    /**
+     * Players under non-default gravity collide as a gravity-aligned capsule —
+     * a hitbox that genuinely rotates with gravity and collides with Valkyrien
+     * Skies ships exactly, in shipyard space. Replaces vanilla box collision.
+     */
+    @Inject(
+        method = "Lnet/minecraft/world/entity/Entity;collide(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/Vec3;",
+        at = @At("HEAD"),
+        cancellable = true
+    )
+    private void inject_capsuleCollide(Vec3 movement, CallbackInfoReturnable<Vec3> cir) {
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull((Entity) (Object) this);
+        if (comp == null || !comp.useCapsuleCollision()) {
+            return;
+        }
+
+        Entity self = (Entity) (Object) this;
+        Vec3 up = comp.getUpVector();
+
+        // ride the surface of the ship we're standing on (drag)
+        Vec3 totalMovement = movement;
+        if (comp.capsuleGroundShip != null) {
+            totalMovement = totalMovement.add(
+                net.cama.gravityapivs.util.CapsuleCollider
+                    .shipSurfaceVelocity(comp.capsuleGroundShip, self.position())
+                    .scale(1.0 / 20.0)
+            );
+        }
+
+        net.cama.gravityapivs.util.CapsuleCollider.Result result =
+            net.cama.gravityapivs.util.CapsuleCollider.collide(self, up, totalMovement, comp.capsuleGrounded);
+
+        comp.capsuleGrounded = result.grounded;
+        comp.capsuleGroundShip = result.groundShip;
+
+        cir.setReturnValue(result.collidedMovement);
+    }
+
+    @Inject(method = "tick", at = @At("HEAD"))
+    private void tick(CallbackInfo ci)
+    {
+        Entity entity = Entity.class.cast(this);
+        entity.getCapability(GravityCapabilities.GRAVITY).ifPresent(IGravityCapability::tick);
+    }
+
+    @WrapOperation(method = "Lnet/minecraft/world/entity/Entity;makeBoundingBox()Lnet/minecraft/world/phys/AABB;", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/EntityDimensions;makeBoundingBox(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/AABB;"))
+    private AABB wrapOperation_makeBoundingBox(EntityDimensions dimensions, Vec3 pos, Operation<AABB> original) {
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) {
+            return original.call(dimensions, pos);
+        }
+
+        if (comp.useCapsuleCollision()) {
+            // passive envelope of the capsule (block collision does not use it)
+            return net.cama.gravityapivs.util.CapsuleCollider.makeEnvelope(
+                pos, comp.getUpVector(), dimensions.width, dimensions.height
+            );
+        }
+
+        AABB box = dimensions.makeBoundingBox(0, 0, 0);
+        if (comp.getCurrGravityDirection().getAxisDirection() == Direction.AxisDirection.POSITIVE) {
+            box = box.move(0.0D, -1.0E-6D, 0.0D);
+        }
+        return RotationUtil.boxPlayerToWorld(box, comp.getCurrGravityDirection()).move(pos);
+    }
+
     @Inject(method = "getBoundingBoxForPose", at = @At("RETURN"), cancellable = true)
     private void getBoundingBoxForPose(Pose pose, CallbackInfoReturnable<AABB> cir)
     {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-    	AABB aabb = cir.getReturnValue();
-    	if(gravityDirection.y > 0)
-    	{
-    		aabb = aabb.move(0.0D, -1.0E-6D, 0.0D);
-    	}
-    	cir.setReturnValue(RotationUtil.boxPlayerToWorld(aabb, gravityDirection));
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) return;
+
+        if (comp.useCapsuleCollision()) {
+            EntityDimensions dim = ((Entity) (Object) this).getDimensions(pose);
+            cir.setReturnValue(net.cama.gravityapivs.util.CapsuleCollider.makeEnvelope(
+                this.position(), comp.getUpVector(), dim.width, dim.height
+            ));
+            return;
+        }
+
+        AABB aabb = cir.getReturnValue();
+        if (comp.getCurrGravityDirection().getAxisDirection() == Direction.AxisDirection.POSITIVE)
+        {
+            aabb = aabb.move(0.0D, -1.0E-6D, 0.0D);
+        }
+        cir.setReturnValue(RotationUtil.boxPlayerToWorld(aabb, comp.getCurrGravityDirection()));
     }
-    
+
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;calculateViewVector(FF)Lnet/minecraft/world/phys/Vec3;",
         at = @At("RETURN"),
         cancellable = true
     )
     private void inject_getRotationVector(CallbackInfoReturnable<Vec3> cir) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-        
-        cir.setReturnValue(RotationUtil.vecPlayerToWorld(cir.getReturnValue(), gravityDirection));
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) return;
+
+        // look/aim follows the visual frame so it always matches the camera
+        cir.setReturnValue(RotationUtil.vecPlayerToWorld(cir.getReturnValue(), comp.getVisualRotation()));
     }
-    
+
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;getBlockPosBelowThatAffectsMyMovement()Lnet/minecraft/core/BlockPos;",
         at = @At("HEAD"),
         cancellable = true
     )
     private void inject_getVelocityAffectingPos(CallbackInfoReturnable<BlockPos> cir) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-        
-        cir.setReturnValue(BlockPos.containing(this.position.add(gravityDirection.normalize().scale(-0.5000001D))));
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) return;
+
+        cir.setReturnValue(BlockPos.containing(
+            this.position.add(RotationUtil.vecPlayerToWorld(0.0D, -0.5000001D, 0.0D, gravityapivs$movementRotation(comp)))
+        ));
     }
-    
+
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;getEyePosition()Lnet/minecraft/world/phys/Vec3;",
         at = @At("HEAD"),
         cancellable = true
     )
     private void inject_getEyePos(CallbackInfoReturnable<Vec3> cir) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-        
-        cir.setReturnValue(RotationUtil.vecPlayerToWorld(0.0D, this.eyeHeight, 0.0D, gravityDirection).add(this.position));
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) return;
+
+        // eyes follow the visual frame so raycasts start where the camera is
+        cir.setReturnValue(RotationUtil.vecPlayerToWorld(0.0D, this.eyeHeight, 0.0D, comp.getVisualRotation()).add(this.position));
     }
-    
+
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;getEyePosition(F)Lnet/minecraft/world/phys/Vec3;",
         at = @At("HEAD"),
         cancellable = true
     )
     private void inject_getCameraPosVec(float tickDelta, CallbackInfoReturnable<Vec3> cir) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-        
-        Vec3 vec3d = RotationUtil.vecPlayerToWorld(0.0D, this.eyeHeight, 0.0D, gravityDirection);
-        
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) return;
+
+        Vec3 vec3d = RotationUtil.vecPlayerToWorld(0.0D, this.eyeHeight, 0.0D, comp.getRenderRotation(tickDelta));
+
         double d = Mth.lerp((double) tickDelta, this.xo, this.getX()) + vec3d.x;
         double e = Mth.lerp((double) tickDelta, this.yo, this.getY()) + vec3d.y;
         double f = Mth.lerp((double) tickDelta, this.zo, this.getZ()) + vec3d.z;
         cir.setReturnValue(new Vec3(d, e, f));
     }
-    
+
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;getLightLevelDependentMagicValue()F",
         at = @At("HEAD"),
         cancellable = true
     )
     private void inject_getBrightnessAtFEyes(CallbackInfoReturnable<Float> cir) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-        
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) return;
+
         cir.setReturnValue(this.level.hasChunkAt(this.getBlockX(), this.getBlockZ()) ? this.level.getLightLevelDependentMagicValue(BlockPos.containing(this.getEyePosition())) : 0.0F);
     }
-    
+
     // transform move vector from local to world (the velocity is local)
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;move(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V",
@@ -237,37 +311,26 @@ public abstract class EntityMixin {
         argsOnly = true
     )
     private Vec3 modify_move_Vec3d_0_0(Vec3 vec3d) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) {
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) {
             return vec3d;
         }
-        
-        if(!((Entity) (Object) this instanceof Player)) {
-        	return RotationUtil.vecEntityToWorld(vec3d, GravityChangerAPI.getGravityDirection((Entity) (Object) this));
+
+        if (!((Entity) (Object) this instanceof Player)) {
+            // preserve the original mod's non-player movement convention at
+            // settled cardinal directions (vecEntityToWorld differs from the
+            // frame transform for UP gravity)
+            Direction settled = comp.getSettledCardinal();
+            if (settled != null) {
+                return RotationUtil.vecEntityToWorld(vec3d, settled);
+            }
         }
-        
-        return RotationUtil.vecPlayerToWorld(vec3d, gravityDirection);
+
+        // local velocity is interpreted through the continuous visual frame, so
+        // gravity pulls along the true (arbitrary-angle) field vector
+        return RotationUtil.vecPlayerToWorld(vec3d, comp.getVisualRotation());
     }
-    
-    // looks like not useful
-//    @ModifyArg(
-//        method = "move",
-//        at = @At(
-//            value = "INVOKE",
-//            target = "Lnet/minecraft/world/phys/Vec3;multiply(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/Vec3;",
-//            ordinal = 0
-//        ),
-//        index = 0
-//    )
-//    private Vec3 modify_move_multiply_0(Vec3 vec3d) {
-//        Direction gravityDirection = GravityChangerAPI.getGravityDirection((Entity) (Object) this);
-//        if (gravityDirection == Direction.DOWN) {
-//            return vec3d;
-//        }
-//
-//        return RotationUtil.maskPlayerToWorld(vec3d, gravityDirection);
-//    }
-    
+
     // transform the argument vector back to local coordinate
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;move(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V",
@@ -280,14 +343,14 @@ public abstract class EntityMixin {
         argsOnly = true
     )
     private Vec3 modify_move_Vec3d_0_1(Vec3 vec3d) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) {
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) {
             return vec3d;
         }
-        
-        return RotationUtil.vecWorldToPlayer(vec3d, gravityDirection);
+
+        return RotationUtil.vecWorldToPlayer(vec3d, comp.getVisualRotation());
     }
-    
+
     // transform the local variable (result from collide()) to local coordinate
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;move(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V",
@@ -299,23 +362,23 @@ public abstract class EntityMixin {
         ordinal = 1
     )
     private Vec3 modify_move_Vec3d_1(Vec3 vec3d) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) {
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) {
             return vec3d;
         }
-        
-        return RotationUtil.vecWorldToPlayer(vec3d, gravityDirection);
+
+        return RotationUtil.vecWorldToPlayer(vec3d, comp.getVisualRotation());
     }
-    
+
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;getOnPosLegacy()Lnet/minecraft/core/BlockPos;",
         at = @At("HEAD"),
         cancellable = true
     )
     private void inject_getLandingPos(CallbackInfoReturnable<BlockPos> cir) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-        BlockPos blockPos = BlockPos.containing(RotationUtil.vecPlayerToWorld(0.0D, -0.20000000298023224D, 0.0D, gravityDirection).add(this.position));
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) return;
+        BlockPos blockPos = BlockPos.containing(RotationUtil.vecPlayerToWorld(0.0D, -0.20000000298023224D, 0.0D, gravityapivs$movementRotation(comp)).add(this.position));
         cir.setReturnValue(blockPos);
     }
 
@@ -330,12 +393,12 @@ public abstract class EntityMixin {
         ordinal = 0
     )
     private Vec3 modify_adjustMovementForCollisions_Vec3d_0(Vec3 vec3d) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) {
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) {
             return vec3d;
         }
-        
-        return RotationUtil.vecWorldToPlayer(vec3d, gravityDirection);
+
+        return RotationUtil.vecWorldToPlayer(vec3d, comp.getCurrentRotation());
     }
 
     // transform the result to world coordinate
@@ -346,12 +409,12 @@ public abstract class EntityMixin {
         cancellable = true
     )
     private void inject_adjustMovementForCollisions(CallbackInfoReturnable<Vec3> cir) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-        
-        cir.setReturnValue(RotationUtil.vecPlayerToWorld(cir.getReturnValue(), gravityDirection));
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) return;
+
+        cir.setReturnValue(RotationUtil.vecPlayerToWorld(cir.getReturnValue(), comp.getCurrentRotation()));
     }
-    
+
     // the argument was transformed to local coord,
     // but bounding box stretch needs world coord
     @WrapOperation(
@@ -362,12 +425,13 @@ public abstract class EntityMixin {
             )
     )
     private AABB redirect_adjustMovementForCollisions_stretch_1(AABB instance, double x, double y, double z, Operation<AABB> original) {
-        Vec3 rotate = new Vec3(x, y, z);
-        rotate = RotationUtil.vecPlayerToWorld(rotate, GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this));
+        Vec3 rotate = RotationUtil.vecPlayerToWorld(
+            new Vec3(x, y, z), GravityChangerAPI.getGravityRotation((Entity) (Object) this)
+        );
 
-        return original.call(instance,rotate.x,rotate.y,rotate.z);
+        return original.call(instance, rotate.x, rotate.y, rotate.z);
     }
-    
+
     // the argument was transformed to local coord,
     // but bounding box move needs world coord
     @ModifyArg(
@@ -378,10 +442,9 @@ public abstract class EntityMixin {
             )
         )
     private Vec3 redirect_adjustMovementForCollisions_offset_0(Vec3 rotate) {
-    	rotate = RotationUtil.vecPlayerToWorld(rotate, GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this));
-    	return rotate;
+        return RotationUtil.vecPlayerToWorld(rotate, GravityChangerAPI.getGravityRotation((Entity) (Object) this));
     }
-    
+
     // Entity.collideBoundingBox is inputed with local coord, transform it to world coord
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;collideBoundingBox(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/AABB;Lnet/minecraft/world/level/Level;Ljava/util/List;)Lnet/minecraft/world/phys/Vec3;",
@@ -393,15 +456,15 @@ public abstract class EntityMixin {
         if (entity == null) {
             return vec3d;
         }
-        
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) {
+
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(entity);
+        if (comp == null || comp.isDefault()) {
             return vec3d;
         }
-        
-        return RotationUtil.vecPlayerToWorld(vec3d, gravityDirection);
+
+        return RotationUtil.vecPlayerToWorld(vec3d, comp.getCurrentRotation());
     }
-    
+
     // transform back to local coord
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;collideBoundingBox(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/AABB;Lnet/minecraft/world/level/Level;Ljava/util/List;)Lnet/minecraft/world/phys/Vec3;",
@@ -410,13 +473,13 @@ public abstract class EntityMixin {
     )
     private static void inject_adjustMovementForCollisions(Entity entity, Vec3 movement, AABB entityBoundingBox, Level world, List<VoxelShape> collisions, CallbackInfoReturnable<Vec3> cir) {
         if (entity == null) return;
-        
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-        
-        cir.setReturnValue(RotationUtil.vecWorldToPlayer(cir.getReturnValue(), gravityDirection));
+
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(entity);
+        if (comp == null || comp.isDefault()) return;
+
+        cir.setReturnValue(RotationUtil.vecWorldToPlayer(cir.getReturnValue(), comp.getCurrentRotation()));
     }
-    
+
     @Redirect(
         method = "Lnet/minecraft/world/entity/Entity;collideBoundingBox(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/AABB;Lnet/minecraft/world/level/Level;Ljava/util/List;)Lnet/minecraft/world/phys/Vec3;",
         at = @At(
@@ -426,60 +489,67 @@ public abstract class EntityMixin {
         )
     )
     private static Vec3 redirect_adjustMovementForCollisions_adjustMovementForCollisions_0(Vec3 movement, AABB entityBoundingBox, List<VoxelShape> collisions, Entity entity) {
-        Vec3 gravityDirectionVec;
-        if (entity == null || (gravityDirectionVec = GravityChangerAPI.getGravityDirectionVec(entity)).equals(new Vec3(0, -1, 0))) {
+        GravityCapabilityImpl comp = entity == null ? null : GravityChangerAPI.getGravityComponentOrNull(entity);
+        if (comp == null || comp.isDefault()) {
             return collideWithShapes(movement, entityBoundingBox, collisions);
         }
-        
-        // Check if cardinal
-        boolean isCardinal = false;
-        for(Direction d : Direction.values()) {
-            if (Vec3.atLowerCornerOf(d.getNormal()).distanceToSqr(gravityDirectionVec) < 0.0001) {
-                isCardinal = true;
-                break;
-            }
+
+        // Ordered per-axis resolution is only possible when the local axes map onto
+        // world axes, i.e. at settled cardinal directions.
+        Direction settled = comp.getSettledCardinal();
+        if (settled == null) {
+            return collideWithShapes(movement, entityBoundingBox, collisions);
         }
-        
-        if (!isCardinal) {
-             return collideWithShapes(movement, entityBoundingBox, collisions);
-        }
-        
-        Vec3 playerMovement = RotationUtil.vecWorldToPlayer(movement, gravityDirectionVec);
+
+        Quaternionf rotation = comp.getCurrentRotation();
+
+        Vec3 playerMovement = RotationUtil.vecWorldToPlayer(movement, rotation);
         double playerMovementX = playerMovement.x;
         double playerMovementY = playerMovement.y;
         double playerMovementZ = playerMovement.z;
-        Direction directionX = RotationUtil.dirPlayerToWorld(Direction.EAST, GravityChangerAPI.getGravityDirection(entity));
-        Direction directionY = RotationUtil.dirPlayerToWorld(Direction.UP, GravityChangerAPI.getGravityDirection(entity));
-        Direction directionZ = RotationUtil.dirPlayerToWorld(Direction.SOUTH, GravityChangerAPI.getGravityDirection(entity));
+        Direction directionX = RotationUtil.dirPlayerToWorld(Direction.EAST, settled);
+        Direction directionY = RotationUtil.dirPlayerToWorld(Direction.UP, settled);
+        Direction directionZ = RotationUtil.dirPlayerToWorld(Direction.SOUTH, settled);
         if (playerMovementY != 0.0D) {
             playerMovementY = Shapes.collide(directionY.getAxis(), entityBoundingBox, collisions, playerMovementY * directionY.getAxisDirection().getStep()) * directionY.getAxisDirection().getStep();
             if (playerMovementY != 0.0D) {
-                entityBoundingBox = entityBoundingBox.move(RotationUtil.vecPlayerToWorld(0.0D, playerMovementY, 0.0D, gravityDirectionVec));
+                entityBoundingBox = entityBoundingBox.move(RotationUtil.vecPlayerToWorld(0.0D, playerMovementY, 0.0D, rotation));
             }
         }
-        
+
         boolean isZLargerThanX = Math.abs(playerMovementX) < Math.abs(playerMovementZ);
         if (isZLargerThanX && playerMovementZ != 0.0D) {
             playerMovementZ = Shapes.collide(directionZ.getAxis(), entityBoundingBox, collisions, playerMovementZ * directionZ.getAxisDirection().getStep()) * directionZ.getAxisDirection().getStep();
             if (playerMovementZ != 0.0D) {
-                entityBoundingBox = entityBoundingBox.move(RotationUtil.vecPlayerToWorld(0.0D, 0.0D, playerMovementZ, gravityDirectionVec));
+                entityBoundingBox = entityBoundingBox.move(RotationUtil.vecPlayerToWorld(0.0D, 0.0D, playerMovementZ, rotation));
             }
         }
-        
+
         if (playerMovementX != 0.0D) {
             playerMovementX = Shapes.collide(directionX.getAxis(), entityBoundingBox, collisions, playerMovementX * directionX.getAxisDirection().getStep()) * directionX.getAxisDirection().getStep();
             if (!isZLargerThanX && playerMovementX != 0.0D) {
-                entityBoundingBox = entityBoundingBox.move(RotationUtil.vecPlayerToWorld(playerMovementX, 0.0D, 0.0D, gravityDirectionVec));
+                entityBoundingBox = entityBoundingBox.move(RotationUtil.vecPlayerToWorld(playerMovementX, 0.0D, 0.0D, rotation));
             }
         }
-        
+
         if (!isZLargerThanX && playerMovementZ != 0.0D) {
             playerMovementZ = Shapes.collide(directionZ.getAxis(), entityBoundingBox, collisions, playerMovementZ * directionZ.getAxisDirection().getStep()) * directionZ.getAxisDirection().getStep();
         }
-        
-        return RotationUtil.vecPlayerToWorld(playerMovementX, playerMovementY, playerMovementZ, gravityDirectionVec);
+
+        return RotationUtil.vecPlayerToWorld(playerMovementX, playerMovementY, playerMovementZ, rotation);
     }
-    
+
+    // In capsule mode the entity's stored AABB is a loose envelope, which would
+    // cause false suffocation on slopes/ships; the capsule already prevents the
+    // player from ending up inside blocks.
+    @Inject(method = "isInWall", at = @At("HEAD"), cancellable = true)
+    private void inject_isInWall_capsule(CallbackInfoReturnable<Boolean> cir) {
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull((Entity) (Object) this);
+        if (comp != null && comp.useCapsuleCollision()) {
+            cir.setReturnValue(false);
+        }
+    }
+
     @WrapOperation(
         method = "isInWall",
         at = @At(
@@ -489,11 +559,12 @@ public abstract class EntityMixin {
         )
     )
     private AABB modify_isInsideWall_of_0(Vec3 vec3, double x, double y, double z, Operation<AABB> original) {
-        Vec3 rotate = new Vec3(x, y, z);
-        rotate = RotationUtil.vecPlayerToWorld(rotate, GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this));
+        Vec3 rotate = RotationUtil.maskPlayerToWorld(
+            new Vec3(x, y, z), GravityChangerAPI.getGravityRotation((Entity) (Object) this)
+        );
         return original.call(vec3, rotate.x, rotate.y, rotate.z);
     }
-    
+
     @ModifyArg(
         method = "getDirection",
         at = @At(
@@ -502,59 +573,63 @@ public abstract class EntityMixin {
         )
     )
     private double redirect_getHorizontalFacing_getYaw_0(double rotation) {
-        Entity this_ = (Entity) (Object) this;
-        
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(this_);
-        if (gravityDirection == Direction.DOWN) {
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) {
             return rotation;
         }
-        
-        return RotationUtil.rotPlayerToWorld((float) rotation, this.getXRot(), gravityDirection).x;
+
+        return RotationUtil.rotPlayerToWorld((float) rotation, this.getXRot(), comp.getVisualRotation()).x;
     }
-    
+
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;spawnSprintParticle()V",
         at = @At("HEAD"),
         cancellable = true
     )
     private void inject_spawnSprintingParticles(CallbackInfo ci) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-        
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) return;
+        Quaternionf rotation = gravityapivs$movementRotation(comp);
+
         ci.cancel();
-        
-        Vec3 floorPos = this.position().subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.20000000298023224D, 0.0D, gravityDirection));
-        
+
+        Vec3 floorPos = this.position().subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.20000000298023224D, 0.0D, rotation));
+
         BlockPos blockPos = BlockPos.containing(floorPos);
         BlockState blockState = this.level.getBlockState(blockPos);
         if (blockState.getRenderShape() != RenderShape.INVISIBLE) {
-            Vec3 particlePos = this.position().add(RotationUtil.vecPlayerToWorld((this.random.nextDouble() - 0.5D) * (double) this.dimensions.width, 0.1D, (this.random.nextDouble() - 0.5D) * (double) this.dimensions.width, gravityDirection));
+            Vec3 particlePos = this.position().add(RotationUtil.vecPlayerToWorld((this.random.nextDouble() - 0.5D) * (double) this.dimensions.width, 0.1D, (this.random.nextDouble() - 0.5D) * (double) this.dimensions.width, rotation));
             Vec3 playerVelocity = this.getDeltaMovement();
-            Vec3 particleVelocity = RotationUtil.vecPlayerToWorld(playerVelocity.x * -4.0D, 1.5D, playerVelocity.z * -4.0D, gravityDirection);
+            Vec3 particleVelocity = RotationUtil.vecPlayerToWorld(playerVelocity.x * -4.0D, 1.5D, playerVelocity.z * -4.0D, rotation);
             this.level.addParticle(new BlockParticleOption(ParticleTypes.BLOCK, blockState), particlePos.x, particlePos.y, particlePos.z, particleVelocity.x, particleVelocity.y, particleVelocity.z);
         }
     }
-    
-    
+
+
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;push(Lnet/minecraft/world/entity/Entity;)V",
         at = @At("HEAD"),
         cancellable = true
     )
     private void inject_pushAwayFrom(Entity entity, CallbackInfo ci) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this);
-        Vec3 otherGravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
-        
-        if (gravityDirection.equals(new Vec3(0, -1, 0)) && otherGravityDirection.equals(new Vec3(0, -1, 0))) return;
-        
+        GravityCapabilityImpl selfComp = GravityChangerAPI.getGravityComponentOrNull((Entity) (Object) this);
+        GravityCapabilityImpl otherComp = GravityChangerAPI.getGravityComponentOrNull(entity);
+
+        boolean selfDefault = selfComp == null || selfComp.isDefault();
+        boolean otherDefault = otherComp == null || otherComp.isDefault();
+        if (selfDefault && otherDefault) return;
+
         ci.cancel();
-        
+
+        Quaternionf selfRotation = GravityChangerAPI.getGravityRotation((Entity) (Object) this);
+        Quaternionf otherRotation = GravityChangerAPI.getGravityRotation(entity);
+
         if (!this.isPassengerOfSameVehicle(entity)) {
             if (!entity.noPhysics && !this.noPhysics) {
                 Vec3 entityOffset = entity.getBoundingBox().getCenter().subtract(this.getBoundingBox().getCenter());
-                
+
                 {
-                    Vec3 playerEntityOffset = RotationUtil.vecWorldToPlayer(entityOffset, gravityDirection);
+                    Vec3 playerEntityOffset = RotationUtil.vecWorldToPlayer(entityOffset, selfRotation);
                     double dx = playerEntityOffset.x;
                     double dz = playerEntityOffset.z;
                     double f = Mth.absMax(dx, dz);
@@ -566,7 +641,7 @@ public abstract class EntityMixin {
                         if (g > 1.0D) {
                             g = 1.0D;
                         }
-                        
+
                         dx *= g;
                         dz *= g;
                         dx *= 0.05000000074505806D;
@@ -576,9 +651,9 @@ public abstract class EntityMixin {
                         }
                     }
                 }
-                
+
                 {
-                    Vec3 entityEntityOffset = RotationUtil.vecWorldToPlayer(entityOffset, otherGravityDirection);
+                    Vec3 entityEntityOffset = RotationUtil.vecWorldToPlayer(entityOffset, otherRotation);
                     double dx = entityEntityOffset.x;
                     double dz = entityEntityOffset.z;
                     double f = Mth.absMax(dx, dz);
@@ -590,7 +665,7 @@ public abstract class EntityMixin {
                         if (g > 1.0D) {
                             g = 1.0D;
                         }
-                        
+
                         dx *= g;
                         dz *= g;
                         dx *= 0.05000000074505806D;
@@ -603,7 +678,7 @@ public abstract class EntityMixin {
             }
         }
     }
-    
+
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;checkBelowWorld()V",
         at = @At("HEAD"),
@@ -611,7 +686,7 @@ public abstract class EntityMixin {
     )
     private void inject_attemptTickInVoid(CallbackInfo ci) {
         Entity this_ = (Entity) (Object) this;
-    
+
         Direction gravityDirection = GravityChangerAPI.getGravityDirection(this_);
         if (GravityConfig.voidDamageAboveWorld.get() &&
             this.getY() > (double) (this.level.getMaxBuildHeight() + 256) &&
@@ -621,18 +696,17 @@ public abstract class EntityMixin {
             ci.cancel();
             return;
         }
-        
+
         if (GravityConfig.voidDamageOnHorizontalFallTooFar.get() &&
             gravityDirection.getAxis() != Direction.Axis.Y &&
             fallDistance > 1024
-            // TODO also handle reverse gravity strength
         ) {
             this.onBelowWorld();
             ci.cancel();
             return;
         }
     }
-    
+
     @WrapOperation(
         method = "isFree(DDD)Z",
         at = @At(
@@ -642,12 +716,13 @@ public abstract class EntityMixin {
         )
     )
     private AABB redirect_doesNotCollide_offset_0(AABB instance, double x, double y, double z, Operation<AABB> original) {
-        Vec3 rotate = new Vec3(x, y, z);
-        rotate = RotationUtil.vecPlayerToWorld(rotate, GravityChangerAPI.getGravityDirectionVec((Entity) (Object) this));
+        Vec3 rotate = RotationUtil.vecPlayerToWorld(
+            new Vec3(x, y, z), GravityChangerAPI.getGravityRotation((Entity) (Object) this)
+        );
         return original.call(instance, rotate.x, rotate.y, rotate.z);
     }
-    
-    
+
+
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;updateFluidOnEyes()V",
         at = @At(
@@ -656,10 +731,9 @@ public abstract class EntityMixin {
         ordinal = 0
     )
     private double submergedInWaterEyeFix(double d) {
-        d = this.getEyePosition().y();
-        return d;
+        return this.getEyePosition().y();
     }
-    
+
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;updateFluidOnEyes()V",
         at = @At(
@@ -668,9 +742,8 @@ public abstract class EntityMixin {
         ordinal = 0
     )
     private BlockPos submergedInWaterPosFix(BlockPos blockpos) {
-        blockpos = BlockPos.containing(this.getEyePosition());
-        return blockpos;
+        return BlockPos.containing(this.getEyePosition());
     }
-    
-    
+
+
 }

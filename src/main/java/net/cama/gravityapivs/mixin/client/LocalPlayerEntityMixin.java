@@ -37,34 +37,37 @@ public abstract class LocalPlayerEntityMixin extends AbstractClientPlayer {
         )
     )
     private AABB redirect_wouldCollideAt_new_0(double x1, double y1, double z1, double x2, double y2, double z2, BlockPos pos) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(this);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isGravityDefault(this)) {
             return new AABB(x1, y1, z1, x2, y2, z2);
         }
-        
+        org.joml.Quaternionf gravityRotation = GravityChangerAPI.getGravityRotation(this);
+
         AABB playerBox = this.getBoundingBox();
-        Vec3 playerMask = RotationUtil.maskPlayerToWorld(0.0D, 1.0D, 0.0D, gravityDirection);
+        Vec3 playerMask = RotationUtil.maskPlayerToWorld(new Vec3(0.0D, 1.0D, 0.0D), gravityRotation);
         AABB posBox = new AABB(pos);
-        Vec3 posMask = RotationUtil.maskPlayerToWorld(1.0D, 0.0D, 1.0D, gravityDirection);
-        
+        Vec3 posMask = RotationUtil.maskPlayerToWorld(new Vec3(1.0D, 0.0D, 1.0D), gravityRotation);
+
         return new AABB(
             playerMask.multiply(playerBox.minX, playerBox.minY, playerBox.minZ).add(posMask.multiply(posBox.minX, posBox.minY, posBox.minZ)),
             playerMask.multiply(playerBox.maxX, playerBox.maxY, playerBox.maxZ).add(posMask.multiply(posBox.maxX, posBox.maxY, posBox.maxZ))
         );
     }
-    
+
     @Inject(
         method = "Lnet/minecraft/client/player/LocalPlayer;moveTowardsClosestSpace(DD)V",
         at = @At("HEAD"),
         cancellable = true
     )
     private void inject_pushOutOfBlocks(double x, double z, CallbackInfo ci) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(this);
-        if (gravityDirection == Direction.DOWN) return;
-        
+        if (GravityChangerAPI.isGravityDefault(this)) return;
+
         ci.cancel();
-        
-        Vec3 pos = RotationUtil.vecPlayerToWorld(x - this.getX(), 0.0D, z - this.getZ(), gravityDirection).add(this.position());
+        // the capsule collider keeps the player out of blocks; the vanilla
+        // box-based push-out fights it and causes jitter
+        if (true) return;
+        org.joml.Quaternionf gravityRotation = GravityChangerAPI.getGravityRotation(this);
+
+        Vec3 pos = RotationUtil.vecPlayerToWorld(x - this.getX(), 0.0D, z - this.getZ(), gravityRotation).add(this.position());
         BlockPos blockPos = BlockPos.containing(pos);
         if (this.suffocatesAt(blockPos)) {
             double dx = pos.x - (double) blockPos.getX();
@@ -72,11 +75,12 @@ public abstract class LocalPlayerEntityMixin extends AbstractClientPlayer {
             double dz = pos.z - (double) blockPos.getZ();
             Direction direction = null;
             double minDistToEdge = Double.MAX_VALUE;
-            
+
             Direction[] directions = new Direction[]{Direction.WEST, Direction.EAST, Direction.NORTH, Direction.SOUTH};
             for (Direction playerDirection : directions) {
-                Direction worldDirection = RotationUtil.dirPlayerToWorld(playerDirection, gravityDirection);
-                
+                Vec3 worldDirVec = RotationUtil.vecPlayerToWorld(Vec3.atLowerCornerOf(playerDirection.getNormal()), gravityRotation);
+                Direction worldDirection = Direction.getNearest(worldDirVec.x, worldDirVec.y, worldDirVec.z);
+
                 double g = worldDirection.getAxis().choose(dx, dy, dz);
                 double distToEdge = worldDirection.getAxisDirection() == Direction.AxisDirection.POSITIVE ? 1.0D - g : g;
                 if (distToEdge < minDistToEdge && !this.suffocatesAt(blockPos.relative(worldDirection))) {

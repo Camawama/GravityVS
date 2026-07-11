@@ -18,11 +18,10 @@ public class GravityNetwork
 			PROTOCOL_VERSION::equals
 	);
 	
-	public static int ID = 0;
 	public static void registerMessages()
 	{
-		CHANNEL.registerMessage(ID++, UpdateGravityCapabilityPacket.class, UpdateGravityCapabilityPacket::encode, UpdateGravityCapabilityPacket::new, UpdateGravityCapabilityPacket.Handler::onMessage);
-		CHANNEL.registerMessage(ID++, UpdateGravitySyncStatePacket.class, UpdateGravitySyncStatePacket::encode, UpdateGravitySyncStatePacket::new, UpdateGravitySyncStatePacket.Handler::onMessage);
+		int id = 0;
+		CHANNEL.registerMessage(id++, UpdateGravityCapabilityPacket.class, UpdateGravityCapabilityPacket::encode, UpdateGravityCapabilityPacket::new, UpdateGravityCapabilityPacket.Handler::onMessage);
 	}
 	
     public static <MSG> void sendToServer(MSG message) 

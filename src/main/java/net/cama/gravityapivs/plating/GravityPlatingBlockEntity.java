@@ -15,7 +15,7 @@ import net.cama.gravityapivs.init.GravityBlocks;
 import net.cama.gravityapivs.util.GCUtil;
 import net.cama.gravityapivs.util.RotationUtil;
 
-// VS2 IMPORTS
+// VS2 imports (Valkyrien Skies is a mandatory dependency)
 import org.valkyrienskies.mod.common.VSGameUtilsKt;
 import org.valkyrienskies.core.api.ships.Ship;
 import org.joml.Vector3d;
@@ -29,7 +29,6 @@ import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.server.level.ServerChunkCache;
-import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
@@ -49,26 +48,16 @@ import net.minecraft.world.phys.Vec3;
  */
 public class GravityPlatingBlockEntity extends BlockEntity {
 
-    private static final int MAX_LEVEL = 64;
-    
-    // rotateVelocity=true, rotateView=true, rotationTime=0 (instant/continuous)
-    private static final RotationParameters PLATING_ROTATION_PARAMS = new RotationParameters(true, true, 0);
-
-    // HSRDCODED DIMENSION LIST
-    // Artificial gravity from gravity plating will ONLY apply in these dimensions.
-    private static final List<String> ARTIFICIAL_GRAVITY_DIMS = List.of(
-            "ad_astra:earth_orbit",
-            "ad_astra:glacio_orbit",
-            "ad_astra:mars_orbit",
-            "ad_astra:mercury_orbit",
-            "ad_astra:moon_orbit",
-            "ad_astra:venus_orbit",
-            "genesis:great_unknown",
-            "genesis:wormhole"
-    );
+    // rotateVelocity=true, rotateView=true; rotation time only applies to
+    // discrete flips (small drift is handled smoothly by the frame transport)
+    private static final RotationParameters PLATING_ROTATION_PARAMS = new RotationParameters(true, true, 300);
 
     public GravityPlatingBlockEntity(BlockPos pos, BlockState state) {
         super(GravityBlocks.GRAVITY_PLATING_BLOCK_ENTITY.get(), pos, state);
+    }
+
+    private static int maxLevel() {
+        return GravityConfig.platingMaxLevel.get();
     }
 
     public static class SideData {
@@ -90,7 +79,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             boolean isAttracting_ = tag.getBoolean("isAttracting");
             int level_ = tag.getInt("level");
 
-            level_ = Mth.clamp(level_, 1, MAX_LEVEL);
+            level_ = Mth.clamp(level_, 1, maxLevel());
 
             return new SideData(isAttracting_, level_);
         }
@@ -127,21 +116,24 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                     case EAST -> minX -= delta;
                 }
 
+                // merge with same-polarity plates on adjacent perpendicular faces
                 BlockPos wallPos = blockPos.relative(plateDir);
                 for (Direction sideDir : Direction.values()) {
                     if (sideDir.getAxis() == plateDir.getAxis()) {continue;}
 
                     BlockPos sidePos = wallPos.relative(sideDir);
                     BlockState sideBlockState = world.getBlockState(sidePos);
-                    if (!(sideBlockState.getBlock() instanceof GravityPlatingBlock sidePlatingBlock)) {continue;}
+                    if (!(sideBlockState.getBlock() instanceof GravityPlatingBlock)) {continue;}
 
-                    if (!GravityPlatingBlock.hasDir(sideBlockState, sideDir.getOpposite())) {continue;}
+                    Direction neighborPlateDir = sideDir.getOpposite();
+                    if (!GravityPlatingBlock.hasDir(sideBlockState, neighborPlateDir)) {continue;}
 
                     if (!(world.getBlockEntity(sidePos) instanceof GravityPlatingBlockEntity be)) {continue;}
 
-                    if (isAttracting != this.isAttracting) {continue;}
+                    SideData neighborSide = be.getSideData(neighborPlateDir);
+                    if (neighborSide == null || neighborSide.isAttracting != this.isAttracting) {continue;}
 
-                    double sideDelta = getEffectRange();
+                    double sideDelta = neighborSide.getEffectRange();
                     switch (sideDir) {
                         case DOWN -> minY -= sideDelta;
                         case UP -> maxY += sideDelta;
@@ -162,6 +154,13 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     private @Nullable SideData[] sideData = null;
 
     private @Nullable AABB roughAreaBoxCache = null;
+
+    public @Nullable SideData getSideData(Direction dir) {
+        if (sideData == null) {
+            return null;
+        }
+        return sideData[dir.ordinal()];
+    }
 
     @Override
     public void load(CompoundTag tag) {
@@ -237,8 +236,15 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             }
         }
 
-        if (this.worldPosition.hashCode() % 5 == world.getGameTime() % 5) {
-            roughAreaBoxCache = null;
+        // stagger cache invalidation across plates; floorMod because hashCode may be negative
+        if (Math.floorMod(this.worldPosition.hashCode(), 5) == world.getGameTime() % 5) {
+            invalidateBoxCaches();
+        }
+    }
+
+    public void invalidateBoxCaches() {
+        roughAreaBoxCache = null;
+        if (sideData != null) {
             for (SideData sideDatum : sideData) {
                 if (sideDatum != null) {
                     sideDatum.effectBoxCache = null;
@@ -259,7 +265,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             BlockPos blockPos = this.getBlockPos();
             double expand = 0.001;
             double delta = maxRange + expand;
-            return new AABB(
+            roughAreaBoxCache = new AABB(
                     blockPos.getX() - delta, blockPos.getY() - delta, blockPos.getZ() - delta,
                     blockPos.getX() + 1 + delta, blockPos.getY() + 1 + delta, blockPos.getZ() + 1 + delta
             );
@@ -268,7 +274,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     }
 
     public static void tick(Level world, BlockPos blockPos, BlockState blockState, GravityPlatingBlockEntity be) {
-        if (!(blockState.getBlock() instanceof GravityPlatingBlock gravityPlatingBlock)) {
+        if (!(blockState.getBlock() instanceof GravityPlatingBlock)) {
             return;
         }
 
@@ -277,169 +283,238 @@ public class GravityPlatingBlockEntity extends BlockEntity {
         AABB roughBox = be.getRoughEffectBox();
         AABB searchBox = roughBox;
 
-        // --- VS2 COMPATIBILITY START ---
-        Ship ship = null;
-        try {
-            ship = VSGameUtilsKt.getShipManagingPos(world, blockPos);
-        } catch (Exception e) {
-            // VS2 probably not present or error, ignore
-        }
+        Ship ship = VSGameUtilsKt.getShipManagingPos(world, blockPos);
 
         if (ship != null) {
-            Vector3d min = new Vector3d(roughBox.minX, roughBox.minY, roughBox.minZ);
-            Vector3d max = new Vector3d(roughBox.maxX, roughBox.maxY, roughBox.maxZ);
-
-            Vector3d[] corners = new Vector3d[] {
-                    new Vector3d(min.x, min.y, min.z), new Vector3d(max.x, min.y, min.z),
-                    new Vector3d(min.x, max.y, min.z), new Vector3d(max.x, max.y, min.z),
-                    new Vector3d(min.x, min.y, max.z), new Vector3d(max.x, min.y, max.z),
-                    new Vector3d(min.x, max.y, max.z), new Vector3d(max.x, max.y, max.z)
-            };
-
-            double wMinX = Double.MAX_VALUE, wMinY = Double.MAX_VALUE, wMinZ = Double.MAX_VALUE;
-            double wMaxX = -Double.MAX_VALUE, wMaxY = -Double.MAX_VALUE, wMaxZ = -Double.MAX_VALUE;
-
-            for (Vector3d corner : corners) {
-                ship.getTransform().getShipToWorldMatrix().transformPosition(corner);
-                if (corner.x < wMinX) wMinX = corner.x;
-                if (corner.y < wMinY) wMinY = corner.y;
-                if (corner.z < wMinZ) wMinZ = corner.z;
-                if (corner.x > wMaxX) wMaxX = corner.x;
-                if (corner.y > wMaxY) wMaxY = corner.y;
-                if (corner.z > wMaxZ) wMaxZ = corner.z;
-            }
-
-            searchBox = new AABB(wMinX, wMinY, wMinZ, wMaxX, wMaxY, wMaxZ);
+            searchBox = gravityapivs$shipToWorldBox(ship, roughBox);
         }
-        // --- VS2 COMPATIBILITY END ---
 
         List<Entity> entities = world.getEntitiesOfClass(
                 Entity.class,
                 searchBox,
-                e -> EntityTags.canChangeGravity(e)
+                EntityTags::canChangeGravity
         );
 
         for (Entity entity : entities) {
-            boolean applies = false;
+            // on the client, only the locally controlled entity computes gravity
+            // from fields; remote entities follow the server sync
+            if (world.isClientSide() && !entity.isControlledByLocalInstance() && !GCUtil.isClientPlayer(entity)) {
+                continue;
+            }
 
-            GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponent(entity);
+            GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(entity);
+            if (comp == null) {
+                continue;
+            }
             Vec3 entityGravityDir = comp.getCurrGravityDirectionVec();
+
+            boolean applies = false;
+            Direction bestPlateDir = null;
+            double bestDistance = Double.MAX_VALUE;
 
             for (Direction plateDir : Direction.values()) {
                 SideData sideDatum = be.sideData[plateDir.ordinal()];
-                if (sideDatum != null) {
-                    Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
+                if (sideDatum == null) {
+                    continue;
+                }
 
-                    // 1. Calculate the 'Real' World Direction required
-                    Vec3 worldEffectDir = Vec3.atLowerCornerOf(localEffectDir.getNormal());
-                    if (ship != null) {
-                        Vector3d dirVec = new Vector3d(localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ());
-                        ship.getTransform().getShipToWorldMatrix().transformDirection(dirVec);
-                        worldEffectDir = new Vec3(dirVec.x, dirVec.y, dirVec.z);
-                    }
+                Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
 
-                    boolean isOpposite = (entityGravityDir.normalize().dot(worldEffectDir.normalize()) < -0.99);
+                // the world-space direction this plate wants gravity to point
+                Vec3 worldEffectDir = Vec3.atLowerCornerOf(localEffectDir.getNormal());
+                if (ship != null) {
+                    Vector3d dirVec = new Vector3d(localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ());
+                    ship.getTransform().getShipToWorldMatrix().transformDirection(dirVec);
+                    worldEffectDir = new Vec3(dirVec.x, dirVec.y, dirVec.z);
+                }
 
-                    // VS2 COMPAT: Transform entity position to Ship Space
-                    Vec3 testingPosWorld = isOpposite ? entity.getEyePosition() : entity.position();
-                    Vec3 testingPos;
+                boolean isOpposite = (entityGravityDir.normalize().dot(worldEffectDir.normalize()) < -0.99);
 
-                    if (ship != null) {
-                        Vector3d posJoml = new Vector3d(testingPosWorld.x, testingPosWorld.y, testingPosWorld.z);
-                        ship.getTransform().getWorldToShipMatrix().transformPosition(posJoml);
-                        testingPos = new Vec3(posJoml.x, posJoml.y, posJoml.z);
-                    } else {
-                        testingPos = testingPosWorld;
-                    }
+                // test the eye position when the plate opposes current gravity so the
+                // entity has to actually reach into the field before flipping
+                Vec3 testingPosWorld = isOpposite ? entity.getEyePosition() : entity.position();
+                Vec3 testingPos;
 
-                    AABB gravityEffectBox = sideDatum.getEffectBox(blockPos, plateDir, world);
-                    if (!gravityEffectBox.contains(testingPos)) {
-                        continue;
-                    }
+                if (ship != null) {
+                    Vector3d posJoml = new Vector3d(testingPosWorld.x, testingPosWorld.y, testingPosWorld.z);
+                    ship.getTransform().getWorldToShipMatrix().transformPosition(posJoml);
+                    testingPos = new Vec3(posJoml.x, posJoml.y, posJoml.z);
+                } else {
+                    testingPos = testingPosWorld;
+                }
 
-                    Vec3 plateDirVec = Vec3.atLowerCornerOf(plateDir.getNormal());
-                    Vec3 effectCenter = Vec3.atCenterOf(blockPos).add(plateDirVec.scale(0.5));
+                AABB gravityEffectBox = sideDatum.getEffectBox(blockPos, plateDir, world);
+                if (!gravityEffectBox.contains(testingPos)) {
+                    continue;
+                }
 
-                    double adjustment = 1.0;
-                    Vec3 effectCenterAdjusted = effectCenter.add(plateDirVec.scale(-adjustment));
+                Vec3 plateDirVec = Vec3.atLowerCornerOf(plateDir.getNormal());
+                Vec3 effectCenter = Vec3.atCenterOf(blockPos).add(plateDirVec.scale(0.5));
 
-                    Vec3 deltaVec = testingPos.subtract(effectCenterAdjusted);
+                double adjustment = 1.0;
+                Vec3 effectCenterAdjusted = effectCenter.add(plateDirVec.scale(-adjustment));
 
-                    double distanceToPlane = -deltaVec.dot(plateDirVec);
-                    if (distanceToPlane < -adjustment - 0.001) {
-                        continue;
-                    }
+                Vec3 deltaVec = testingPos.subtract(effectCenterAdjusted);
 
-                    Vec3 localVec = RotationUtil.vecWorldToPlayer(deltaVec, plateDir);
-                    double dx = GCUtil.distanceToRange(localVec.x, -0.5, 0.5);
-                    double dz = GCUtil.distanceToRange(localVec.z, -0.5, 0.5);
-                    double distanceToPlate = Math.sqrt(dx * dx + dz * dz + distanceToPlane * distanceToPlane);
+                double distanceToPlane = -deltaVec.dot(plateDirVec);
+                if (distanceToPlane < -adjustment - 0.001) {
+                    continue;
+                }
 
-                    double priority = 1000 - distanceToPlate;
-                    if (isOpposite) {
-                        priority -= 10;
-                    }
-                    comp.applyGravityDirectionEffect(
-                            worldEffectDir, PLATING_ROTATION_PARAMS, priority
-                    );
-                    applies = true;
+                Vec3 localVec = RotationUtil.vecWorldToPlayer(deltaVec, plateDir);
+                double dx = GCUtil.distanceToRange(localVec.x, -0.5, 0.5);
+                double dz = GCUtil.distanceToRange(localVec.z, -0.5, 0.5);
+                double distanceToPlate = Math.sqrt(dx * dx + dz * dz + distanceToPlane * distanceToPlane);
 
-                    // --- ARTIFICIAL GRAVITY FORCE (Fix for Space) ---
-                    // CHECK: Are we in one of the specific Zero-G dimensions?
-                    String currentDim = world.dimension().location().toString();
+                double priority = 1000 - distanceToPlate;
+                if (isOpposite) {
+                    priority -= 10;
+                }
+                comp.applyGravityDirectionEffect(
+                        worldEffectDir, PLATING_ROTATION_PARAMS, priority
+                );
+                applies = true;
 
-                    if (ARTIFICIAL_GRAVITY_DIMS.contains(currentDim)) {
-                        // 1. Get local gravity vector (e.g. 0, -1, 0)
-                        Vector3d artificialGravity = new Vector3d(
-                                localEffectDir.getStepX(),
-                                localEffectDir.getStepY(),
-                                localEffectDir.getStepZ()
-                        );
-
-                        // 2. Transform to World Space (handles ship rotation)
-                        if (ship != null) {
-                            ship.getTransform().getShipToWorldMatrix().transformDirection(artificialGravity);
-                        }
-
-                        // 3. Scale by Standard Gravity Strength (approx 0.08 blocks/tick)
-                        artificialGravity.mul(0.08);
-
-                        // 4. Add to current velocity
-                        Vec3 currentVel = GravityChangerAPI.getWorldVelocity(entity);
-                        GravityChangerAPI.setWorldVelocity(
-                                entity,
-                                currentVel.add(artificialGravity.x, artificialGravity.y, artificialGravity.z)
-                        );
-                    }
-                    // ----------------------------------------------------
-
-                    // --- VS2 COMPAT: ANTI-SLIDE LOGIC ---
-                    if (ship != null && entity instanceof LivingEntity living) {
-                        if (Math.abs(living.xxa) < 0.01 && Math.abs(living.zza) < 0.01) {
-                            Vec3 worldVel = GravityChangerAPI.getWorldVelocity(entity);
-                            Vector3d shipVel = new Vector3d(worldVel.x, worldVel.y, worldVel.z);
-                            ship.getTransform().getWorldToShipMatrix().transformDirection(shipVel);
-
-                            Vector3d plateNormal = new Vector3d(plateDir.getStepX(), plateDir.getStepY(), plateDir.getStepZ());
-                            double dot = shipVel.dot(plateNormal);
-
-                            shipVel.set(plateNormal).mul(dot);
-
-                            ship.getTransform().getShipToWorldMatrix().transformDirection(shipVel);
-                            GravityChangerAPI.setWorldVelocity(entity, new Vec3(shipVel.x, shipVel.y, shipVel.z));
-                        }
-                    }
-                    // --- END ANTI-SLIDE ---
+                if (distanceToPlate < bestDistance) {
+                    bestDistance = distanceToPlate;
+                    bestPlateDir = plateDir;
                 }
             }
 
-            if (applies && GravityConfig.autoJumpOnGravityPlateInnerCorner.get()) {
+            if (!applies) {
+                continue;
+            }
+
+            // velocity writes: only on the side that controls this entity
+            boolean controlsEntity = world.isClientSide()
+                ? entity.isControlledByLocalInstance()
+                : !(entity instanceof Player);
+
+            if (controlsEntity && bestPlateDir != null) {
+                gravityapivs$applyArtificialGravityForce(world, ship, be, bestPlateDir, entity, comp);
+                gravityapivs$applyShipFriction(ship, be, bestPlateDir, entity);
+            }
+
+            if (controlsEntity && GravityConfig.autoJumpOnGravityPlateInnerCorner.get()) {
                 tryToDoCornerAutoJump(blockState, blockPos, entity, comp, ship);
             }
         }
     }
 
-    // Updated signature to accept Ship
+    private static AABB gravityapivs$shipToWorldBox(Ship ship, AABB box) {
+        Vector3d[] corners = new Vector3d[] {
+                new Vector3d(box.minX, box.minY, box.minZ), new Vector3d(box.maxX, box.minY, box.minZ),
+                new Vector3d(box.minX, box.maxY, box.minZ), new Vector3d(box.maxX, box.maxY, box.minZ),
+                new Vector3d(box.minX, box.minY, box.maxZ), new Vector3d(box.maxX, box.minY, box.maxZ),
+                new Vector3d(box.minX, box.maxY, box.maxZ), new Vector3d(box.maxX, box.maxY, box.maxZ)
+        };
+
+        double wMinX = Double.MAX_VALUE, wMinY = Double.MAX_VALUE, wMinZ = Double.MAX_VALUE;
+        double wMaxX = -Double.MAX_VALUE, wMaxY = -Double.MAX_VALUE, wMaxZ = -Double.MAX_VALUE;
+
+        for (Vector3d corner : corners) {
+            ship.getTransform().getShipToWorldMatrix().transformPosition(corner);
+            if (corner.x < wMinX) wMinX = corner.x;
+            if (corner.y < wMinY) wMinY = corner.y;
+            if (corner.z < wMinZ) wMinZ = corner.z;
+            if (corner.x > wMaxX) wMaxX = corner.x;
+            if (corner.y > wMaxY) wMaxY = corner.y;
+            if (corner.z > wMaxZ) wMaxZ = corner.z;
+        }
+
+        return new AABB(wMinX, wMinY, wMinZ, wMaxX, wMaxY, wMaxZ);
+    }
+
+    /**
+     * In configured zero-g dimensions the field also accelerates the entity
+     * (vanilla gravity is absent there). Scaled by the entity's gravity strength
+     * so it agrees with normal gravity handling.
+     */
+    private static void gravityapivs$applyArtificialGravityForce(
+            Level world, @Nullable Ship ship, GravityPlatingBlockEntity be,
+            Direction plateDir, Entity entity, GravityCapabilityImpl comp
+    ) {
+        String currentDim = world.dimension().location().toString();
+        if (!GravityConfig.artificialGravityDimensions.get().contains(currentDim)) {
+            return;
+        }
+
+        SideData sideDatum = be.sideData[plateDir.ordinal()];
+        if (sideDatum == null) {
+            return;
+        }
+        Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
+
+        Vector3d accel = new Vector3d(
+                localEffectDir.getStepX(),
+                localEffectDir.getStepY(),
+                localEffectDir.getStepZ()
+        );
+        if (ship != null) {
+            ship.getTransform().getShipToWorldMatrix().transformDirection(accel);
+        }
+
+        accel.mul(GravityConfig.artificialGravityAcceleration.get() * comp.getCurrGravityStrength());
+
+        Vec3 currentVel = GravityChangerAPI.getWorldVelocity(entity);
+        // crude terminal velocity so stacked fields cannot accelerate indefinitely
+        Vec3 gravityDir = comp.getCurrGravityDirectionVec();
+        if (currentVel.dot(gravityDir) < 3.0) {
+            GravityChangerAPI.setWorldVelocity(
+                    entity,
+                    currentVel.add(accel.x, accel.y, accel.z)
+            );
+        }
+    }
+
+    /**
+     * Extra grip when standing on a moving/rotating ship: damp the entity's
+     * velocity *relative to the ship surface* tangentially to the plate. Never
+     * zeroes momentum outright and never fights the ship's own motion.
+     */
+    private static void gravityapivs$applyShipFriction(
+            @Nullable Ship ship, GravityPlatingBlockEntity be, Direction plateDir, Entity entity
+    ) {
+        if (ship == null || !(entity instanceof LivingEntity living)) {
+            return;
+        }
+        if (entity instanceof Player) {
+            // players use capsule collision + ship-surface drag instead
+            return;
+        }
+        if (!entity.onGround()) {
+            return;
+        }
+        // only when the entity is not trying to move
+        if (Math.abs(living.xxa) > 0.01 || Math.abs(living.zza) > 0.01) {
+            return;
+        }
+
+        // velocity of the ship surface at the entity's position
+        Vector3d shipVelocity = new Vector3d(ship.getVelocity());
+        Vector3d omega = new Vector3d(ship.getOmega());
+        Vector3d r = new Vector3d(entity.getX(), entity.getY(), entity.getZ())
+                .sub(ship.getTransform().getPositionInWorld());
+        Vector3d surfaceVel = omega.cross(r, new Vector3d()).add(shipVelocity);
+
+        Vec3 worldVel = GravityChangerAPI.getWorldVelocity(entity);
+        Vector3d relVel = new Vector3d(worldVel.x, worldVel.y, worldVel.z).sub(surfaceVel);
+
+        // plate normal in world space
+        Vector3d normal = new Vector3d(plateDir.getStepX(), plateDir.getStepY(), plateDir.getStepZ());
+        ship.getTransform().getShipToWorldMatrix().transformDirection(normal);
+        normal.normalize();
+
+        double normalComponent = relVel.dot(normal);
+        Vector3d tangential = new Vector3d(relVel).sub(new Vector3d(normal).mul(normalComponent));
+
+        // damp tangential slip instead of zeroing it (keeps knockback/jumps alive)
+        tangential.mul(0.5);
+
+        Vector3d newVel = new Vector3d(normal).mul(normalComponent).add(tangential).add(surfaceVel);
+        GravityChangerAPI.setWorldVelocity(entity, new Vec3(newVel.x, newVel.y, newVel.z));
+    }
+
     private static void tryToDoCornerAutoJump(
             BlockState blockState, BlockPos blockPos,
             Entity entity, GravityCapabilityImpl comp, @Nullable Ship ship
@@ -450,7 +525,6 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
         Direction entityGravityDir = comp.getCurrGravityDirection();
 
-        // VS2 COMPAT: Get Local Position
         Vec3 entityPosLocal;
         if (ship != null) {
             Vector3d posJoml = new Vector3d(entity.getX(), entity.getY(), entity.getZ());
@@ -471,7 +545,6 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
                 Vec3 effectCenter = Vec3.atCenterOf(blockPos).add(plateDirVec.scale(0.5));
 
-                // VS2 COMPAT: Use entityPosLocal
                 Vec3 offset = effectCenter.subtract(entityPosLocal);
                 if (offset.dot(Vec3.atLowerCornerOf(entityGravityDir.getNormal())) > 0) {
                     continue;
@@ -479,12 +552,10 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
                 Vec3 worldVelocity = GravityChangerAPI.getWorldVelocity(entity);
 
-                // Note: We are comparing world velocity to plate direction.
-                // On a ship, plateDirVec is Ship Local. worldVelocity is World Global.
-                // Strictly speaking, we should transform worldVelocity to Ship Local too.
+                // compare velocity to the plate direction in ship-local space
                 if (ship != null) {
                     Vector3d velJoml = new Vector3d(worldVelocity.x, worldVelocity.y, worldVelocity.z);
-                    ship.getTransform().getWorldToShipMatrix().transformDirection(velJoml); // Direction, not Position
+                    ship.getTransform().getWorldToShipMatrix().transformDirection(velJoml);
                     worldVelocity = new Vec3(velJoml.x, velJoml.y, velJoml.z);
                 }
 
@@ -492,7 +563,6 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                     continue;
                 }
 
-                // VS2 COMPAT: Use entityPosLocal
                 double distanceToPlate = Math.abs(entityPosLocal.subtract(effectCenter).dot(plateDirVec));
                 if (distanceToPlate < 0.8) {
                     double strengthSqrt = Math.sqrt(comp.getCurrGravityStrength());
@@ -503,8 +573,8 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                             entityGravityVec.scale(-strengthSqrt * 0.4)
                                     .add(plateDirVec.scale(0.08));
 
-                    // Note: If on ship, we calculated deltaWorldVelocity in Ship Local space.
-                    // We must transform it back to World Global to apply it to the entity.
+                    // deltaWorldVelocity was computed in ship-local space; transform
+                    // back to world space before applying
                     if (ship != null) {
                         Vector3d deltaJoml = new Vector3d(deltaWorldVelocity.x, deltaWorldVelocity.y, deltaWorldVelocity.z);
                         ship.getTransform().getShipToWorldMatrix().transformDirection(deltaJoml);
@@ -548,28 +618,31 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             }
         }
         else if (handItem.getItem() == Items.AMETHYST_CLUSTER) {
+            if (sideDatum.level >= maxLevel()) {
+                player.displayClientMessage(
+                        Component.translatable("gravity_changer.plate.max_level"), true
+                );
+                return InteractionResult.FAIL;
+            }
+
             if (!player.isCreative()) {
                 handItem.shrink(1);
             }
 
             sideDatum.level += 1;
-
-            if (sideDatum.level > MAX_LEVEL) {
-                sideDatum.level = MAX_LEVEL;
-            }
         }
         else {
-            ((ServerPlayer) player).sendSystemMessage(
-                    Component.translatable("gravity_changer.plate.wrong_interaction"),
-                    true
+            player.displayClientMessage(
+                    Component.translatable("gravity_changer.plate.wrong_interaction"), true
             );
             return InteractionResult.FAIL;
         }
 
+        invalidateBoxCaches();
         sync();
 
         boolean isAttracting = sideDatum.isAttracting;
-        ((ServerPlayer) player).sendSystemMessage(
+        player.displayClientMessage(
                 Component.translatable(
                         "gravity_changer.plate.status",
                         GCUtil.getDirectionText(plateDir.getOpposite()),
@@ -601,6 +674,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     public void onPlacing(Direction side, SideData sideData) {
         refreshCache();
         this.sideData[side.ordinal()] = sideData;
+        invalidateBoxCaches();
         sync();
     }
 

@@ -41,6 +41,10 @@ public abstract class EntityRenderDispatcherMixin {
     
     @Shadow
     private boolean shouldRenderShadow;
+
+    // whether inject_render_0 pushed a pose, so the pop stays balanced
+    @org.spongepowered.asm.mixin.Unique
+    private boolean gravityapivs$pushedPose = false;
     
     @Shadow
     private static void shadowVertex(PoseStack.Pose entry, VertexConsumer vertices, float alpha, float x, float y, float z, float u, float v) {}
@@ -55,17 +59,18 @@ public abstract class EntityRenderDispatcherMixin {
         )
     )
     private void inject_render_0(Entity entity, double x, double y, double z, float yaw, float tickDelta, PoseStack matrices, MultiBufferSource vertexConsumers, int light, CallbackInfo ci) {
+        gravityapivs$pushedPose = false;
         if (!(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
-            Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
-            if (!this.shouldRenderShadow) return;
-            
-            matrices.pushPose();
-            RotationAnimation animation = GravityChangerAPI.getRotationAnimation(entity);
-            if (animation == null) {
+            net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
+                GravityChangerAPI.getGravityComponentOrNull(entity);
+            if (comp == null || comp.isVisuallyDefault()) {
                 return;
             }
-            long timeMs = entity.level().getGameTime() * 50 + (long) (tickDelta * 50);
-            matrices.mulPose(new Quaternionf(animation.getCurrentGravityRotation(gravityDirection, timeMs)).conjugate());
+
+            // the model follows the smooth visual frame
+            matrices.pushPose();
+            gravityapivs$pushedPose = true;
+            matrices.mulPose(new Quaternionf(comp.getRenderRotation(tickDelta)).conjugate());
         }
     }
     
@@ -78,9 +83,8 @@ public abstract class EntityRenderDispatcherMixin {
         )
     )
     private void inject_render_1(Entity entity, double x, double y, double z, float yaw, float tickDelta, PoseStack matrices, MultiBufferSource vertexConsumers, int light, CallbackInfo ci) {
-        if (!(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
-            if (!this.shouldRenderShadow) return;
-            
+        if (gravityapivs$pushedPose) {
+            gravityapivs$pushedPose = false;
             matrices.popPose();
         }
     }
@@ -96,11 +100,16 @@ public abstract class EntityRenderDispatcherMixin {
     )
     private void inject_render_2(Entity entity, double x, double y, double z, float yaw, float tickDelta, PoseStack matrices, MultiBufferSource vertexConsumers, int light, CallbackInfo ci) {
         if (!(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
-            Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
-            if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-            if (!this.shouldRenderShadow) return;
-            
-            matrices.mulPose(RotationUtil.getWorldRotationQuaternion(gravityDirection));
+            net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
+                GravityChangerAPI.getGravityComponentOrNull(entity);
+            if (comp == null || comp.isDefault()) return;
+
+            // Shadow and hitbox rendering below supply player-space coordinates
+            // (computed with the PHYSICS frame), so the pose must apply the
+            // player->world rotation, i.e. the CONJUGATE of the frame. Using the
+            // frame itself double-rotates and made F3+B hitboxes appear inside
+            // walls for 90-degree gravity directions.
+            matrices.mulPose(new Quaternionf(comp.getCurrentRotation()).conjugate());
         }
     }
     
@@ -110,48 +119,53 @@ public abstract class EntityRenderDispatcherMixin {
         cancellable = true
     )
     private static void inject_renderShadow(PoseStack matrices, MultiBufferSource vertexConsumers, Entity entity, float opacity, float tickDelta, LevelReader world, float radius, CallbackInfo ci) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) return;
-        
+        net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
+            GravityChangerAPI.getGravityComponentOrNull(entity);
+        if (comp == null || comp.isDefault()) return;
+        // the shadow is anchored to the physics frame, matching the pose applied
+        // in inject_render_2
+        Quaternionf gravityRotation = comp.getCurrentRotation();
+        Vec3 gravityDirection = comp.getCurrGravityDirectionVec();
+
         ci.cancel();
-        
+
         double x = Mth.lerp(tickDelta, entity.xOld, entity.getX());
         double y = Mth.lerp(tickDelta, entity.yOld, entity.getY());
         double z = Mth.lerp(tickDelta, entity.zOld, entity.getZ());
-        Vec3 minShadowPos = RotationUtil.vecPlayerToWorld((double) -radius, (double) -radius, (double) -radius, gravityDirection).add(x, y, z);
-        Vec3 maxShadowPos = RotationUtil.vecPlayerToWorld((double) radius, 0.0D, (double) radius, gravityDirection).add(x, y, z);
+        Vec3 minShadowPos = RotationUtil.vecPlayerToWorld((double) -radius, (double) -radius, (double) -radius, gravityRotation).add(x, y, z);
+        Vec3 maxShadowPos = RotationUtil.vecPlayerToWorld((double) radius, 0.0D, (double) radius, gravityRotation).add(x, y, z);
         PoseStack.Pose entry = matrices.last();
         VertexConsumer vertexConsumer = vertexConsumers.getBuffer(SHADOW_RENDER_TYPE);
-        
+
         for (BlockPos blockPos : BlockPos.betweenClosed(BlockPos.containing(minShadowPos), BlockPos.containing(maxShadowPos))) {
-            gravitychanger$renderShadowPartPlayer(entry, vertexConsumer, world, blockPos, x, y, z, radius, opacity, gravityDirection);
+            gravitychanger$renderShadowPartPlayer(entry, vertexConsumer, world, blockPos, x, y, z, radius, opacity, gravityDirection, gravityRotation);
         }
     }
-    
-    private static void gravitychanger$renderShadowPartPlayer(PoseStack.Pose entry, VertexConsumer vertices, LevelReader world, BlockPos pos, double x, double y, double z, float radius, float opacity, Vec3 gravityDirection) {
+
+    private static void gravitychanger$renderShadowPartPlayer(PoseStack.Pose entry, VertexConsumer vertices, LevelReader world, BlockPos pos, double x, double y, double z, float radius, float opacity, Vec3 gravityDirection, Quaternionf gravityRotation) {
         BlockPos posBelow = pos.relative(Direction.getNearest(gravityDirection.x, gravityDirection.y, gravityDirection.z));
         BlockState blockStateBelow = world.getBlockState(posBelow);
         if (blockStateBelow.getRenderShape() != RenderShape.INVISIBLE && world.getMaxLocalRawBrightness(pos) > 3) {
             if (blockStateBelow.isCollisionShapeFullBlock(world, posBelow)) {
                 VoxelShape voxelShape = blockStateBelow.getShape(world, posBelow);
                 if (!voxelShape.isEmpty()) {
-                    Vec3 playerPos = RotationUtil.vecWorldToPlayer(x, y, z, gravityDirection);
-                    float alpha = (float) (((double) opacity - (playerPos.y - (RotationUtil.vecWorldToPlayer(Vec3.atCenterOf(pos), gravityDirection).y - 0.5D)) / 2.0D) * 0.5D * (double) world.getLightLevelDependentMagicValue(pos));
+                    Vec3 playerPos = RotationUtil.vecWorldToPlayer(x, y, z, gravityRotation);
+                    float alpha = (float) (((double) opacity - (playerPos.y - (RotationUtil.vecWorldToPlayer(Vec3.atCenterOf(pos), gravityRotation).y - 0.5D)) / 2.0D) * 0.5D * (double) world.getLightLevelDependentMagicValue(pos));
                     if (alpha >= 0.0F) {
                         if (alpha > 1.0F) {
                             alpha = 1.0F;
                         }
                         
                         Vec3 centerPos = Vec3.atCenterOf(pos);
-                        Vec3 playerCenterPos = RotationUtil.vecWorldToPlayer(centerPos, gravityDirection);
+                        Vec3 playerCenterPos = RotationUtil.vecWorldToPlayer(centerPos, gravityRotation);
                         
                         Vec3 playerRelNN = playerCenterPos.add(-0.5D, -0.5D, -0.5D).subtract(playerPos);
                         Vec3 playerRelPP = playerCenterPos.add(0.5D, -0.5D, 0.5D).subtract(playerPos);
                         
-                        Vec3 relNN = RotationUtil.vecWorldToPlayer(centerPos.add(RotationUtil.vecPlayerToWorld(-0.5D, -0.5D, -0.5D, gravityDirection)).subtract(x, y, z), gravityDirection);
-                        Vec3 relNP = RotationUtil.vecWorldToPlayer(centerPos.add(RotationUtil.vecPlayerToWorld(-0.5D, -0.5D, 0.5D, gravityDirection)).subtract(x, y, z), gravityDirection);
-                        Vec3 relPN = RotationUtil.vecWorldToPlayer(centerPos.add(RotationUtil.vecPlayerToWorld(0.5D, -0.5D, -0.5D, gravityDirection)).subtract(x, y, z), gravityDirection);
-                        Vec3 relPP = RotationUtil.vecWorldToPlayer(centerPos.add(RotationUtil.vecPlayerToWorld(0.5D, -0.5D, 0.5D, gravityDirection)).subtract(x, y, z), gravityDirection);
+                        Vec3 relNN = RotationUtil.vecWorldToPlayer(centerPos.add(RotationUtil.vecPlayerToWorld(-0.5D, -0.5D, -0.5D, gravityRotation)).subtract(x, y, z), gravityRotation);
+                        Vec3 relNP = RotationUtil.vecWorldToPlayer(centerPos.add(RotationUtil.vecPlayerToWorld(-0.5D, -0.5D, 0.5D, gravityRotation)).subtract(x, y, z), gravityRotation);
+                        Vec3 relPN = RotationUtil.vecWorldToPlayer(centerPos.add(RotationUtil.vecPlayerToWorld(0.5D, -0.5D, -0.5D, gravityRotation)).subtract(x, y, z), gravityRotation);
+                        Vec3 relPP = RotationUtil.vecWorldToPlayer(centerPos.add(RotationUtil.vecPlayerToWorld(0.5D, -0.5D, 0.5D, gravityRotation)).subtract(x, y, z), gravityRotation);
                         
                         float minU = -(float) playerRelNN.x / 2.0F / radius + 0.5F;
                         float maxU = -(float) playerRelPP.x / 2.0F / radius + 0.5F;
@@ -178,12 +192,11 @@ public abstract class EntityRenderDispatcherMixin {
         ordinal = 0
     )
     private static AABB modify_renderHitbox_Box_0(AABB box, PoseStack matrices, VertexConsumer vertices, Entity entity, float tickDelta) {
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(entity);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) {
+        if (GravityChangerAPI.isGravityDefault(entity)) {
             return box;
         }
-        
-        return RotationUtil.boxWorldToPlayer(box, gravityDirection);
+
+        return RotationUtil.boxWorldToPlayer(box, GravityChangerAPI.getGravityRotation(entity));
     }
     
     @Redirect(
@@ -196,11 +209,10 @@ public abstract class EntityRenderDispatcherMixin {
     )
     private static Vec3 redirectViewVector(Entity instance, float partialTicks) {
         Vec3 viewVector = instance.getViewVector(partialTicks);
-        Vec3 gravityDirection = GravityChangerAPI.getGravityDirectionVec(instance);
-        if (gravityDirection.equals(new Vec3(0, -1, 0))) {
+        if (GravityChangerAPI.isGravityDefault(instance)) {
             return viewVector;
         }
-        
-        return RotationUtil.vecWorldToPlayer(viewVector, gravityDirection);
+
+        return RotationUtil.vecWorldToPlayer(viewVector, GravityChangerAPI.getGravityRotation(instance));
     }
 }

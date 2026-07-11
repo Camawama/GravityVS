@@ -28,9 +28,8 @@ public abstract class ServerPlayerMixin_FallDistance {
     )
     private void wrapCheckFallDamage(ServerPlayer instance, double v, boolean b, BlockState blockState, BlockPos blockPos, Operation<Void> original, @Local(ordinal = 0) double dx, @Local(ordinal = 1) double dy, @Local(ordinal = 2) double dz) {
         ServerPlayer this_ = (ServerPlayer) (Object) this;
-        Direction gravity = GravityChangerAPI.getGravityDirection(this_);
 
-        Vec3 localVec = RotationUtil.vecWorldToPlayer(dx, dy, dz, gravity);
+        Vec3 localVec = RotationUtil.vecWorldToPlayer(dx, dy, dz, GravityChangerAPI.getMovementRotation(this_));
         original.call(instance, localVec.y(), b, blockState, blockPos);
     }
     

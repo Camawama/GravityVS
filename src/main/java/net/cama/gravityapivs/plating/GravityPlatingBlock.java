@@ -121,6 +121,7 @@ public class GravityPlatingBlock extends BaseEntityBlock {
         stateManager.add(UP, DOWN, NORTH, SOUTH, EAST, WEST);
     }
     
+    @Override
     public BlockState updateShape(BlockState state, Direction direction, BlockState neighborState, LevelAccessor world, BlockPos pos, BlockPos neighborPos) {
         if (hasDir(state, direction) && !canPlaceOn(world, pos.relative(direction), direction.getOpposite())) {
             state = state.setValue(directionToProperty(direction), false);
@@ -179,10 +180,9 @@ public class GravityPlatingBlock extends BaseEntityBlock {
     
     @Override
     public <T extends BlockEntity> BlockEntityTicker<T> getTicker(Level world, BlockState state, BlockEntityType<T> type) {
-        if (world.isClientSide)
-            return createTickerHelper(type, GravityBlocks.GRAVITY_PLATING_BLOCK_ENTITY.get(), GravityPlatingBlockEntity::tick);
-        else
-            return createTickerHelper(type, GravityBlocks.GRAVITY_PLATING_BLOCK_ENTITY.get(), GravityPlatingBlockEntity::tick);
+        // ticks on both sides: the server is authoritative for non-player entities,
+        // the client computes the locally controlled player's gravity
+        return createTickerHelper(type, GravityBlocks.GRAVITY_PLATING_BLOCK_ENTITY.get(), GravityPlatingBlockEntity::tick);
     }
     
     @Override
@@ -217,6 +217,9 @@ public class GravityPlatingBlock extends BaseEntityBlock {
         if (directions.size() > 1) {
             for (Direction dir : getDirections(world.getBlockState(pos))) {
                 directions.remove(dir);
+            }
+            if (directions.isEmpty()) {
+                return false;
             }
             return canPlaceOn(world, pos.relative(directions.get(0)), directions.get(0).getOpposite());
         }

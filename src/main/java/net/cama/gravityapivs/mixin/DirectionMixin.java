@@ -23,12 +23,11 @@ public abstract class DirectionMixin {
         )
     )
     private static float wrapOperation_getEntityFacingOrder_getYaw_0(Entity entity, float tickDelta, Operation<Float> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isAimDefault(entity)) {
             return original.call(entity, tickDelta);
         }
-        
-        return RotationUtil.rotPlayerToWorld(original.call(entity, tickDelta), entity.getViewXRot(tickDelta), gravityDirection).x;
+
+        return RotationUtil.rotPlayerToWorld(original.call(entity, tickDelta), entity.getViewXRot(tickDelta), GravityChangerAPI.getAimRotation(entity)).x;
     }
     
     @WrapOperation(
@@ -40,12 +39,11 @@ public abstract class DirectionMixin {
         )
     )
     private static float wrapOperation_getEntityFacingOrder_getPitch_0(Entity entity, float tickDelta, Operation<Float> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isAimDefault(entity)) {
             return original.call(entity, tickDelta);
         }
-        
-        return RotationUtil.rotPlayerToWorld(entity.getViewYRot(tickDelta), original.call(entity, tickDelta), gravityDirection).y;
+
+        return RotationUtil.rotPlayerToWorld(entity.getViewYRot(tickDelta), original.call(entity, tickDelta), GravityChangerAPI.getAimRotation(entity)).y;
     }
     
     @WrapOperation(
@@ -57,12 +55,11 @@ public abstract class DirectionMixin {
         )
     )
     private static float wrapOperation_getLookDirectionForAxis_getYaw_0(Entity entity, float tickDelta, Operation<Float> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isAimDefault(entity)) {
             return original.call(entity, tickDelta);
         }
-        
-        return RotationUtil.rotPlayerToWorld(original.call(entity, tickDelta), entity.getViewXRot(tickDelta), gravityDirection).x;
+
+        return RotationUtil.rotPlayerToWorld(original.call(entity, tickDelta), entity.getViewXRot(tickDelta), GravityChangerAPI.getAimRotation(entity)).x;
     }
     
     @WrapOperation(
@@ -74,12 +71,11 @@ public abstract class DirectionMixin {
         )
     )
     private static float wrapOperation_getLookDirectionForAxis_getYaw_1(Entity entity, float tickDelta, Operation<Float> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isAimDefault(entity)) {
             return original.call(entity, tickDelta);
         }
-        
-        return RotationUtil.rotPlayerToWorld(original.call(entity, tickDelta), entity.getViewXRot(tickDelta), gravityDirection).x;
+
+        return RotationUtil.rotPlayerToWorld(original.call(entity, tickDelta), entity.getViewXRot(tickDelta), GravityChangerAPI.getAimRotation(entity)).x;
     }
     
     @WrapOperation(
@@ -91,11 +87,10 @@ public abstract class DirectionMixin {
         )
     )
     private static float wrapOperation_getLookDirectionForAxis_getPitch_0(Entity entity, float tickDelta, Operation<Float> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        if (GravityChangerAPI.isAimDefault(entity)) {
             return original.call(entity, tickDelta);
         }
-        
-        return RotationUtil.rotPlayerToWorld(entity.getViewYRot(tickDelta), original.call(entity, tickDelta), gravityDirection).y;
+
+        return RotationUtil.rotPlayerToWorld(entity.getViewYRot(tickDelta), original.call(entity, tickDelta), GravityChangerAPI.getAimRotation(entity)).y;
     }
 }

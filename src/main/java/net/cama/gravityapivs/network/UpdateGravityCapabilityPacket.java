@@ -3,16 +3,17 @@ package net.cama.gravityapivs.network;
 import java.util.UUID;
 import java.util.function.Supplier;
 
+import org.joml.Quaternionf;
+
 import net.cama.gravityapivs.capabilities.GravityCapabilities;
 import net.cama.gravityapivs.util.GCUtil;
 
-import net.minecraft.core.Direction;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkEvent;
 
-public class UpdateGravityCapabilityPacket 
+public class UpdateGravityCapabilityPacket
 {
 	private final UUID entityUUID;
 	private final boolean noAnimation;
@@ -20,8 +21,9 @@ public class UpdateGravityCapabilityPacket
 	private final Vec3 currentGravityDirection;
 	private final double baseGravityStrength;
 	private final double currentGravityStrength;
-	
-	public UpdateGravityCapabilityPacket(boolean noAnimation, UUID entityUUID, Vec3 baseGravityDirection, Vec3 currentGravityDirection, double baseGravityStrength, double currentGravityStrength) 
+	private final Quaternionf rotation;
+
+	public UpdateGravityCapabilityPacket(boolean noAnimation, UUID entityUUID, Vec3 baseGravityDirection, Vec3 currentGravityDirection, double baseGravityStrength, double currentGravityStrength, Quaternionf rotation)
 	{
 		this.noAnimation = noAnimation;
 		this.entityUUID = entityUUID;
@@ -29,6 +31,7 @@ public class UpdateGravityCapabilityPacket
 		this.currentGravityDirection = currentGravityDirection;
 		this.baseGravityStrength = baseGravityStrength;
 		this.currentGravityStrength = currentGravityStrength;
+		this.rotation = rotation;
 	}
 
 	public UpdateGravityCapabilityPacket(FriendlyByteBuf buf)
@@ -39,6 +42,7 @@ public class UpdateGravityCapabilityPacket
 		this.currentGravityDirection = new Vec3(buf.readDouble(), buf.readDouble(), buf.readDouble());
 		this.baseGravityStrength = buf.readDouble();
 		this.currentGravityStrength = buf.readDouble();
+		this.rotation = new Quaternionf(buf.readFloat(), buf.readFloat(), buf.readFloat(), buf.readFloat());
 	}
 
 	public void encode(FriendlyByteBuf buf)
@@ -53,11 +57,15 @@ public class UpdateGravityCapabilityPacket
 		buf.writeDouble(this.currentGravityDirection.z);
 		buf.writeDouble(this.baseGravityStrength);
 		buf.writeDouble(this.currentGravityStrength);
+		buf.writeFloat(this.rotation.x());
+		buf.writeFloat(this.rotation.y());
+		buf.writeFloat(this.rotation.z());
+		buf.writeFloat(this.rotation.w());
 	}
-	
-	public static class Handler 
+
+	public static class Handler
 	{
-		public static boolean onMessage(UpdateGravityCapabilityPacket message, Supplier<NetworkEvent.Context> ctx) 
+		public static boolean onMessage(UpdateGravityCapabilityPacket message, Supplier<NetworkEvent.Context> ctx)
 		{
 			ctx.get().enqueueWork(() ->
 			{
@@ -66,9 +74,15 @@ public class UpdateGravityCapabilityPacket
 					GCUtil.getClientLevel(level ->
 					{
 						Entity entity = GCUtil.getEntityByUUID(level, message.entityUUID);
-						entity.getCapability(GravityCapabilities.GRAVITY).ifPresent(cap -> 
+						if(entity == null)
 						{
-							cap.sync(message.noAnimation, message.baseGravityDirection, message.currentGravityDirection, message.baseGravityStrength, message.currentGravityStrength);
+							// the entity has not been spawned on this client yet;
+							// it will receive its state from the start-tracking sync
+							return;
+						}
+						entity.getCapability(GravityCapabilities.GRAVITY).ifPresent(cap ->
+						{
+							cap.sync(message.noAnimation, message.baseGravityDirection, message.currentGravityDirection, message.baseGravityStrength, message.currentGravityStrength, message.rotation);
 						});
 					});
 				}

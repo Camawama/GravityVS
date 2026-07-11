@@ -1,22 +1,40 @@
 package net.cama.gravityapivs.event;
 
-import com.google.common.eventbus.Subscribe;
 import net.cama.gravityapivs.GravityAPI;
 import net.cama.gravityapivs.command.DirectionArgumentType;
 import net.cama.gravityapivs.command.LocalDirectionArgumentType;
 
+import net.minecraft.commands.synchronization.ArgumentTypeInfo;
 import net.minecraft.commands.synchronization.ArgumentTypeInfos;
 import net.minecraft.commands.synchronization.SingletonArgumentInfo;
-import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
+import net.minecraftforge.registries.DeferredRegister;
+import net.minecraftforge.registries.ForgeRegistries;
+import net.minecraftforge.registries.RegistryObject;
 
-@Mod.EventBusSubscriber(bus = Mod.EventBusSubscriber.Bus.MOD, modid = GravityAPI.MODID)
+/**
+ * Custom Brigadier argument types must be registered in the
+ * COMMAND_ARGUMENT_TYPES registry (and linked via ArgumentTypeInfos.registerByClass),
+ * otherwise the server cannot serialize the command tree to clients and every
+ * player is kicked on login with "Invalid player data".
+ */
 public class RegisterArgumentTypes
 {
-	@Subscribe
-	public static void onFMLCommonSetup(FMLCommonSetupEvent event)
-	{
-		ArgumentTypeInfos.registerByClass(DirectionArgumentType.class, SingletonArgumentInfo.contextFree(DirectionArgumentType::new));
-		ArgumentTypeInfos.registerByClass(LocalDirectionArgumentType.class, SingletonArgumentInfo.contextFree(LocalDirectionArgumentType::new));
-	}
+	public static final DeferredRegister<ArgumentTypeInfo<?, ?>> ARGUMENT_TYPES =
+		DeferredRegister.create(ForgeRegistries.Keys.COMMAND_ARGUMENT_TYPES, GravityAPI.MODID);
+
+	public static final RegistryObject<SingletonArgumentInfo<DirectionArgumentType>> DIRECTION =
+		ARGUMENT_TYPES.register("direction", () ->
+			ArgumentTypeInfos.registerByClass(
+				DirectionArgumentType.class,
+				SingletonArgumentInfo.contextFree(DirectionArgumentType::new)
+			)
+		);
+
+	public static final RegistryObject<SingletonArgumentInfo<LocalDirectionArgumentType>> LOCAL_DIRECTION =
+		ARGUMENT_TYPES.register("local_direction", () ->
+			ArgumentTypeInfos.registerByClass(
+				LocalDirectionArgumentType.class,
+				SingletonArgumentInfo.contextFree(LocalDirectionArgumentType::new)
+			)
+		);
 }

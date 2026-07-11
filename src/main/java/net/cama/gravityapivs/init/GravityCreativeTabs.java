@@ -55,7 +55,10 @@ public class GravityCreativeTabs
                 output.accept(GravityPlatingItem.createStack(
                     new GravityPlatingBlockEntity.SideData(false, 32)
                 ));
-                
+
+                output.accept(new ItemStack(GravityItems.GRAVITY_CORE.get()));
+
+
                 output.accept(new ItemStack(GravityItems.GRAVITY_ANCHOR_UP.get()));
                 output.accept(new ItemStack(GravityItems.GRAVITY_ANCHOR_DOWN.get()));
                 output.accept(new ItemStack(GravityItems.GRAVITY_ANCHOR_EAST.get()));

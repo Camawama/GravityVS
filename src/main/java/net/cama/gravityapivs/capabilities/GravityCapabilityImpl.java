@@ -10,21 +10,20 @@ import net.cama.gravityapivs.api.RotationParameters;
 import net.cama.gravityapivs.config.GravityConfig;
 import net.cama.gravityapivs.init.GravityMobEffects;
 import net.cama.gravityapivs.item.GravityAnchorItem;
-import net.cama.gravityapivs.mixin.EntityAccessor;
 import net.cama.gravityapivs.mob_effect.GravityDirectionMobEffect;
 import net.cama.gravityapivs.network.GravityNetwork;
 import net.cama.gravityapivs.network.UpdateGravityCapabilityPacket;
-import net.cama.gravityapivs.network.UpdateGravitySyncStatePacket;
 import net.cama.gravityapivs.util.GCUtil;
 import net.cama.gravityapivs.util.QuaternionUtil;
 import net.cama.gravityapivs.util.RotationUtil;
-import org.apache.commons.lang3.Validate;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import net.minecraft.core.Direction;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.util.Mth;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.entity.AreaEffectCloud;
 import net.minecraft.world.entity.Entity;
@@ -38,118 +37,145 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.network.PacketDistributor;
 
 /**
- * The gravity is determined by the follows:
- * 1. base gravity
- * 2. gravity modifier, can override base gravity (determined from modifier events)
- * 3. gravity effects, can override modified gravity
- * The result of applying 1 and 2 is called modified gravity and is synced.
- * The result of 3 is current gravity and is not synced.
- * The gravity effect should be applied both on client and server, except for remote players.
- * (The client player's gravity attributes are separately computed.
- * Other client entities' are synced from server.)
+ * Gravity state for one entity.
+ *
+ * Architecture:
+ * - The COLLISION BOX is always one of the six cardinal orientations
+ *   ({@link #currGravityDirection}) — a Minecraft AABB cannot be tilted, so
+ *   anything else corrupts collision. This is invisible scaffolding.
+ * - Everything the player experiences — camera, model, aim, movement direction
+ *   and the gravity pull itself — follows the VISUAL frame
+ *   ({@link #visualRotation}): a continuous, rate-limited quaternion that
+ *   chases the true (arbitrary-angle) field vector. It converges EXACTLY onto
+ *   the canonical cardinal frame whenever the field is cardinal, so in all
+ *   cardinal situations the math is bit-identical to the original mod, and
+ *   during transitions / on tilted ships everything rotates smoothly at
+ *   arbitrary angles.
+ * - Because the visual frame never jumps, no camera animation and no yaw
+ *   remapping are needed; local velocity/look simply rotate with the frame.
  */
 public class GravityCapabilityImpl implements IGravityCapability {
+    public static final Vec3 DOWN = new Vec3(0, -1, 0);
+
+    // hysteresis: a new cardinal must be this much better aligned (dot product)
+    // with the field vector before the collision box snaps to it
+    private static final double SNAP_HYSTERESIS_DOT = 0.10;
+    // opposite flips additionally require a stable target for a few ticks
+    private static final int OPPOSITE_FLIP_STABLE_TICKS = 3;
+    // how fast the visual frame may rotate
+    private static final float VISUAL_TURN_PER_TICK = (float) Math.toRadians(15);
+    // after leaving a field, keep its pull for a few ticks (jumping off a plate
+    // must not instantly revert gravity mid-air)
+    private static final int FIELD_GRACE_TICKS = 6;
+
     public boolean initialized = false;
-    
+
     // not synchronized
-    private Vec3 prevGravityDirection = new Vec3(0, -1, 0);
+    private Direction prevGravityDirection = Direction.DOWN;
     private double prevGravityStrength = 1.0;
-    
-    // the base gravity direction
-    Vec3 baseGravityDirection = new Vec3(0, -1, 0);
-    
-    // the base gravity strength
+
+    // the base gravity
+    Vec3 baseGravityDirection = DOWN;
     double baseGravityStrength = 1.0;
-    
+
+    // applied physics state (always cardinal)
+    private Direction currGravityDirection = Direction.DOWN;
+    private double currGravityStrength = 1.0;
+
+    // the true (possibly arbitrary-angle) field vector
+    private @Nullable Vec3 targetGravityVector = null;
+    private double targetGravityStrength = 1.0;
+    private int oppositeStableTicks = 0;
+    private int fieldGraceTicks = 0;
+
+    // the visual/aim frame (world->player) and its per-tick history for render
+    // interpolation; visualTarget is the frame the field vector asks for
+    private final Quaternionf visualRotation = new Quaternionf();
+    private final Quaternionf prevVisualRotation = new Quaternionf();
+    private final Quaternionf visualTarget = new Quaternionf();
+    // remote entities receive their visual target from the server
+    private @Nullable Quaternionf syncedVisualTarget = null;
+    private final Quaternionf lastSyncedVisualTarget = new Quaternionf();
+
+    // capsule collision state (players under non-default gravity)
+    public boolean capsuleGrounded = false;
+    public @Nullable org.valkyrienskies.core.api.ships.Ship capsuleGroundShip = null;
+
     @Nullable RotationParameters currentRotationParameters = RotationParameters.getDefault();
-    
+
     // Only used on client, not synchronized.
     @Nullable
     public RotationAnimation animation;
-    
+
     public Entity entity;
-    
-    private Vec3 currGravityDirection = new Vec3(0, -1, 0);
-    private double currGravityStrength = 1.0;
-    
+
     private boolean isFiringUpdateEvent = false;
-    
-    private List<GravityDirEffect> delayApplyDirEffects = new ArrayList<>();
-    private List<GravityDirEffect> tempEffects = new ArrayList<>();
-    
+
+    private final List<GravityDirEffect> delayApplyDirEffects = new ArrayList<>();
+    private final List<GravityDirEffect> tempEffects = new ArrayList<>();
+
     private double delayApplyStrengthEffect = 1.0;
-    
-    // only used on server side
+
+    // force a sync packet on the next server tick
     public boolean needsSync = false;
-    
+    private @Nullable Direction lastSyncedDirection = null;
+    private double lastSyncedStrength = 1.0;
+
     public boolean noAnimation = false;
     public boolean noPositionAdjust = false;
-    
-	@Override
-	public void setEntity(Entity entity) 
-	{
-		this.entity = entity;
-        if (entity.level.isClientSide()) {
+
+    @Override
+    public void setEntity(Entity entity) {
+        this.entity = entity;
+        if (entity.level().isClientSide()) {
             animation = new RotationAnimation();
         }
         else {
             animation = null;
         }
-	}
-    
-    @Override
-    public void deserializeNBT(CompoundTag tag) {
-        if (tag.contains("baseGravityDirectionX")) {
-            baseGravityDirection = new Vec3(
-                tag.getDouble("baseGravityDirectionX"),
-                tag.getDouble("baseGravityDirectionY"),
-                tag.getDouble("baseGravityDirectionZ")
+    }
+
+    // ------------------------------------------------------------------
+    // serialization
+    // ------------------------------------------------------------------
+
+    private static Direction directionFromTag(CompoundTag tag, String vecPrefix, String legacyName, Direction fallback) {
+        if (tag.contains(vecPrefix + "X")) {
+            return Direction.getNearest(
+                tag.getDouble(vecPrefix + "X"),
+                tag.getDouble(vecPrefix + "Y"),
+                tag.getDouble(vecPrefix + "Z")
             );
         }
-        else if (tag.contains("baseGravityDirection")) {
-            // Legacy support
-            Direction dir = Direction.byName(tag.getString("baseGravityDirection"));
+        if (tag.contains(legacyName)) {
+            Direction dir = Direction.byName(tag.getString(legacyName));
             if (dir != null) {
-                baseGravityDirection = Vec3.atLowerCornerOf(dir.getNormal());
+                return dir;
             }
         }
-        else {
-            baseGravityDirection = new Vec3(0, -1, 0);
-        }
-        
+        return fallback;
+    }
+
+    @Override
+    public void deserializeNBT(CompoundTag tag) {
+        baseGravityDirection = Vec3.atLowerCornerOf(
+            directionFromTag(tag, "baseGravityDirection", "baseGravityDirection", Direction.DOWN).getNormal()
+        );
+
         if (tag.contains("baseGravityStrength")) {
             baseGravityStrength = tag.getDouble("baseGravityStrength");
         }
         else {
             baseGravityStrength = 1.0;
         }
-        
-        // the current gravity is serialized to avoid unnecessary gravity rotation when entering world
-        // do not deserialize it when for client player when not initializing
+
+        // the current gravity is serialized to avoid unnecessary rotation when entering the world
         if (!initialized || shouldAcceptServerSync()) {
-            if (tag.contains("currentGravityDirectionX")) {
-                currGravityDirection = new Vec3(
-                    tag.getDouble("currentGravityDirectionX"),
-                    tag.getDouble("currentGravityDirectionY"),
-                    tag.getDouble("currentGravityDirectionZ")
-                );
-            }
-            else if (tag.contains("currentGravityDirection")) {
-                // Legacy support
-                Direction dir = Direction.byName(tag.getString("currentGravityDirection"));
-                if (dir != null) {
-                    currGravityDirection = Vec3.atLowerCornerOf(dir.getNormal());
-                }
-            }
-            else {
-                currGravityDirection = new Vec3(0, -1, 0);
-            }
-            
+            currGravityDirection = directionFromTag(tag, "currentGravityDirection", "currentGravityDirection", Direction.DOWN);
+
             if (tag.contains("currentGravityStrength")) {
                 currGravityStrength = tag.getDouble("currentGravityStrength");
             }
@@ -157,166 +183,233 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 currGravityStrength = 1.0;
             }
         }
-        
+
         if (!initialized) {
             prevGravityDirection = currGravityDirection;
             prevGravityStrength = currGravityStrength;
+            Quaternionf canonical = RotationUtil.getWorldRotationQuaternion(currGravityDirection);
+            visualRotation.set(canonical);
+            prevVisualRotation.set(canonical);
+            visualTarget.set(canonical);
             initialized = true;
             this.needsSync = true;
             this.noAnimation = true;
-            applyGravityDirectionChange(
-                prevGravityDirection, currGravityDirection, currentRotationParameters, true
-            );
+
+            if (entity != null) {
+                updateBoundingBox();
+            }
         }
     }
-    
-    private boolean shouldAcceptServerSync() {
-        return entity.level().isClientSide() && !GCUtil.isClientPlayer(entity);
-    }
-    
+
     @Override
     public CompoundTag serializeNBT() {
-		CompoundTag tag = new CompoundTag();
-        tag.putDouble("baseGravityDirectionX", baseGravityDirection.x);
-        tag.putDouble("baseGravityDirectionY", baseGravityDirection.y);
-        tag.putDouble("baseGravityDirectionZ", baseGravityDirection.z);
-        
-        tag.putDouble("currentGravityDirectionX", currGravityDirection.x);
-        tag.putDouble("currentGravityDirectionY", currGravityDirection.y);
-        tag.putDouble("currentGravityDirectionZ", currGravityDirection.z);
-        
+        CompoundTag tag = new CompoundTag();
+        tag.putString("baseGravityDirection", getBaseGravityDirection().getName());
+        tag.putString("currentGravityDirection", currGravityDirection.getName());
         tag.putDouble("baseGravityStrength", baseGravityStrength);
         tag.putDouble("currentGravityStrength", currGravityStrength);
-		return tag;
+        return tag;
     }
-    
+
+    // ------------------------------------------------------------------
+    // main tick
+    // ------------------------------------------------------------------
+
     @Override
     public void tick() {
-        if (!canChangeGravity()) {
+        if (entity == null || !canChangeGravity()) {
             return;
         }
-        
-        updateGravityStatus(true);
-        
+
+        updateGravityStatus();
         applyGravityChange();
-        
-        if (!entity.level.isClientSide()) {
-            if (needsSync) {
-                sendSyncPacketToOtherPlayers();
-            }
+        advanceVisualRotation();
+
+        if (!entity.level().isClientSide()) {
+            maybeSendSync();
         }
     }
-    
-    public void updateGravityStatus(boolean sendPacketIfNecessary) {
-        // for the remote players and non-player entities,
-        // their effect data is not synchronized to the client
-        // (possibly for making it harder to cheat for hacked clients)
-        // then we don't calculate its gravity in normal way in client
-        if (shouldAcceptServerSync()) {
-            return;
-        }
-        
-        Vec3 oldGravityDirection = currGravityDirection;
-        double oldGravityStrength = currGravityStrength;
-        
-        Entity vehicle = entity.getVehicle();
-        if (vehicle != null) {
-            currGravityDirection = GravityChangerAPI.getGravityDirectionVec(vehicle);
-            currGravityStrength = GravityChangerAPI.getGravityStrength(vehicle);
+
+    /**
+     * Moves the visual/aim frame toward the frame requested by the field vector,
+     * rate-limited so it is continuous. Converges exactly onto the canonical
+     * cardinal frame when the field is cardinal.
+     */
+    private void advanceVisualRotation() {
+        prevVisualRotation.set(visualRotation);
+
+        if (syncedVisualTarget != null && shouldAcceptServerSync()) {
+            visualTarget.set(syncedVisualTarget);
         }
         else {
-            currGravityDirection = baseGravityDirection;
-            currGravityStrength = baseGravityStrength;
-            currGravityStrength *= GravityConfig.gravityStrengthMultiplier.get();
-            
-            tempEffects.clear();
-            isFiringUpdateEvent = true;
-            try {
-                for (ItemStack handSlot : entity.getHandSlots()) {
-                    Item item = handSlot.getItem();
-                    if (item instanceof GravityAnchorItem anchorItem) {
-                        this.applyGravityDirectionEffect(
-                            Vec3.atLowerCornerOf(anchorItem.direction.getNormal()),
-                            null, 1000000
-                        );
-                    }
-                }
-                if (entity instanceof LivingEntity livingEntity) {
-                    for (GravityDirectionMobEffect dirEffect : GravityDirectionMobEffect.EFFECT_MAP.values()) {
-                        MobEffectInstance effectInstance = livingEntity.getEffect(dirEffect);
-                        if (effectInstance != null) {
-                            int amplifier = effectInstance.getAmplifier();
-                            
-                            this.applyGravityDirectionEffect(
-                                Vec3.atLowerCornerOf(dirEffect.gravityDirection.getNormal()),
-                                null,
-                                amplifier + 1.0
-                            );
-                        }
-                    }
-                    if (livingEntity.hasEffect(GravityMobEffects.INVERT.get())) {
-                        this.applyGravityDirectionEffect(
-                        		this.getCurrGravityDirectionVec().scale(-1),
-                            null, 5
-                        );
-                    }
-                    GravityMobEffects.INCREASE.get().apply(livingEntity, this);
-                    GravityMobEffects.DECREASE.get().apply(livingEntity, this);
-                    GravityMobEffects.REVERSE.get().apply(livingEntity, this);
-                }
-                
-                tempEffects.addAll(delayApplyDirEffects);
-                delayApplyDirEffects.clear();
-                
-                currGravityStrength *= delayApplyStrengthEffect;
-                delayApplyStrengthEffect = 1.0;
-            }
-            finally {
-                isFiringUpdateEvent = false;
-            }
-            
-            resolveGravityDirection();
+            computeVisualTarget(visualTarget);
         }
-        
-        if (sendPacketIfNecessary) {
-            boolean changed = !oldGravityDirection.equals(currGravityDirection) ||
-                Math.abs(oldGravityStrength - currGravityStrength) > 0.0001;
-            if (changed) {
-                sendSyncPacketToOtherPlayers();
-            }
+
+        float angle = angleBetween(visualRotation, visualTarget);
+        if (angle < 1.0E-3f) {
+            visualRotation.set(visualTarget);
+            return;
+        }
+        float t = angle <= VISUAL_TURN_PER_TICK ? 1.0f : VISUAL_TURN_PER_TICK / angle;
+        visualRotation.slerp(visualTarget, t).normalize();
+        if (t >= 1.0f) {
+            visualRotation.set(visualTarget);
         }
     }
-    
-    private void resolveGravityDirection() {
+
+    /**
+     * The frame that maps the true field vector onto local down, with its twist
+     * anchored to the canonical frame of the current cardinal direction. The
+     * tilt is always < 90 degrees, so the shortest-arc rotation is unambiguous.
+     */
+    private void computeVisualTarget(Quaternionf out) {
+        Quaternionf canonical = RotationUtil.getWorldRotationQuaternion(currGravityDirection);
+        Vec3 cardinal = getCurrGravityDirectionVec();
+        Vec3 target = targetGravityVector != null && targetGravityVector.lengthSqr() > 1.0E-6
+            ? targetGravityVector.normalize() : cardinal;
+
+        if (QuaternionUtil.angleBetween(target, cardinal) < 1.0E-3) {
+            out.set(canonical);
+            return;
+        }
+
+        // F = canonical ∘ R, where R rotates the target vector onto the cardinal
+        out.set(canonical).mul(QuaternionUtil.getRotationBetween(target, cardinal)).normalize();
+    }
+
+    private static float angleBetween(Quaternionf a, Quaternionf b) {
+        float dot = Math.abs(a.x() * b.x() + a.y() * b.y() + a.z() * b.z() + a.w() * b.w());
+        return (float) (2.0 * Math.acos(Mth.clamp(dot, 0.0f, 1.0f)));
+    }
+
+    private boolean shouldAcceptServerSync() {
+        return entity != null && entity.level().isClientSide() && !GCUtil.isClientPlayer(entity);
+    }
+
+    /**
+     * Computes the field target vector from base gravity + effects, then snaps
+     * the physics direction to its nearest cardinal (with hysteresis).
+     */
+    public void updateGravityStatus() {
+        if (shouldAcceptServerSync()) {
+            // remote entities take their state from the server; effects pushed by
+            // client-side block entities are meaningless — clear them so the
+            // lists cannot grow unboundedly
+            delayApplyDirEffects.clear();
+            tempEffects.clear();
+            delayApplyStrengthEffect = 1.0;
+            return;
+        }
+
+        Entity vehicle = entity.getVehicle();
+        if (vehicle != null) {
+            GravityCapabilityImpl vehicleComp = GravityChangerAPI.getGravityComponentOrNull(vehicle);
+            if (vehicleComp != null) {
+                currGravityDirection = vehicleComp.currGravityDirection;
+                currGravityStrength = vehicleComp.currGravityStrength;
+                targetGravityVector = vehicleComp.targetGravityVector;
+                return;
+            }
+        }
+
+        targetGravityVector = baseGravityDirection;
+        targetGravityStrength = baseGravityStrength * GravityConfig.gravityStrengthMultiplier.get();
+
+        tempEffects.clear();
+        isFiringUpdateEvent = true;
+        try {
+            for (ItemStack handSlot : entity.getHandSlots()) {
+                Item item = handSlot.getItem();
+                if (item instanceof GravityAnchorItem anchorItem) {
+                    this.applyGravityDirectionEffect(
+                        Vec3.atLowerCornerOf(anchorItem.direction.getNormal()),
+                        null, 1000000
+                    );
+                }
+            }
+            if (entity instanceof LivingEntity livingEntity) {
+                for (GravityDirectionMobEffect dirEffect : GravityDirectionMobEffect.EFFECT_MAP.values()) {
+                    MobEffectInstance effectInstance = livingEntity.getEffect(dirEffect);
+                    if (effectInstance != null) {
+                        int amplifier = effectInstance.getAmplifier();
+
+                        this.applyGravityDirectionEffect(
+                            Vec3.atLowerCornerOf(dirEffect.gravityDirection.getNormal()),
+                            null,
+                            amplifier + 1.0
+                        );
+                    }
+                }
+                if (livingEntity.hasEffect(GravityMobEffects.INVERT.get())) {
+                    this.applyGravityDirectionEffect(
+                        Vec3.atLowerCornerOf(currGravityDirection.getOpposite().getNormal()),
+                        null, 5
+                    );
+                }
+                GravityMobEffects.INCREASE.get().apply(livingEntity, this);
+                GravityMobEffects.DECREASE.get().apply(livingEntity, this);
+                GravityMobEffects.REVERSE.get().apply(livingEntity, this);
+            }
+
+            tempEffects.addAll(delayApplyDirEffects);
+            delayApplyDirEffects.clear();
+
+            targetGravityStrength *= delayApplyStrengthEffect;
+            delayApplyStrengthEffect = 1.0;
+        }
+        finally {
+            isFiringUpdateEvent = false;
+        }
+
+        boolean hadFieldEffects = !tempEffects.isEmpty();
+        resolveGravityTarget();
+
+        if (hadFieldEffects) {
+            fieldGraceTicks = FIELD_GRACE_TICKS;
+            lastFieldVector = targetGravityVector;
+        }
+        else if (fieldGraceTicks > 0 && lastFieldVector != null) {
+            // just left a field (e.g. jumped off a plate): keep its pull briefly
+            // instead of instantly reverting to base gravity mid-air
+            fieldGraceTicks--;
+            targetGravityVector = lastFieldVector;
+        }
+
+        snapPhysicsDirection();
+
+        currGravityStrength = targetGravityStrength;
+    }
+
+    private @Nullable Vec3 lastFieldVector = null;
+
+    private void resolveGravityTarget() {
         if (tempEffects.isEmpty()) {
             currentRotationParameters = RotationParameters.getDefault();
             return;
         }
-        
-        // Find max priority
+
         double maxPriority = -Double.MAX_VALUE;
         for (GravityDirEffect effect : tempEffects) {
             if (effect.priority > maxPriority) {
                 maxPriority = effect.priority;
             }
         }
-        
-        // Blend effects within range
+
+        // blend effects close to the strongest one, weighted by priority
         double BLEND_RANGE = 5.0;
         Vec3 accumulatedGravity = Vec3.ZERO;
         double totalWeight = 0;
         RotationParameters bestParams = null;
         double bestParamPriority = -Double.MAX_VALUE;
-        
+
         for (GravityDirEffect effect : tempEffects) {
             if (effect.priority >= maxPriority - BLEND_RANGE) {
                 double weight = 1.0 - (maxPriority - effect.priority) / BLEND_RANGE;
-                // Clamp weight to be safe, though logic guarantees >= 0
                 weight = Math.max(0, weight);
-                
-                accumulatedGravity = accumulatedGravity.add(effect.direction.scale(weight));
+
+                accumulatedGravity = accumulatedGravity.add(effect.direction.normalize().scale(weight));
                 totalWeight += weight;
-                
+
                 if (effect.priority > bestParamPriority) {
                     bestParamPriority = effect.priority;
                     if (effect.rotationParameters != null) {
@@ -325,39 +418,178 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 }
             }
         }
-        
-        if (totalWeight > 0.0001 && accumulatedGravity.lengthSqr() > 0.0001) {
-            currGravityDirection = accumulatedGravity.normalize();
+
+        double magnitude = accumulatedGravity.length();
+        if (totalWeight > 0.0001 && magnitude > 0.02) {
+            targetGravityVector = accumulatedGravity.normalize();
         }
-        
-        if (bestParams != null) {
-            currentRotationParameters = bestParams;
-        } else {
+        // else: near-total cancellation, keep the previous target
+
+        // Opposing fields cancel: scale strength down so the entity floats
+        // (still controllable) instead of flapping between directions.
+        if (totalWeight > 0.0001) {
+            double cancellation = Mth.clamp(magnitude / totalWeight, 0.0, 1.0);
+            targetGravityStrength *= cancellation * cancellation;
+        }
+
+        currentRotationParameters = bestParams != null ? bestParams : RotationParameters.getDefault();
+        tempEffects.clear();
+    }
+
+    /**
+     * Physics may only sit on a cardinal direction. Snap to the target vector's
+     * nearest cardinal, but only when it is decisively better than the current
+     * one (hysteresis), and require stability before 180 degree flips.
+     */
+    private void snapPhysicsDirection() {
+        if (targetGravityVector == null || targetGravityVector.lengthSqr() < 1.0E-6) {
+            return;
+        }
+        Vec3 target = targetGravityVector.normalize();
+
+        Direction candidate = Direction.getNearest(target.x, target.y, target.z);
+        if (candidate == currGravityDirection) {
+            oppositeStableTicks = 0;
+            return;
+        }
+
+        double candidateDot = target.dot(Vec3.atLowerCornerOf(candidate.getNormal()));
+        double currentDot = target.dot(Vec3.atLowerCornerOf(currGravityDirection.getNormal()));
+        if (candidateDot < currentDot + SNAP_HYSTERESIS_DOT) {
+            return;
+        }
+
+        if (candidate == currGravityDirection.getOpposite()) {
+            // opposing fields can produce brief flips; require stability
+            oppositeStableTicks++;
+            if (oppositeStableTicks < OPPOSITE_FLIP_STABLE_TICKS) {
+                return;
+            }
+        }
+        oppositeStableTicks = 0;
+
+        currGravityDirection = candidate;
+    }
+
+    @Override
+    public void applyGravityChange() {
+        if (currentRotationParameters == null) {
             currentRotationParameters = RotationParameters.getDefault();
         }
+
+        if (prevGravityDirection != currGravityDirection) {
+            if (entity instanceof Player) {
+                // capsule players: position is a continuous feet point and the
+                // frame is continuous; the cardinal change is only a reference
+                // update, so no repositioning/velocity machinery is needed
+                prevGravityDirection = currGravityDirection;
+                updateBoundingBox();
+            }
+            else {
+                applyGravityDirectionChange(
+                    prevGravityDirection, currGravityDirection,
+                    currentRotationParameters, false
+                );
+                prevGravityDirection = currGravityDirection;
+            }
+        }
+
+        if (Math.abs(currGravityStrength - prevGravityStrength) > 0.0001) {
+            prevGravityStrength = currGravityStrength;
+        }
     }
-    
-    private void sendSyncPacketToOtherPlayers() 
-    {
-		if(!this.entity.level.isClientSide)
-		{
-			GravityNetwork.CHANNEL.send(PacketDistributor.TRACKING_ENTITY_AND_SELF.with(() -> this.entity), new UpdateGravityCapabilityPacket(this.noAnimation, this.entity.getUUID(), baseGravityDirection, currGravityDirection, baseGravityStrength, currGravityStrength));
-		}
+
+    // (the arbitrary-angle pull needs no extra force: vanilla gravity accelerates
+    // along local down, and the visual frame maps local down onto the true field
+    // vector, so entities are pulled at the exact field angle)
+
+    // ------------------------------------------------------------------
+    // networking
+    // ------------------------------------------------------------------
+
+    private void maybeSendSync() {
+        boolean changed = needsSync
+            || lastSyncedDirection != currGravityDirection
+            || Math.abs(lastSyncedStrength - currGravityStrength) > 0.01
+            || angleBetween(lastSyncedVisualTarget, visualTarget) > 0.05f;
+
+        if (changed) {
+            sendSyncPacketToOtherPlayers();
+        }
     }
-	
-	public void sync(boolean noAnimation, Vec3 baseGravityDirection, Vec3 currentGravityDirection, double baseGravityStrength, double currentGravityStrength)
-    {
-		this.baseGravityDirection = baseGravityDirection;
-		this.currGravityDirection = currentGravityDirection;
-		this.baseGravityStrength = baseGravityStrength;
-		this.currGravityStrength = currentGravityStrength;
-		if(noAnimation)
-		{
-			GravityChangerAPI.instantlySetClientBaseGravityDirection(this.entity, baseGravityDirection);
-		}
-		GravityNetwork.sendToServer(new UpdateGravitySyncStatePacket(this.entity.getUUID()));
+
+    private void sendSyncPacketToOtherPlayers() {
+        if (entity != null && !this.entity.level().isClientSide()) {
+            GravityNetwork.CHANNEL.send(
+                PacketDistributor.TRACKING_ENTITY_AND_SELF.with(() -> this.entity),
+                makeSyncPacket()
+            );
+            lastSyncedDirection = currGravityDirection;
+            lastSyncedStrength = currGravityStrength;
+            lastSyncedVisualTarget.set(visualTarget);
+            needsSync = false;
+            noAnimation = false;
+        }
     }
-    
+
+    public UpdateGravityCapabilityPacket makeSyncPacket() {
+        return new UpdateGravityCapabilityPacket(
+            this.noAnimation, this.entity.getUUID(),
+            baseGravityDirection,
+            Vec3.atLowerCornerOf(currGravityDirection.getNormal()),
+            baseGravityStrength, currGravityStrength,
+            new Quaternionf(visualTarget)
+        );
+    }
+
+    @Override
+    public void sync(
+        boolean noAnimation,
+        Vec3 baseGravityDirection, Vec3 currentGravityDirection,
+        double baseGravityStrength, double currentGravityStrength,
+        Quaternionf rotation
+    ) {
+        this.baseGravityDirection = baseGravityDirection;
+        this.baseGravityStrength = baseGravityStrength;
+
+        Direction serverDirection = Direction.getNearest(
+            currentGravityDirection.x, currentGravityDirection.y, currentGravityDirection.z
+        );
+
+        if (GCUtil.isClientPlayer(entity)) {
+            // The client player computes its own gravity from fields; only adopt
+            // the server's direction if they disagree (desynced field state).
+            if (serverDirection != this.currGravityDirection) {
+                this.currGravityDirection = serverDirection;
+                this.currGravityStrength = currentGravityStrength;
+            }
+            return;
+        }
+
+        this.currGravityDirection = serverDirection;
+        this.currGravityStrength = currentGravityStrength;
+
+        // the visual frame chases the server-provided target smoothly
+        if (this.syncedVisualTarget == null) {
+            this.syncedVisualTarget = new Quaternionf();
+        }
+        this.syncedVisualTarget.set(rotation).normalize();
+
+        if (noAnimation || !initialized) {
+            this.prevGravityDirection = serverDirection;
+            this.prevGravityStrength = currentGravityStrength;
+            this.initialized = true;
+            this.visualRotation.set(this.syncedVisualTarget);
+            this.prevVisualRotation.set(this.syncedVisualTarget);
+            this.visualTarget.set(this.syncedVisualTarget);
+            updateBoundingBox();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // effect API (called by fields/plating/effects)
+    // ------------------------------------------------------------------
+
     public void applyGravityDirectionEffect(
         @NotNull Vec3 direction,
         @Nullable RotationParameters rotationParameters,
@@ -371,43 +603,36 @@ public class GravityCapabilityImpl implements IGravityCapability {
             delayApplyDirEffects.add(effect);
         }
     }
-    
-    public void applyGravityStrengthEffect(
-        double strengthMultiplier
-    ) {
+
+    public void applyGravityStrengthEffect(double strengthMultiplier) {
         if (isFiringUpdateEvent) {
-            currGravityStrength *= strengthMultiplier;
+            targetGravityStrength *= strengthMultiplier;
         }
         else {
             delayApplyStrengthEffect *= strengthMultiplier;
         }
     }
-    
+
+    // ------------------------------------------------------------------
+    // direction change machinery (from the original working mod)
+    // ------------------------------------------------------------------
+
     public void applyGravityDirectionChange(
-        Vec3 oldGravity, Vec3 newGravity,
+        Direction oldGravity, Direction newGravity,
         RotationParameters rotationParameters, boolean isInitialization
     ) {
         if (!canChangeGravity()) {
             return;
         }
-        
-        // update bounding box
-        entity.setBoundingBox(((EntityAccessor) entity).gc_makeBoundingBox());
-        
-        // A weird thing is that,
-        // using `entity.setPos(entity.position())` to a painting on client side
-        // make the painting move wrongly, because Painting overrides `trackingPosition()`.
-        // No entity other than Painting overrides that method.
-        // It seems to be legacy code from early versions of Minecraft.
-        
+
+        updateBoundingBox();
+
         if (isInitialization) {
             return;
         }
-        
+
         entity.fallDistance = 0;
-        
-        long timeMs = entity.level().getGameTime() * 50;
-        
+
         Vec3 relativeRotationCenter = getLocalRotationCenter(
             entity, oldGravity, newGravity, rotationParameters
         );
@@ -417,9 +642,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
         Vec3 newPos = rotationCenter.subtract(RotationUtil.vecPlayerToWorld(relativeRotationCenter, newGravity));
         Vec3 posTranslation = newPos.subtract(oldPos);
         Vec3 newLastTickPos = oldLastTickPos.add(posTranslation);
-        
-        if(!this.noPositionAdjust)
-        {
+
+        if (!this.noPositionAdjust) {
             entity.setPos(newPos);
             entity.xo = newLastTickPos.x;
             entity.yo = newLastTickPos.y;
@@ -427,32 +651,26 @@ public class GravityCapabilityImpl implements IGravityCapability {
             entity.xOld = newLastTickPos.x;
             entity.yOld = newLastTickPos.y;
             entity.zOld = newLastTickPos.z;
-            
+
             adjustEntityPosition(oldGravity, newGravity, entity.getBoundingBox());
         }
-        
-        if (entity.level().isClientSide()) {
-            Validate.notNull(animation, "gravity animation is null");
-            
-            int rotationTimeMS = rotationParameters.rotationTimeMS();
-            
-            // Use frame-based time for animation start
-            float partialTick = net.minecraft.client.Minecraft.getInstance().getFrameTime();
-            long frameTimeMs = entity.level().getGameTime() * 50 + (long) (partialTick * 50);
-            
-            animation.startRotationAnimation(
-                newGravity, oldGravity,
-                rotationTimeMS,
-                entity, frameTimeMs, rotationParameters.rotateView(),
-                relativeRotationCenter
-            );
+
+        // No camera animation and no yaw remap: the visual frame is continuous
+        // across box snaps, and it is what interprets yaw and local velocity.
+
+        if (entity instanceof Player) {
+            // Players' local velocity is interpreted through the (continuous)
+            // visual frame, so their world velocity is unaffected by the snap.
+            return;
         }
-        
+
+        // Non-player entities use the legacy cardinal movement frame, so their
+        // velocity must be handled across the snap like the original mod did.
         Vec3 realWorldVelocity = getRealWorldVelocity(entity, oldGravity);
         if (rotationParameters.rotateVelocity()) {
             // Rotate velocity with gravity, this will cause things to appear to take a sharp turn
             Vector3f worldSpaceVec = realWorldVelocity.toVector3f();
-            worldSpaceVec.rotate(QuaternionUtil.getRotationBetween(oldGravity, newGravity));
+            worldSpaceVec.rotate(RotationUtil.getRotationBetween(oldGravity, newGravity));
             entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(new Vec3(worldSpaceVec), newGravity));
         }
         else {
@@ -460,11 +678,10 @@ public class GravityCapabilityImpl implements IGravityCapability {
             entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(realWorldVelocity, newGravity));
         }
     }
-    
-    // getVelocity() does not return the actual velocity. It returns the velocity plus acceleration.
-    // Even if the entity is standing still, getVelocity() will still give a downwards vector.
-    // The real velocity is this tick position subtract last tick position
-    private static Vec3 getRealWorldVelocity(Entity entity, Vec3 prevGravityDirection) {
+
+    // getDeltaMovement() does not return the actual velocity. It returns the velocity
+    // plus acceleration. The real velocity is this tick position subtract last tick position.
+    private static Vec3 getRealWorldVelocity(Entity entity, Direction prevGravityDirection) {
         if (entity.isControlledByLocalInstance()) {
             return new Vec3(
                 entity.getX() - entity.xo,
@@ -472,22 +689,22 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 entity.getZ() - entity.zo
             );
         }
-        
+
         return RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), prevGravityDirection);
     }
-    
+
     @NotNull
     private static Vec3 getLocalRotationCenter(
         Entity entity,
-        Vec3 oldGravity, Vec3 newGravity, RotationParameters rotationParameters
+        Direction oldGravity, Direction newGravity, RotationParameters rotationParameters
     ) {
         if (entity instanceof EndCrystal) {
             //In the middle of the block below
             return new Vec3(0, -0.5, 0);
         }
-        
+
         EntityDimensions dimensions = entity.getDimensions(entity.getPose());
-        if (newGravity.normalize().dot(oldGravity.normalize()) < -0.99) {
+        if (newGravity == oldGravity.getOpposite()) {
             // In the center of the hit-box
             return new Vec3(0, dimensions.height / 2, 0);
         }
@@ -495,21 +712,21 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return Vec3.ZERO;
         }
     }
-    
+
     // Adjust position to avoid suffocation in blocks when changing gravity
-    private void adjustEntityPosition(Vec3 oldGravity, Vec3 newGravity, AABB entityBoundingBox) {
+    private void adjustEntityPosition(Direction oldGravity, Direction newGravity, AABB entityBoundingBox) {
         if (!GravityConfig.adjustPositionAfterChangingGravity.get()) {
             return;
         }
-        
+
         if (entity instanceof AreaEffectCloud || entity instanceof AbstractArrow || entity instanceof EndCrystal) {
             return;
         }
-        
+
         // for example, if gravity changed from down to north, move up
         // if gravity changed from down to up, also move up
-        Vec3 movingDirection = oldGravity.scale(-1);
-        
+        Vec3 movingDirection = Vec3.atLowerCornerOf(oldGravity.getOpposite().getNormal());
+
         Iterable<VoxelShape> collisions = entity.level().getCollisions(
             entity,
             entityBoundingBox.inflate(-0.01) // shrink to avoid floating point error
@@ -526,18 +743,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 }
             }
         }
-        
+
         if (totalCollisionBox != null) {
-            Vec3 positionAdjustmentOffset = getPositionAdjustmentOffset(
+            entity.setPos(entity.position().add(getPositionAdjustmentOffset(
                 entityBoundingBox, totalCollisionBox, movingDirection
-            );
-            if (entity instanceof Player) {
-                //LOGGER.info("Adjusting player position {} {}", positionAdjustmentOffset, entity);
-            }
-            entity.setPos(entity.position().add(positionAdjustmentOffset));
+            )));
         }
     }
-    
+
     private static Vec3 getPositionAdjustmentOffset(
         AABB entityBoundingBox, AABB nearbyCollisionUnion, Vec3 movingDirection
     ) {
@@ -558,111 +771,176 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 offset = pushed - pushing;
             }
         }
-        
+
         return new Vec3(nearestDir.step()).scale(offset);
     }
-    
+
+    private void updateBoundingBox() {
+        if (entity != null) {
+            // go through the vanilla (mixin-wrapped) path so there is a single
+            // source of truth for the rotated bounding box
+            entity.setBoundingBox(((net.cama.gravityapivs.mixin.EntityAccessor) entity).gc_makeBoundingBox());
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // accessors
+    // ------------------------------------------------------------------
+
     public double getBaseGravityStrength() {
         return baseGravityStrength;
     }
-    
+
     public void setBaseGravityStrength(double strength) {
         if (!canChangeGravity()) {
             return;
         }
-        
+
         baseGravityStrength = strength;
         needsSync = true;
     }
-    
+
+    /** The applied PHYSICS gravity direction (always cardinal). */
     public Direction getCurrGravityDirection() {
-        return Direction.getNearest(currGravityDirection.x, currGravityDirection.y, currGravityDirection.z);
-    }
-    
-    public Vec3 getCurrGravityDirectionVec() {
         return currGravityDirection;
     }
-    
+
+    /** Cardinal normal of the physics direction. */
+    public Vec3 getCurrGravityDirectionVec() {
+        return Vec3.atLowerCornerOf(currGravityDirection.getNormal());
+    }
+
+    /** The true (possibly arbitrary-angle) field vector, or the cardinal normal. */
+    public Vec3 getTargetGravityVector() {
+        return targetGravityVector != null ? targetGravityVector : getCurrGravityDirectionVec();
+    }
+
     public double getCurrGravityStrength() {
         return currGravityStrength;
     }
-    
+
+    /**
+     * The canonical world->player frame of the cardinal PHYSICS direction (box,
+     * collision, movement axes). This is a shared instance — do not modify it.
+     * Transform helpers recognize these instances and use exact cardinal math.
+     */
+    public Quaternionf getCurrentRotation() {
+        return RotationUtil.getWorldRotationQuaternion(currGravityDirection);
+    }
+
+    /**
+     * The continuous visual/aim frame (camera, model, look direction, player
+     * movement). Converges exactly onto {@link #getCurrentRotation()} when the
+     * field is cardinal. Do not modify the returned object.
+     */
+    public Quaternionf getVisualRotation() {
+        return visualRotation;
+    }
+
+    /** Visual frame interpolated between the previous and current tick. */
+    public Quaternionf getRenderRotation(float partialTick) {
+        if (prevVisualRotation.equals(visualRotation)) {
+            return visualRotation;
+        }
+        return new Quaternionf(prevVisualRotation).slerp(visualRotation, partialTick).normalize();
+    }
+
+    /** Fast-path check: PHYSICS gravity is exactly vanilla. */
+    public boolean isDefault() {
+        return currGravityDirection == Direction.DOWN;
+    }
+
+    /** True when both physics and the visual frame are exactly vanilla. */
+    public boolean isVisuallyDefault() {
+        return currGravityDirection == Direction.DOWN
+            && visualRotation.w() >= 0.9999999f
+            && prevVisualRotation.w() >= 0.9999999f;
+    }
+
+    /** True while the visual frame is rotating (this tick differs from last). */
+    public boolean isVisuallyMoving() {
+        return !prevVisualRotation.equals(visualRotation);
+    }
+
+    /**
+     * Players under any non-default gravity collide as a gravity-aligned capsule
+     * (see {@link net.cama.gravityapivs.util.CapsuleCollider}) — a hitbox that
+     * genuinely rotates. Non-player entities keep the cardinal box system.
+     */
+    public boolean useCapsuleCollision() {
+        return entity instanceof Player && !isVisuallyDefault();
+    }
+
+    /** World-space up direction of the entity's visual frame (unit vector). */
+    public Vec3 getUpVector() {
+        return RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), visualRotation);
+    }
+
+    /**
+     * When the visual frame has fully converged onto the canonical cardinal
+     * frame, that direction; otherwise null. Non-player movement keeps the
+     * original mod's exact cardinal code path when settled.
+     */
+    @Nullable
+    public Direction getSettledCardinal() {
+        Quaternionf canonical = RotationUtil.getWorldRotationQuaternion(currGravityDirection);
+        return visualRotation.equals(canonical) ? currGravityDirection : null;
+    }
+
     private boolean canChangeGravity() {
-        return EntityTags.canChangeGravity(entity);
+        return entity != null && EntityTags.canChangeGravity(entity);
     }
-    
+
     public Direction getPrevGravityDirection() {
-        return Direction.getNearest(prevGravityDirection.x, prevGravityDirection.y, prevGravityDirection.z);
+        return prevGravityDirection;
     }
-    
+
     public Direction getBaseGravityDirection() {
         return Direction.getNearest(baseGravityDirection.x, baseGravityDirection.y, baseGravityDirection.z);
     }
-    
+
     public void setBaseGravityDirection(Direction gravityDirection) {
         setBaseGravityDirection(Vec3.atLowerCornerOf(gravityDirection.getNormal()));
     }
-    
+
     public void setBaseGravityDirection(Vec3 gravityDirection) {
         if (!canChangeGravity()) {
             return;
         }
-        
+
         if (!baseGravityDirection.equals(gravityDirection)) {
             baseGravityDirection = gravityDirection;
             needsSync = true;
-            
-            // update gravity immediately
-            // avoid having wrong info from getGravityDirection()
-            updateGravityStatus(false); // will this cause issue?
         }
     }
-    
+
     public void reset() {
-        baseGravityDirection = new Vec3(0, -1, 0);
+        baseGravityDirection = DOWN;
         baseGravityStrength = 1.0;
         needsSync = true;
     }
-    
-    @OnlyIn(Dist.CLIENT)
+
     public RotationAnimation getRotationAnimation() {
         return animation;
     }
-    
-    @Override
-    public void applyGravityChange() {
-        if (currentRotationParameters == null) {
-            currentRotationParameters = RotationParameters.getDefault();
-        }
-        
-        if (!prevGravityDirection.equals(currGravityDirection)) {
-            applyGravityDirectionChange(
-                prevGravityDirection, currGravityDirection,
-                currentRotationParameters, false
-            );
-            prevGravityDirection = currGravityDirection;
-        }
-        
-        if (Math.abs(currGravityStrength - prevGravityStrength) > 0.0001) {
-            prevGravityStrength = currGravityStrength;
-        }
-    }
-    
+
     /**
-     * Not needed in normal cases.
-     * Only used in {@link GravityChangerAPI#instantlySetClientBaseGravityDirection(Entity, Direction)}
-     * Used by ImmPtl.
+     * Snap the applied state without animation.
+     * Used by {@link GravityChangerAPI#instantlySetClientBaseGravityDirection}.
      */
     public void forceApplyGravityChange() {
         prevGravityDirection = currGravityDirection;
         prevGravityStrength = currGravityStrength;
+        computeVisualTarget(visualTarget);
+        visualRotation.set(visualTarget);
+        prevVisualRotation.set(visualTarget);
+        updateBoundingBox();
     }
-    
-    private static record GravityDirEffect(
+
+    private record GravityDirEffect(
         @NotNull Vec3 direction,
         @Nullable RotationParameters rotationParameters,
         double priority
     ) {
-    
     }
 }

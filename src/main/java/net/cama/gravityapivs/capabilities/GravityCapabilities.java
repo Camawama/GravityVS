@@ -18,32 +18,34 @@ public class GravityCapabilities
 	
 	public static void attachEntityCapability(AttachCapabilitiesEvent<Entity> e)
 	{
-		e.addCapability(IGravityCapability.ID, new ICapabilitySerializable<CompoundTag>() 
+		LazyOptional<IGravityCapability> inst = LazyOptional.of(() ->
 		{
-			LazyOptional<IGravityCapability> inst = LazyOptional.of(() -> 
-			{
-				GravityCapabilityImpl i = new GravityCapabilityImpl();
-				i.setEntity(e.getObject());
-				return i;
-			});
+			GravityCapabilityImpl i = new GravityCapabilityImpl();
+			i.setEntity(e.getObject());
+			return i;
+		});
+		// invalidate the LazyOptional when the entity's capabilities are invalidated
+		e.addListener(inst::invalidate);
+		e.addCapability(IGravityCapability.ID, new ICapabilitySerializable<CompoundTag>()
+		{
 
 			@Nonnull
 			@Override
-			public <T> LazyOptional<T> getCapability(@Nonnull Capability<T> capability, Direction facing) 
+			public <T> LazyOptional<T> getCapability(@Nonnull Capability<T> capability, Direction facing)
 			{
-				return GRAVITY.orEmpty(capability, this.inst.cast());
+				return GRAVITY.orEmpty(capability, inst.cast());
 			}
 
 			@Override
-			public CompoundTag serializeNBT() 
+			public CompoundTag serializeNBT()
 			{
-				return this.inst.orElseThrow(NullPointerException::new).serializeNBT();
+				return inst.orElseThrow(NullPointerException::new).serializeNBT();
 			}
 
 			@Override
 			public void deserializeNBT(CompoundTag nbt)
 			{
-				this.inst.orElseThrow(NullPointerException::new).deserializeNBT(nbt);
+				inst.orElseThrow(NullPointerException::new).deserializeNBT(nbt);
 			}
 		});
 	}
