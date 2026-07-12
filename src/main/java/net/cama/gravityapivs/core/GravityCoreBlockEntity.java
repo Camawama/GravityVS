@@ -45,6 +45,8 @@ public class GravityCoreBlockEntity extends BlockEntity {
 
     private int range;
     private boolean attracting = true;
+    // glow-ink-sac toggle: render the field as radially flowing particles
+    private boolean showParticles = false;
 
     public GravityCoreBlockEntity(BlockPos pos, BlockState state) {
         super(GravityBlocks.GRAVITY_CORE_BLOCK_ENTITY.get(), pos, state);
@@ -60,6 +62,7 @@ public class GravityCoreBlockEntity extends BlockEntity {
         if (tag.contains("attracting")) {
             attracting = tag.getBoolean("attracting");
         }
+        showParticles = tag.getBoolean("showParticles");
     }
 
     @Override
@@ -67,6 +70,7 @@ public class GravityCoreBlockEntity extends BlockEntity {
         super.saveAdditional(tag);
         tag.putInt("range", range);
         tag.putBoolean("attracting", attracting);
+        tag.putBoolean("showParticles", showParticles);
     }
 
     @Nullable
@@ -101,8 +105,49 @@ public class GravityCoreBlockEntity extends BlockEntity {
 
         be.applyToEntities(world, center, range, searchBox);
 
-        if (!world.isClientSide() && GravityConfig.gravityCoreAffectsShips.get()) {
+        if (world.isClientSide()) {
+            be.spawnFieldParticles(world, center, range);
+        }
+        else if (GravityConfig.gravityCoreAffectsShips.get()) {
             be.applyToShips(world, ownShip, center, range, searchBox);
+        }
+    }
+
+    /**
+     * Field visualization (toggled with a glow ink sac): particles spawned
+     * throughout the field sphere, drifting radially — blue soul flames flowing
+     * inward for attract, orange flames flowing outward for repulse. The radial
+     * flow makes the "unlocked" spherical field readable at a glance.
+     */
+    private void spawnFieldParticles(Level world, Vec3 center, double range) {
+        if (!showParticles) {
+            return;
+        }
+        var random = world.getRandom();
+
+        int count = Mth.clamp((int) range, 4, 12);
+        for (int i = 0; i < count; i++) {
+            // uniform direction, cbrt-weighted distance = uniform in the volume
+            double theta = random.nextDouble() * Math.PI * 2.0;
+            double cosPhi = random.nextDouble() * 2.0 - 1.0;
+            double sinPhi = Math.sqrt(1.0 - cosPhi * cosPhi);
+            Vec3 dir = new Vec3(sinPhi * Math.cos(theta), cosPhi, sinPhi * Math.sin(theta));
+
+            double distance = range * Math.cbrt(random.nextDouble());
+            if (distance < 1.0) {
+                continue;
+            }
+
+            Vec3 pos = center.add(dir.scale(distance));
+            // attract: flow toward the core; repulse: flow away
+            Vec3 vel = dir.scale(attracting ? -0.1 : 0.1);
+
+            world.addParticle(
+                attracting
+                    ? net.minecraft.core.particles.ParticleTypes.SOUL_FIRE_FLAME
+                    : net.minecraft.core.particles.ParticleTypes.FLAME,
+                pos.x, pos.y, pos.z, vel.x, vel.y, vel.z
+            );
         }
     }
 
@@ -197,6 +242,20 @@ public class GravityCoreBlockEntity extends BlockEntity {
                 handItem.shrink(1);
             }
             range += 1;
+        }
+        else if (handItem.getItem() == Items.GLOW_INK_SAC) {
+            showParticles = !showParticles;
+            if (showParticles && !player.isCreative()) {
+                handItem.shrink(1);
+            }
+            sync();
+            player.displayClientMessage(
+                Component.translatable(showParticles
+                    ? "gravity_changer.field_visual.on"
+                    : "gravity_changer.field_visual.off"),
+                true
+            );
+            return InteractionResult.SUCCESS;
         }
         else {
             player.displayClientMessage(

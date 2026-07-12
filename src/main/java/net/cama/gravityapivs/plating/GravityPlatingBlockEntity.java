@@ -63,6 +63,8 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     public static class SideData {
         public boolean isAttracting = true;
         public int level = 1;
+        // glow-ink-sac toggle: render the field as flowing particles
+        public boolean showParticles = false;
 
         public @Nullable AABB effectBoxCache = null;
 
@@ -81,13 +83,16 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
             level_ = Mth.clamp(level_, 1, maxLevel());
 
-            return new SideData(isAttracting_, level_);
+            SideData data = new SideData(isAttracting_, level_);
+            data.showParticles = tag.getBoolean("showParticles");
+            return data;
         }
 
         public CompoundTag toTag() {
             CompoundTag tag = new CompoundTag();
             tag.putBoolean("isAttracting", isAttracting);
             tag.putInt("level", level);
+            tag.putBoolean("showParticles", showParticles);
             return tag;
         }
 
@@ -289,6 +294,10 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             searchBox = gravityapivs$shipToWorldBox(ship, roughBox);
         }
 
+        if (world.isClientSide()) {
+            be.spawnFieldParticles(world, blockPos, ship);
+        }
+
         List<Entity> entities = world.getEntitiesOfClass(
                 Entity.class,
                 searchBox,
@@ -397,6 +406,52 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
             if (controlsEntity && GravityConfig.autoJumpOnGravityPlateInnerCorner.get()) {
                 tryToDoCornerAutoJump(blockState, blockPos, entity, comp, ship);
+            }
+        }
+    }
+
+    /**
+     * Field visualization (toggled per side with a glow ink sac): particles
+     * drifting along the field's pull — blue soul flames for attract, orange
+     * flames for repulse. Positions/directions are grid-local, so on ships they
+     * are transformed into world space with the ship transform.
+     */
+    private void spawnFieldParticles(Level world, BlockPos blockPos, @Nullable Ship ship) {
+        if (sideData == null) {
+            return;
+        }
+        var random = world.getRandom();
+
+        for (Direction plateDir : Direction.values()) {
+            SideData sideDatum = sideData[plateDir.ordinal()];
+            if (sideDatum == null || !sideDatum.showParticles) {
+                continue;
+            }
+
+            AABB box = sideDatum.getEffectBox(blockPos, plateDir, world);
+            Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
+
+            for (int i = 0; i < 2; i++) {
+                Vector3d pos = new Vector3d(
+                    box.minX + random.nextDouble() * (box.maxX - box.minX),
+                    box.minY + random.nextDouble() * (box.maxY - box.minY),
+                    box.minZ + random.nextDouble() * (box.maxZ - box.minZ)
+                );
+                Vector3d vel = new Vector3d(
+                    localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ()
+                );
+                if (ship != null) {
+                    ship.getTransform().getShipToWorldMatrix().transformPosition(pos);
+                    ship.getTransform().getShipToWorldMatrix().transformDirection(vel);
+                }
+                vel.mul(0.08);
+
+                world.addParticle(
+                    sideDatum.isAttracting
+                        ? net.minecraft.core.particles.ParticleTypes.SOUL_FIRE_FLAME
+                        : net.minecraft.core.particles.ParticleTypes.FLAME,
+                    pos.x, pos.y, pos.z, vel.x, vel.y, vel.z
+                );
             }
         }
     }
@@ -630,6 +685,20 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             }
 
             sideDatum.level += 1;
+        }
+        else if (handItem.getItem() == Items.GLOW_INK_SAC) {
+            sideDatum.showParticles = !sideDatum.showParticles;
+            if (sideDatum.showParticles && !player.isCreative()) {
+                handItem.shrink(1);
+            }
+            sync();
+            player.displayClientMessage(
+                    Component.translatable(sideDatum.showParticles
+                            ? "gravity_changer.field_visual.on"
+                            : "gravity_changer.field_visual.off"),
+                    true
+            );
+            return InteractionResult.SUCCESS;
         }
         else {
             player.displayClientMessage(
