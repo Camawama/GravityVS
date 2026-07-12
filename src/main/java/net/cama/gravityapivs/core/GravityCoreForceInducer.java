@@ -4,8 +4,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.jetbrains.annotations.NotNull;
 import org.joml.Vector3d;
+import org.valkyrienskies.core.api.ships.LoadedServerShip;
 import org.valkyrienskies.core.api.ships.PhysShip;
-import org.valkyrienskies.core.api.ships.ServerShip;
 import org.valkyrienskies.core.api.ships.ShipForcesInducer;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
@@ -29,11 +29,17 @@ public class GravityCoreForceInducer implements ShipForcesInducer {
     @JsonIgnore
     private int physTicksSinceUpdate = 0;
 
-    public static GravityCoreForceInducer getOrCreate(ServerShip ship) {
+    /**
+     * Only loaded ships may carry attachments — {@code ServerShip.getAttachment}
+     * THROWS for unloaded ships (VS 2.5-era core), which crashed the server the
+     * moment a core's range box swept up a distant ship. Nothing here needs
+     * persisting, so the transient {@code setAttachment} is also the right call.
+     */
+    public static GravityCoreForceInducer getOrCreate(LoadedServerShip ship) {
         GravityCoreForceInducer inducer = ship.getAttachment(GravityCoreForceInducer.class);
         if (inducer == null) {
             inducer = new GravityCoreForceInducer();
-            ship.saveAttachment(GravityCoreForceInducer.class, inducer);
+            ship.setAttachment(GravityCoreForceInducer.class, inducer);
         }
         return inducer;
     }

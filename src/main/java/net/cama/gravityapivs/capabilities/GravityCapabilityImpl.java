@@ -70,6 +70,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // after leaving a field, keep its pull for a few ticks (jumping off a plate
     // must not instantly revert gravity mid-air)
     private static final int FIELD_GRACE_TICKS = 6;
+    // after losing ground contact, keep aligning to the last surface normal for
+    // a few ticks (contact flicker and jumps must not wobble the frame)
+    private static final int GROUND_NORMAL_GRACE_TICKS = 5;
+    // past the grace window, keep snapping to the last surface normal while the
+    // field stays within this cone of it (~20 degrees: jumps in a radial field
+    // must not release the surface alignment)
+    private static final double GROUND_NORMAL_SNAP_DOT = Math.cos(Math.toRadians(20));
+    // a ground normal within this cone of the current one tracks it immediately
+    // (rotating ship decks); a very different one (another face) must persist…
+    private static final double GROUND_NORMAL_TRACK_DOT = Math.cos(Math.toRadians(25));
+    // …for this many consecutive ticks before it is adopted — at a convex edge
+    // the contacts alternate between the two faces every tick, and without this
+    // the frame target ping-pongs 90 degrees ("stuck between two faces")
+    private static final int GROUND_NORMAL_SWITCH_TICKS = 3;
 
     public boolean initialized = false;
 
@@ -103,6 +117,25 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // capsule collision state (players under non-default gravity)
     public boolean capsuleGrounded = false;
     public @Nullable org.valkyrienskies.core.api.ships.Ship capsuleGroundShip = null;
+    // world-space normal of the surface being stood on
+    public @Nullable Vec3 capsuleGroundNormal = null;
+    // surface-normal memory for the planet-walk rule (grace + snap cone),
+    // stability-filtered: this is what the frame aligns to, never the raw
+    // per-tick contact normal
+    private @Nullable Vec3 lastGroundNormal = null;
+    private int groundNormalGraceTicks = 0;
+    private @Nullable Vec3 pendingGroundNormal = null;
+    private int pendingGroundNormalTicks = 0;
+
+    // chase-target stability: a still target is converged on decisively, a
+    // moving one is followed with smoothing
+    private final Quaternionf lastChaseTarget = new Quaternionf();
+    private int targetStableTicks = 0;
+
+    // the client player only adopts the server's cardinal after a persistent
+    // disagreement (single-packet flips near 45-degree field regions caused a
+    // canonical-frame flip war)
+    private int serverDirectionDisagreeStreak = 0;
 
     @Nullable RotationParameters currentRotationParameters = RotationParameters.getDefault();
 
@@ -223,11 +256,134 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
         updateGravityStatus();
         applyGravityChange();
+        updateGroundNormalMemory();
         advanceVisualRotation();
+        applyStaticFriction();
 
         if (!entity.level().isClientSide()) {
             maybeSendSync();
         }
+    }
+
+    /**
+     * Remembers the surface normal the capsule stands on, stability-filtered.
+     *
+     * - A normal close to the current one tracks immediately (rotating decks).
+     * - A very different normal (another face of the planet) must persist for
+     *   {@link #GROUND_NORMAL_SWITCH_TICKS} consecutive ticks before it is
+     *   adopted: at a convex edge the deepest contact alternates between the
+     *   two faces every tick, and following it raw ping-pongs the frame target
+     *   90 degrees ("stuck between two faces, goes back and forth").
+     * - After contact is lost it stays authoritative through a short grace
+     *   window (contact flicker, jumps), and beyond that for as long as the
+     *   field vector stays inside a cone around it — gravity close enough to a
+     *   surface normal snaps to the normal.
+     */
+    private void updateGroundNormalMemory() {
+        if (!(entity instanceof Player)) {
+            return;
+        }
+
+        if (!useCapsuleCollision()) {
+            // capsule collision is off (e.g. the frame is exactly vanilla on the
+            // "top" of a planet), so the capsule fields are not being refreshed —
+            // sync them from vanilla so they can't go stale and poison the
+            // surface-normal memory when the player walks over an edge
+            capsuleGrounded = entity.onGround();
+            capsuleGroundNormal = capsuleGrounded ? getUpVector() : null;
+            capsuleGroundShip = null;
+        }
+
+        if (capsuleGrounded && capsuleGroundNormal != null) {
+            Vec3 candidate = capsuleGroundNormal;
+            if (lastGroundNormal == null
+                || candidate.dot(lastGroundNormal) > GROUND_NORMAL_TRACK_DOT) {
+                lastGroundNormal = candidate;
+                pendingGroundNormal = null;
+                pendingGroundNormalTicks = 0;
+            }
+            else if (pendingGroundNormal != null
+                && candidate.dot(pendingGroundNormal) > GROUND_NORMAL_TRACK_DOT) {
+                if (++pendingGroundNormalTicks >= GROUND_NORMAL_SWITCH_TICKS) {
+                    lastGroundNormal = candidate;
+                    pendingGroundNormal = null;
+                    pendingGroundNormalTicks = 0;
+                }
+            }
+            else {
+                pendingGroundNormal = candidate;
+                pendingGroundNormalTicks = 1;
+            }
+            groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
+            return;
+        }
+
+        pendingGroundNormal = null;
+        pendingGroundNormalTicks = 0;
+
+        if (lastGroundNormal == null) {
+            return;
+        }
+        if (groundNormalGraceTicks > 0) {
+            groundNormalGraceTicks--;
+            return;
+        }
+        Vec3 fieldUp = targetGravityVector != null && targetGravityVector.lengthSqr() > 1.0E-6
+            ? targetGravityVector.normalize().scale(-1)
+            : getCurrGravityDirectionVec().scale(-1);
+        if (fieldUp.dot(lastGroundNormal) < GROUND_NORMAL_SNAP_DOT) {
+            // the field left the cone: the surface is no longer relevant
+            lastGroundNormal = null;
+        }
+    }
+
+    /**
+     * The up direction the player's frame (and physics cardinal) should chase:
+     * the filtered surface normal while standing on a compatible surface,
+     * otherwise the field's up. The 0.35 dot gate keeps repulsion fields
+     * working — gravity pointing AWAY from the surface must not be captured
+     * by the floor the player is still standing on.
+     */
+    private Vec3 effectiveTargetUp(Vec3 fieldVector) {
+        Vec3 targetUp = fieldVector.scale(-1);
+        if (lastGroundNormal != null && lastGroundNormal.dot(targetUp) > 0.35) {
+            return lastGroundNormal;
+        }
+        return targetUp;
+    }
+
+    /**
+     * Static friction: when grounded with no movement input, brake the
+     * tangential velocity hard. Radial fields (gravity cores) and tilted ship
+     * decks always have a small along-surface gravity component; vanilla's
+     * multiplicative friction only slows that creep to a constant slide, which
+     * makes it impossible to stand still (and oscillating around a core's
+     * stable point wobbles the camera). Real planet-walk controllers pin the
+     * character when idle — so do we.
+     */
+    private void applyStaticFriction() {
+        if (!useCapsuleCollision() || !capsuleGrounded) {
+            return;
+        }
+        if (!(entity instanceof LivingEntity living)) {
+            return;
+        }
+
+        boolean controlled = entity.level().isClientSide()
+            ? entity.isControlledByLocalInstance()
+            : !(entity instanceof Player);
+        if (!controlled) {
+            return;
+        }
+
+        if (Math.abs(living.xxa) > 0.01 || Math.abs(living.zza) > 0.01) {
+            return;
+        }
+
+        Vec3 velocity = entity.getDeltaMovement();
+        // brake tangential (local x/z) movement; leave the gravity axis alone so
+        // jumping and falling are unaffected
+        entity.setDeltaMovement(velocity.x * 0.3, velocity.y, velocity.z * 0.3);
     }
 
     /**
@@ -245,73 +401,123 @@ public class GravityCapabilityImpl implements IGravityCapability {
             computeVisualTarget(visualTarget);
         }
 
+        // target stability: once the target stops moving, converge decisively
+        // (also how the frame reaches EXACT identity quickly after leaving a
+        // field — lingering capsule collision in the plain world was the slow
+        // 5%-per-tick deadband creep)
+        if (angleBetween(visualTarget, lastChaseTarget) < (float) Math.toRadians(0.05)) {
+            targetStableTicks++;
+        }
+        else {
+            targetStableTicks = 0;
+        }
+        lastChaseTarget.set(visualTarget);
+
         float angle = angleBetween(visualRotation, visualTarget);
-        if (angle < 1.0E-3f) {
+        if (angle < (float) Math.toRadians(0.02)) {
             visualRotation.set(visualTarget);
         }
         else {
-            float t = angle <= VISUAL_TURN_PER_TICK ? 1.0f : VISUAL_TURN_PER_TICK / angle;
-            visualRotation.slerp(visualTarget, t).normalize();
-            if (t >= 1.0f) {
-                visualRotation.set(visualTarget);
-            }
+            // CONTINUOUS response: gentle near the target (absorbs sub-degree
+            // field noise), proportionally firmer with distance, hard-capped
+            // per tick. The old tier structure snapped the FULL distance for
+            // any lag between 3 and 15 degrees — a per-tick velocity
+            // discontinuity felt as rhythmic stutter whenever the lag crossed
+            // a tier boundary (e.g. while circling a gravity core).
+            float proportion = targetStableTicks >= 5
+                ? 0.5f
+                : Mth.lerp(Mth.clamp(angle / (float) Math.toRadians(3), 0.0f, 1.0f), 0.08f, 0.35f);
+            float step = Math.min(angle * proportion, VISUAL_TURN_PER_TICK);
+            visualRotation.slerp(visualTarget, step / angle).normalize();
         }
 
         normalizeTwist();
     }
 
-    // how fast the invisible twist normalization runs
-    private static final float TWIST_SETTLE_PER_TICK = (float) Math.toRadians(4);
-
     /**
      * Parallel transport is twist-free but path-dependent: after walking around
-     * a cube the frame's yaw reference has rotated. When the field rests on a
-     * cardinal direction, quietly rotate the frame's twist back to the canonical
-     * cardinal frame while compensating yaw/pitch and local velocity, so the
-     * player sees and feels NOTHING — the frame just re-anchors underneath them.
+     * a cube the frame's yaw reference has rotated. Quietly unwind ONLY the
+     * twist component (the rotation about the frame's own up axis) back toward
+     * the canonical cardinal frame's yaw reference, compensating yaw and local
+     * velocity exactly, so the player sees and feels NOTHING.
+     *
+     * The tilt component (the frame's up vs the cardinal up) is deliberately
+     * never touched here — that belongs to the chase in
+     * {@link #advanceVisualRotation()}. The old implementation measured the
+     * TOTAL angle to canonical and snapped all of it, which made this function
+     * fight the chase whenever the field sat within a couple of degrees of a
+     * cardinal (a near-level VS ship, the axis region of a gravity core): every
+     * tick the chase tilted the frame toward the field, this snapped it back
+     * and nudged yaw with a compensation that is only valid for pure twists —
+     * a permanent 20 Hz limit cycle felt as camera jitter and wrong movement.
      */
     private void normalizeTwist() {
         if (!(entity instanceof Player) || shouldAcceptServerSync()) {
             return;
         }
 
-        Vec3 cardinal = getCurrGravityDirectionVec();
-        Vec3 target = targetGravityVector != null && targetGravityVector.lengthSqr() > 1.0E-6
-            ? targetGravityVector.normalize() : cardinal;
-
-        // only when the field is resting on the cardinal and the frame's up has
-        // already aligned with it (pure twist difference remains)
-        if (QuaternionUtil.angleBetween(target, cardinal) > Math.toRadians(2)) {
-            return;
-        }
-        if (QuaternionUtil.angleBetween(getUpVector(), cardinal.scale(-1)) > Math.toRadians(1)) {
-            return;
-        }
-
         Quaternionf canonical = RotationUtil.getWorldRotationQuaternion(currGravityDirection);
-        float twist = angleBetween(visualRotation, canonical);
-        if (twist < 1.0E-5f) {
-            if (!visualRotation.equals(canonical)) {
-                Quaternionf old = new Quaternionf(visualRotation);
-                visualRotation.set(canonical);
-                visualTarget.set(canonical);
-                compensateFrameChange(old, visualRotation);
-            }
+        if (visualRotation.equals(canonical)) {
             return;
         }
+
+        // only re-anchor while the chase is settled; never mid-transition
+        if (angleBetween(visualRotation, visualTarget) > (float) Math.toRadians(0.3)) {
+            return;
+        }
+
+        // final exact anchoring: everything within a hair of canonical converges
+        // bit-exactly so cardinal behavior matches the original mod
+        if (angleBetween(visualRotation, canonical) < (float) Math.toRadians(0.03)) {
+            Quaternionf old = new Quaternionf(visualRotation);
+            visualRotation.set(canonical);
+            visualTarget.set(canonical);
+            prevVisualRotation.set(canonical);
+            compensateFrameChange(old, visualRotation);
+            return;
+        }
+
+        Vec3 currentUp = getUpVector();
+        Vec3 cardinalUp = getCurrGravityDirectionVec().scale(-1);
+        double tilt = QuaternionUtil.angleBetween(cardinalUp, currentUp);
+        if (tilt > Math.toRadians(90)) {
+            // transport axis becomes ambiguous toward 180 degrees; don't anchor
+            return;
+        }
+
+        // twist-free reference: the canonical frame parallel-transported onto
+        // the frame's CURRENT up (same construction as computeVisualTarget)
+        Quaternionf reference = new Quaternionf(canonical);
+        if (tilt > 1.0E-6) {
+            reference.mul(QuaternionUtil.getRotationBetween(cardinalUp, currentUp).conjugate()).normalize();
+        }
+
+        // both frames map currentUp onto local up, so the remaining difference
+        // is a pure rotation about local Y — the twist
+        Quaternionf diff = new Quaternionf(visualRotation).mul(new Quaternionf(reference).conjugate());
+        if (diff.w() < 0) {
+            diff.set(-diff.x(), -diff.y(), -diff.z(), -diff.w());
+        }
+        float twist = 2.0f * (float) Math.atan2(diff.y(), diff.w());
+        if (Math.abs(twist) < 1.0E-6f) {
+            return;
+        }
+
+        // remove the WHOLE twist at once: the compensation below is exact, so
+        // there is nothing to smooth — a rate limit only stretches the unwind
+        // into a multi-second window in which any residual imperfection shows
+        // up as sustained jitter after coming to rest
+        Quaternionf delta = new Quaternionf().rotationY(-twist);
 
         Quaternionf old = new Quaternionf(visualRotation);
-        float t = twist <= TWIST_SETTLE_PER_TICK ? 1.0f : TWIST_SETTLE_PER_TICK / twist;
-        visualRotation.slerp(canonical, t).normalize();
-        if (t >= 1.0f) {
-            visualRotation.set(canonical);
-        }
+        visualRotation.premul(delta).normalize();
+        // apply the same twist to the interpolation start and the chase target;
+        // compensateFrameChange shifts yRotO as well, so the rendered camera is
+        // unchanged at EVERY partial tick (a pure local-Y twist plus its exact
+        // yaw compensation cancels identically)
+        prevVisualRotation.premul(delta).normalize();
+        visualTarget.premul(delta).normalize();
         compensateFrameChange(old, visualRotation);
-
-        // keep the render interpolation and the chase target consistent with the
-        // compensated state so the adjustment stays invisible
-        prevVisualRotation.set(visualRotation);
-        visualTarget.set(visualRotation);
     }
 
     /**
@@ -373,7 +579,15 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return;
         }
 
-        Vec3 targetUp = target.scale(-1);
+        // Planet-walk rule: while standing on a surface, align to THAT surface
+        // (via the stability-filtered memory — NEVER the raw per-tick contact
+        // normal) instead of the raw field direction. Radial fields are never
+        // exactly perpendicular to the flat faces of a blocky planet, and near
+        // a small core the field swings several degrees per step — the filtered
+        // normal keeps the control frame rock-steady on each face. Genuinely
+        // airborne keeps the pure field direction (orbit/flight feel).
+        Vec3 targetUp = effectiveTargetUp(target);
+
         Vec3 currentUp = getUpVector();
 
         double angle = QuaternionUtil.angleBetween(currentUp, targetUp);
@@ -563,6 +777,15 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
         Vec3 target = targetGravityVector.normalize();
 
+        // Players snap to the EFFECTIVE gravity (surface normal while standing
+        // on a face). The raw radial field crosses 45-degree boundaries while
+        // walking a planet face, flapping the cardinal — and with it the
+        // canonical twist reference and the server sync — several times a
+        // second, even though the player's actual up never moved.
+        if (entity instanceof Player) {
+            target = effectiveTargetUp(target).scale(-1);
+        }
+
         Direction candidate = Direction.getNearest(target.x, target.y, target.z);
         if (candidate == currGravityDirection) {
             oppositeStableTicks = 0;
@@ -674,10 +897,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
         if (GCUtil.isClientPlayer(entity)) {
             // The client player computes its own gravity from fields; only adopt
-            // the server's direction if they disagree (desynced field state).
+            // the server's direction on a PERSISTENT disagreement (true desync).
+            // The server's field state lags the client by a couple of ticks, so
+            // near 45-degree field regions single packets flip-flop — adopting
+            // each one flipped the canonical frame back and forth (visible
+            // twitching while standing near face boundaries).
             if (serverDirection != this.currGravityDirection) {
-                this.currGravityDirection = serverDirection;
-                this.currGravityStrength = currentGravityStrength;
+                if (++serverDirectionDisagreeStreak >= 3) {
+                    this.currGravityDirection = serverDirection;
+                    this.currGravityStrength = currentGravityStrength;
+                    serverDirectionDisagreeStreak = 0;
+                }
+            }
+            else {
+                serverDirectionDisagreeStreak = 0;
             }
             return;
         }

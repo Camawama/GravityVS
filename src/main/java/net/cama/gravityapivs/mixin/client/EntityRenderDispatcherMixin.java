@@ -199,6 +199,87 @@ public abstract class EntityRenderDispatcherMixin {
         return RotationUtil.boxWorldToPlayer(box, GravityChangerAPI.getGravityRotation(entity));
     }
     
+    /**
+     * F3+B debug view of the capsule collider: one colored wire SPHERE per
+     * collision sphere (green = feet, yellow = middle, red = head), stacked
+     * along the visual up axis — this is the true collision volume; there are
+     * no box corners. The white box stays the stored envelope AABB.
+     * Coordinates are supplied in the physics frame because inject_render_2
+     * already applied the player->world pose for hitbox rendering.
+     */
+    @Inject(
+        method = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;renderHitbox(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;Lnet/minecraft/world/entity/Entity;F)V",
+        at = @At("TAIL")
+    )
+    private static void inject_renderCapsuleDebug(PoseStack matrices, VertexConsumer vertices, Entity entity, float tickDelta, CallbackInfo ci) {
+        net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
+            GravityChangerAPI.getGravityComponentOrNull(entity);
+        if (comp == null || !comp.useCapsuleCollision()) {
+            return;
+        }
+
+        double radius = net.cama.gravityapivs.util.CapsuleCollider.capsuleRadius(entity);
+        double height = net.cama.gravityapivs.util.CapsuleCollider.capsuleHeight(entity, radius);
+        double[] offsets = net.cama.gravityapivs.util.CapsuleCollider.sphereOffsets(height, radius);
+
+        Quaternionf renderRotation = comp.getRenderRotation(tickDelta);
+        Vec3 up = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), renderRotation);
+        Vec3 right = RotationUtil.vecPlayerToWorld(new Vec3(1, 0, 0), renderRotation);
+        Vec3 forward = RotationUtil.vecPlayerToWorld(new Vec3(0, 0, 1), renderRotation);
+        Quaternionf physicsRotation = comp.getCurrentRotation();
+
+        float[][] colors = {
+            {0.25f, 1.0f, 0.25f},   // bottom sphere: green
+            {1.0f, 1.0f, 0.25f},    // middle sphere: yellow
+            {1.0f, 0.35f, 0.35f}    // top sphere: red
+        };
+
+        for (int i = 0; i < offsets.length; i++) {
+            Vec3 center = up.scale(offsets[i]);
+            float[] color = colors[Math.min(i, colors.length - 1)];
+            gravityapivs$drawCircle(matrices, vertices, physicsRotation, center, right, forward, radius, color);
+            gravityapivs$drawCircle(matrices, vertices, physicsRotation, center, right, up, radius, color);
+            gravityapivs$drawCircle(matrices, vertices, physicsRotation, center, forward, up, radius, color);
+        }
+    }
+
+    /**
+     * Wire circle around {@code center} in the plane spanned by {@code a}/{@code b}
+     * (world-space, relative to the entity origin), emitted in physics-frame
+     * coordinates to match the pose applied by inject_render_2.
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private static void gravityapivs$drawCircle(
+        PoseStack matrices, VertexConsumer vertices, Quaternionf physicsRotation,
+        Vec3 center, Vec3 a, Vec3 b, double radius, float[] color
+    ) {
+        PoseStack.Pose pose = matrices.last();
+        int segments = 32;
+
+        Vec3 prev = RotationUtil.vecWorldToPlayer(center.add(a.scale(radius)), physicsRotation);
+        for (int i = 1; i <= segments; i++) {
+            double angle = (Math.PI * 2.0 * i) / segments;
+            Vec3 next = RotationUtil.vecWorldToPlayer(
+                center.add(a.scale(radius * Math.cos(angle))).add(b.scale(radius * Math.sin(angle))),
+                physicsRotation
+            );
+            Vec3 dir = next.subtract(prev);
+            double len = dir.length();
+            if (len > 1.0E-9) {
+                dir = dir.scale(1.0 / len);
+                vertices.vertex(pose.pose(), (float) prev.x, (float) prev.y, (float) prev.z)
+                    .color(color[0], color[1], color[2], 1.0F)
+                    .normal(pose.normal(), (float) dir.x, (float) dir.y, (float) dir.z)
+                    .endVertex();
+                vertices.vertex(pose.pose(), (float) next.x, (float) next.y, (float) next.z)
+                    .color(color[0], color[1], color[2], 1.0F)
+                    .normal(pose.normal(), (float) dir.x, (float) dir.y, (float) dir.z)
+                    .endVertex();
+            }
+            prev = next;
+        }
+    }
+
     @Redirect(
         method = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;renderHitbox(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;Lnet/minecraft/world/entity/Entity;F)V",
         at = @At(

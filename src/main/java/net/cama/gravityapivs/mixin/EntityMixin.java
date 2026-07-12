@@ -165,35 +165,39 @@ public abstract class EntityMixin {
         Entity self = (Entity) (Object) this;
         Vec3 up = comp.getUpVector();
 
-        net.cama.gravityapivs.util.CapsuleCollider.Result result =
-            net.cama.gravityapivs.util.CapsuleCollider.collide(self, up, movement, comp.capsuleGrounded);
+        // second ground reference: where the FIELD says up is — during a landing
+        // on a steep face the frame's up still points the old way, and contacts
+        // opposing the field must count as ground or alignment never engages
+        Vec3 fieldVector = comp.getTargetGravityVector();
+        Vec3 gravityUp = fieldVector.lengthSqr() > 1.0E-6
+            ? fieldVector.normalize().scale(-1)
+            : up;
 
-        Vec3 total = result.collidedMovement;
+        net.cama.gravityapivs.util.CapsuleCollider.Result result =
+            net.cama.gravityapivs.util.CapsuleCollider.collide(self, up, gravityUp, movement, comp.capsuleGrounded);
+
         boolean grounded = result.grounded;
         org.valkyrienskies.core.api.ships.Ship groundShip = result.groundShip;
 
-        // ride the surface of the ship we're standing on (drag) — resolved as a
-        // second collision pass so it can never fire while airborne
+        // Standing on a ship: report it to Valkyrien Skies' own dragging system
+        // (this is normally done by the VS collision hook that the capsule
+        // bypasses). VS then handles surface dragging, yaw-follow, client
+        // interpolation AND its anticheat exemptions — without this the server
+        // rejects ship-carried movement ("moved wrongly") and rubber-bands the
+        // player into the ship.
         if (grounded && groundShip != null) {
-            Vec3 drag = net.cama.gravityapivs.util.CapsuleCollider
-                .shipSurfaceVelocity(groundShip, self.position())
-                .scale(1.0 / 20.0);
-            if (drag.lengthSqr() > 1.0E-12) {
-                net.cama.gravityapivs.util.CapsuleCollider.Result dragResult =
-                    net.cama.gravityapivs.util.CapsuleCollider.collide(
-                        self, self.position().add(total), up, drag, true
-                    );
-                total = total.add(dragResult.collidedMovement);
-                if (dragResult.groundShip != null) {
-                    groundShip = dragResult.groundShip;
-                }
-            }
+            org.valkyrienskies.mod.common.util.EntityDraggingInformation dragInfo =
+                ((org.valkyrienskies.mod.common.util.IEntityDraggingInformationProvider) self)
+                    .getDraggingInformation();
+            dragInfo.setLastShipStoodOn(groundShip.getId());
+            dragInfo.setTicksSinceStoodOnShip(0);
         }
 
         comp.capsuleGrounded = grounded;
         comp.capsuleGroundShip = grounded ? groundShip : null;
+        comp.capsuleGroundNormal = grounded ? result.groundNormal : null;
 
-        cir.setReturnValue(total);
+        cir.setReturnValue(result.collidedMovement);
     }
 
     @Inject(method = "tick", at = @At("HEAD"))
@@ -427,7 +431,32 @@ public abstract class EntityMixin {
 
         Vec3 deltaWorld = vec3d.subtract(gravityapivs$moveWorldArg);
         Vec3 deltaLocal = RotationUtil.vecWorldToPlayer(deltaWorld, comp.getVisualRotation());
-        return gravityapivs$moveLocalArg.add(deltaLocal);
+        Vec3 local = gravityapivs$moveLocalArg;
+        return new Vec3(
+            gravityapivs$resolveAxis(local.x, deltaLocal.x),
+            gravityapivs$resolveAxis(local.y, deltaLocal.y),
+            gravityapivs$resolveAxis(local.z, deltaLocal.z)
+        );
+    }
+
+    // Vanilla derives horizontalCollision/verticalCollision/onGround by comparing
+    // this vector against the (local) movement argument — exact double != on the
+    // vertical axis (any difference also zeroes vertical velocity through
+    // updateEntityAfterFallOn), 1e-7 tolerance horizontally (Mth.equal) — and
+    // zeroes the velocity of every "collided" axis. So an axis may only differ
+    // when the capsule genuinely held the player back along it: quaternion
+    // round-trip noise and corrections pushing ALONG the movement (rolling over
+    // a convex edge) must pass through bit-exactly, otherwise walking fights
+    // phantom collisions every tick and jumps die against walls.
+    @org.spongepowered.asm.mixin.Unique
+    private static double gravityapivs$resolveAxis(double intended, double delta) {
+        if (Math.abs(delta) < 1.0E-6) {
+            return intended;
+        }
+        if (delta * intended >= 0.0) {
+            return intended;
+        }
+        return intended + delta;
     }
 
     @Inject(

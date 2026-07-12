@@ -147,7 +147,8 @@ public class GravityCoreBlockEntity extends BlockEntity {
         }
 
         for (Ship ship : VSGameUtilsKt.getShipsIntersecting(serverLevel, searchBox)) {
-            if (ship == ownShip || !(ship instanceof ServerShip serverShip)) {
+            // must be LOADED: attachment access on an unloaded ServerShip throws
+            if (ship == ownShip || !(ship instanceof org.valkyrienskies.core.api.ships.LoadedServerShip serverShip)) {
                 continue;
             }
 

@@ -41,11 +41,14 @@ public final class CapsuleCollider {
         public final Vec3 collidedMovement;
         public final boolean grounded;
         public final @Nullable Ship groundShip;
+        /** world-space normal of the strongest up-facing contact, when grounded */
+        public final @Nullable Vec3 groundNormal;
 
-        Result(Vec3 collidedMovement, boolean grounded, @Nullable Ship groundShip) {
+        Result(Vec3 collidedMovement, boolean grounded, @Nullable Ship groundShip, @Nullable Vec3 groundNormal) {
             this.collidedMovement = collidedMovement;
             this.grounded = grounded;
             this.groundShip = groundShip;
+            this.groundNormal = groundNormal;
         }
     }
 
@@ -56,6 +59,14 @@ public final class CapsuleCollider {
         boolean grounded = false;
         boolean touched = false;
         @Nullable Ship groundShip = null;
+        double bestGroundDot = 0;
+        @Nullable Vec3 groundNormal = null;
+        // second "down is that way" reference for ground classification: the
+        // FIELD's up. During a landing on a steep surface the frame's up still
+        // points the old way, so contacts opposing the field must also count as
+        // ground — otherwise the planet-walk alignment can never engage
+        // (visible as being dragged along the surface with pulsating tilt).
+        Vec3 gravityUp = new Vec3(0, 1, 0);
     }
 
     /**
@@ -66,19 +77,20 @@ public final class CapsuleCollider {
      * @param wasGrounded whether the entity was grounded last tick (enables step-up)
      * @return collided movement plus ground contact info
      */
-    public static Result collide(Entity entity, Vec3 up, Vec3 movement, boolean wasGrounded) {
-        return collide(entity, entity.position(), up, movement, wasGrounded);
+    public static Result collide(Entity entity, Vec3 up, Vec3 gravityUp, Vec3 movement, boolean wasGrounded) {
+        return collide(entity, entity.position(), up, gravityUp, movement, wasGrounded);
     }
 
-    public static Result collide(Entity entity, Vec3 start, Vec3 up, Vec3 movement, boolean wasGrounded) {
-        double radius = Math.max(0.1, entity.getBbWidth() / 2.0 - 0.02);
-        double height = Math.max(entity.getBbHeight(), radius * 2.0 + 0.02);
+    public static Result collide(Entity entity, Vec3 start, Vec3 up, Vec3 gravityUp, Vec3 movement, boolean wasGrounded) {
+        double radius = capsuleRadius(entity);
+        double height = capsuleHeight(entity, radius);
         double[] sphereOffsets = sphereOffsets(height, radius);
 
         List<Obstacle> obstacles = gatherObstacles(entity.level(), start, movement, up, radius, height);
 
         ResolveState state = new ResolveState();
-        Vec3 end = sweep(start, movement, up, radius, sphereOffsets, obstacles, state);
+        state.gravityUp = gravityUp;
+        Vec3 correction = sweep(start, movement, up, radius, sphereOffsets, obstacles, state);
 
         if (!state.touched) {
             // Nothing was hit: return the movement BIT-EXACTLY. Vanilla decides
@@ -86,34 +98,58 @@ public final class CapsuleCollider {
             // 1e-8 substep-summation error would register as a phantom collision
             // (which manifests as jumping on air, elytra/flight cancelling, and
             // ground friction flickering).
-            return new Result(movement, false, null);
+            return new Result(movement, false, null, null);
         }
+
+        // movement plus the summed contact corrections: axes the contacts never
+        // touched come back BIT-IDENTICAL to the input (see sweep)
+        Vec3 collided = movement.add(correction);
 
         // step assist: when walking along the ground into a low obstacle, retry the
         // move lifted by the step height, then settle back down
         if (wasGrounded) {
-            Vec3 achieved = end.subtract(start);
             Vec3 tangentIntended = rejectFrom(movement, up);
-            Vec3 tangentAchieved = rejectFrom(achieved, up);
+            Vec3 tangentAchieved = rejectFrom(collided, up);
             double intendedLen = tangentIntended.length();
             if (intendedLen > 1.0E-5 && tangentAchieved.length() < intendedLen * 0.7) {
                 ResolveState stepState = new ResolveState();
-                Vec3 lifted = sweep(start, up.scale(STEP_HEIGHT), up, radius, sphereOffsets, obstacles, stepState);
-                Vec3 movedUp = sweep(lifted, movement, up, radius, sphereOffsets, obstacles, stepState);
-                Vec3 settled = sweep(movedUp, up.scale(-(STEP_HEIGHT + SKIN * 2)), up, radius, sphereOffsets, obstacles, stepState);
+                stepState.gravityUp = gravityUp;
+                Vec3 lift = up.scale(STEP_HEIGHT);
+                Vec3 lifted = start.add(lift)
+                    .add(sweep(start, lift, up, radius, sphereOffsets, obstacles, stepState));
+                Vec3 movedUp = lifted.add(movement)
+                    .add(sweep(lifted, movement, up, radius, sphereOffsets, obstacles, stepState));
+                Vec3 drop = up.scale(-(STEP_HEIGHT + SKIN * 2));
+                Vec3 settled = movedUp.add(drop)
+                    .add(sweep(movedUp, drop, up, radius, sphereOffsets, obstacles, stepState));
 
-                Vec3 stepTangent = rejectFrom(settled.subtract(start), up);
+                Vec3 stepMovement = settled.subtract(start);
+                Vec3 stepTangent = rejectFrom(stepMovement, up);
                 if (stepTangent.length() > tangentAchieved.length() + 0.01) {
-                    end = settled;
+                    collided = stepMovement;
                     state.grounded = state.grounded || stepState.grounded;
                     if (state.groundShip == null) {
                         state.groundShip = stepState.groundShip;
+                    }
+                    if (stepState.bestGroundDot > state.bestGroundDot) {
+                        state.bestGroundDot = stepState.bestGroundDot;
+                        state.groundNormal = stepState.groundNormal;
                     }
                 }
             }
         }
 
-        return new Result(end.subtract(start), state.grounded, state.groundShip);
+        return new Result(collided, state.grounded, state.groundShip, state.groundNormal);
+    }
+
+    /** Radius of the capsule's spheres for this entity. */
+    public static double capsuleRadius(Entity entity) {
+        return Math.max(0.1, entity.getBbWidth() / 2.0 - 0.02);
+    }
+
+    /** Height of the capsule for this entity. */
+    public static double capsuleHeight(Entity entity, double radius) {
+        return Math.max(entity.getBbHeight(), radius * 2.0 + 0.02);
     }
 
     /**
@@ -136,7 +172,8 @@ public final class CapsuleCollider {
 
     // ------------------------------------------------------------------
 
-    private static double[] sphereOffsets(double height, double radius) {
+    /** Offsets of the sphere centers along the up axis, from the feet point. */
+    public static double[] sphereOffsets(double height, double radius) {
         double bottom = radius;
         double top = Math.max(height - radius, radius);
         if (top - bottom < radius) {
@@ -150,26 +187,37 @@ public final class CapsuleCollider {
         return v.subtract(unit.scale(v.dot(unit)));
     }
 
-    /** Substepped move-and-depenetrate. */
+    /**
+     * Substepped move-and-depenetrate.
+     *
+     * Returns the total contact CORRECTION; the final position is
+     * {@code start + movement + correction}. Substep positions are computed as
+     * {@code start + movement * (i/n) + correction} rather than by summing
+     * increments, so an axis that no contact ever pushes accumulates EXACTLY
+     * zero error. This matters because vanilla decides verticalCollision (and
+     * with it onGround and the vertical-velocity zeroing in
+     * updateEntityAfterFallOn) by comparing the movement with an exact double
+     * {@code !=} — summing {@code movement/3} three times is already enough to
+     * kill a jump made while brushing a wall.
+     */
     private static Vec3 sweep(
         Vec3 start, Vec3 movement, Vec3 up, double radius,
         double[] sphereOffsets, List<Obstacle> obstacles, ResolveState state
     ) {
-        Vec3 pos = depenetrate(start, up, radius, sphereOffsets, obstacles, state);
+        Vec3 correction = depenetrate(start, up, radius, sphereOffsets, obstacles, state).subtract(start);
 
         double length = movement.length();
         if (length < 1.0E-7) {
-            return pos;
+            return correction;
         }
 
         int substeps = Mth.clamp((int) Math.ceil(length / (radius * 0.5)), 1, 16);
-        Vec3 step = movement.scale(1.0 / substeps);
-
-        for (int i = 0; i < substeps; i++) {
-            pos = pos.add(step);
-            pos = depenetrate(pos, up, radius, sphereOffsets, obstacles, state);
+        for (int i = 1; i <= substeps; i++) {
+            Vec3 target = start.add(movement.scale((double) i / substeps)).add(correction);
+            Vec3 resolved = depenetrate(target, up, radius, sphereOffsets, obstacles, state);
+            correction = correction.add(resolved.subtract(target));
         }
-        return pos;
+        return correction;
     }
 
     /**
@@ -182,10 +230,11 @@ public final class CapsuleCollider {
     ) {
         double r2 = radius * radius;
 
-        for (int iteration = 0; iteration < 8; iteration++) {
+        for (int iteration = 0; iteration < 12; iteration++) {
             double worstDepth = 0;
             Vec3 worstNormal = null;
             Obstacle worstObstacle = null;
+            Vec3 worstLocalCenter = null;
 
             for (double offset : sphereOffsets) {
                 Vec3 center = pos.add(up.scale(offset));
@@ -215,6 +264,7 @@ public final class CapsuleCollider {
                                 worstDepth = depth;
                                 worstNormal = toWorldDirection(normalLocal, obstacle.ship);
                                 worstObstacle = obstacle;
+                                worstLocalCenter = c;
                             }
                         }
                         continue;
@@ -226,6 +276,7 @@ public final class CapsuleCollider {
                         worstDepth = depth;
                         worstNormal = toWorldDirection(new Vec3(dx / dist, dy / dist, dz / dist), obstacle.ship);
                         worstObstacle = obstacle;
+                        worstLocalCenter = c;
                     }
                 }
             }
@@ -235,17 +286,85 @@ public final class CapsuleCollider {
             }
 
             state.touched = true;
-            pos = pos.add(worstNormal.scale(worstDepth + SKIN));
 
-            if (worstNormal.dot(up) > GROUND_NORMAL_DOT) {
+            // Standing contacts against block edges/corners resolve along the
+            // FACE being stood on, not the diagonal sphere-to-edge normal.
+            // Raw edge normals make every internal edge and convex corner a
+            // separate contact plane: the player floats on corner points, gets
+            // dragged tangentially every tick, and the edge-diagonal normals
+            // leak into the planet-walk frame (visible as stutter and weird
+            // sliding near edges). Walls and ceilings (support face not up-ish)
+            // keep the exact contact normal.
+            Vec3 pushDir = worstNormal;
+            double pushLen = worstDepth + SKIN;
+            double upDot = Math.max(worstNormal.dot(up), worstNormal.dot(state.gravityUp));
+
+            Vec3 support = supportFaceNormal(worstLocalCenter, worstObstacle.box, worstObstacle.ship, up, state.gravityUp);
+            if (support != null) {
+                double supportUpDot = Math.max(support.dot(up), support.dot(state.gravityUp));
+                double align = worstNormal.dot(support);
+                if (supportUpDot > GROUND_NORMAL_DOT && align > 0.4) {
+                    pushDir = support;
+                    pushLen = worstDepth / align + SKIN;
+                    upDot = supportUpDot;
+                }
+            }
+
+            pos = pos.add(pushDir.scale(pushLen));
+
+            if (upDot > GROUND_NORMAL_DOT) {
                 state.grounded = true;
                 if (worstObstacle.ship != null) {
                     state.groundShip = worstObstacle.ship;
+                }
+                if (upDot > state.bestGroundDot) {
+                    state.bestGroundDot = upDot;
+                    state.groundNormal = pushDir;
                 }
             }
         }
 
         return pos;
+    }
+
+    /**
+     * The face of the obstacle box that supports the capsule for this contact:
+     * among the faces the sphere center lies beyond, the one whose world-space
+     * outward normal points most along up. Null when the center is inside the
+     * box (deep penetration keeps the nearest-face push).
+     */
+    private static @Nullable Vec3 supportFaceNormal(Vec3 localCenter, AABB box, @Nullable Ship ship, Vec3 up, Vec3 gravityUp) {
+        Vec3 best = null;
+        double bestDot = 0;
+
+        for (int i = 0; i < 6; i++) {
+            double beyond = switch (i) {
+                case 0 -> box.minX - localCenter.x;
+                case 1 -> localCenter.x - box.maxX;
+                case 2 -> box.minY - localCenter.y;
+                case 3 -> localCenter.y - box.maxY;
+                case 4 -> box.minZ - localCenter.z;
+                default -> localCenter.z - box.maxZ;
+            };
+            if (beyond <= 0) {
+                continue;
+            }
+            Vec3 normal = toWorldDirection(switch (i) {
+                case 0 -> new Vec3(-1, 0, 0);
+                case 1 -> new Vec3(1, 0, 0);
+                case 2 -> new Vec3(0, -1, 0);
+                case 3 -> new Vec3(0, 1, 0);
+                case 4 -> new Vec3(0, 0, -1);
+                default -> new Vec3(0, 0, 1);
+            }, ship);
+            double dot = Math.max(normal.dot(up), normal.dot(gravityUp));
+            if (dot > bestDot) {
+                bestDot = dot;
+                best = normal;
+            }
+        }
+
+        return best;
     }
 
     private static Vec3 toWorldDirection(Vec3 v, @Nullable Ship ship) {
