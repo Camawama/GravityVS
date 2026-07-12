@@ -411,10 +411,13 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     }
 
     /**
-     * Field visualization (toggled per side with a glow ink sac): particles
-     * drifting along the field's pull — blue soul flames for attract, orange
-     * flames for repulse. Positions/directions are grid-local, so on ships they
-     * are transformed into world space with the ship transform.
+     * Field visualization (toggled per side with a glow ink sac).
+     *
+     * The field EXTENT is drawn as a dust wireframe of the effect box, and the
+     * DIRECTION as flame particles on a fixed lattice of streamlines (block
+     * centers), so repeated spawns trace dashed flow lines instead of random
+     * sparks. Blue = attract, orange = repulse. Positions/directions are
+     * grid-local, so on ships they are transformed into world space.
      */
     private void spawnFieldParticles(Level world, BlockPos blockPos, @Nullable Ship ship) {
         if (sideData == null) {
@@ -430,13 +433,40 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
             AABB box = sideDatum.getEffectBox(blockPos, plateDir, world);
             Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
+            boolean attracting = sideDatum.isAttracting;
 
-            for (int i = 0; i < 2; i++) {
-                Vector3d pos = new Vector3d(
-                    box.minX + random.nextDouble() * (box.maxX - box.minX),
-                    box.minY + random.nextDouble() * (box.maxY - box.minY),
-                    box.minZ + random.nextDouble() * (box.maxZ - box.minZ)
+            // boundary: dust points along the effect box wireframe
+            for (int i = 0; i < 5; i++) {
+                Vec3 edgePoint = net.cama.gravityapivs.util.FieldVisuals.randomPointOnBoxEdge(box, random);
+                Vector3d pos = new Vector3d(edgePoint.x, edgePoint.y, edgePoint.z);
+                if (ship != null) {
+                    ship.getTransform().getShipToWorldMatrix().transformPosition(pos);
+                }
+                world.addAlwaysVisibleParticle(
+                    net.cama.gravityapivs.util.FieldVisuals.boundary(attracting),
+                    pos.x, pos.y, pos.z, 0, 0, 0
                 );
+            }
+
+            // flow: flames on streamlines through block centers, drifting along
+            // the field; the two axes tangent to the plate are snapped to the
+            // lattice so successive spawns line up into dashed flow lines
+            for (int i = 0; i < 3; i++) {
+                double px = box.minX + random.nextDouble() * (box.maxX - box.minX);
+                double py = box.minY + random.nextDouble() * (box.maxY - box.minY);
+                double pz = box.minZ + random.nextDouble() * (box.maxZ - box.minZ);
+                Direction.Axis axis = plateDir.getAxis();
+                if (axis != Direction.Axis.X) {
+                    px = Math.floor(px) + 0.5;
+                }
+                if (axis != Direction.Axis.Y) {
+                    py = Math.floor(py) + 0.5;
+                }
+                if (axis != Direction.Axis.Z) {
+                    pz = Math.floor(pz) + 0.5;
+                }
+
+                Vector3d pos = new Vector3d(px, py, pz);
                 Vector3d vel = new Vector3d(
                     localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ()
                 );
@@ -444,12 +474,10 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                     ship.getTransform().getShipToWorldMatrix().transformPosition(pos);
                     ship.getTransform().getShipToWorldMatrix().transformDirection(vel);
                 }
-                vel.mul(0.08);
+                vel.mul(0.1);
 
-                world.addParticle(
-                    sideDatum.isAttracting
-                        ? net.minecraft.core.particles.ParticleTypes.SOUL_FIRE_FLAME
-                        : net.minecraft.core.particles.ParticleTypes.FLAME,
+                world.addAlwaysVisibleParticle(
+                    net.cama.gravityapivs.util.FieldVisuals.flow(attracting),
                     pos.x, pos.y, pos.z, vel.x, vel.y, vel.z
                 );
             }

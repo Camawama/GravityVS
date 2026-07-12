@@ -114,10 +114,13 @@ public class GravityCoreBlockEntity extends BlockEntity {
     }
 
     /**
-     * Field visualization (toggled with a glow ink sac): particles spawned
-     * throughout the field sphere, drifting radially — blue soul flames flowing
-     * inward for attract, orange flames flowing outward for repulse. The radial
-     * flow makes the "unlocked" spherical field readable at a glance.
+     * Field visualization (toggled with a glow ink sac).
+     *
+     * The field EXTENT is drawn as three dust great-circle rings on the range
+     * sphere, and the DIRECTION as flames riding 26 fixed radial spokes —
+     * successive spawns on the same spoke trace dashed rays flowing inward
+     * (attract, blue) or outward (repulse, orange), making the spherical field
+     * readable at a glance.
      */
     private void spawnFieldParticles(Level world, Vec3 center, double range) {
         if (!showParticles) {
@@ -125,27 +128,35 @@ public class GravityCoreBlockEntity extends BlockEntity {
         }
         var random = world.getRandom();
 
-        int count = Mth.clamp((int) range, 4, 12);
-        for (int i = 0; i < count; i++) {
-            // uniform direction, cbrt-weighted distance = uniform in the volume
-            double theta = random.nextDouble() * Math.PI * 2.0;
-            double cosPhi = random.nextDouble() * 2.0 - 1.0;
-            double sinPhi = Math.sqrt(1.0 - cosPhi * cosPhi);
-            Vec3 dir = new Vec3(sinPhi * Math.cos(theta), cosPhi, sinPhi * Math.sin(theta));
+        // boundary: three world-axis great circles on the range sphere
+        int ringPoints = Mth.clamp((int) (range * 1.5), 6, 24);
+        for (int i = 0; i < ringPoints; i++) {
+            double angle = random.nextDouble() * Math.PI * 2.0;
+            double cos = Math.cos(angle) * range;
+            double sin = Math.sin(angle) * range;
+            Vec3 offset = switch (random.nextInt(3)) {
+                case 0 -> new Vec3(cos, sin, 0);
+                case 1 -> new Vec3(cos, 0, sin);
+                default -> new Vec3(0, cos, sin);
+            };
+            Vec3 pos = center.add(offset);
+            world.addAlwaysVisibleParticle(
+                net.cama.gravityapivs.util.FieldVisuals.boundary(attracting),
+                pos.x, pos.y, pos.z, 0, 0, 0
+            );
+        }
 
-            double distance = range * Math.cbrt(random.nextDouble());
-            if (distance < 1.0) {
-                continue;
-            }
-
+        // flow: flames along fixed radial spokes (dashed rays)
+        Vec3[] spokes = net.cama.gravityapivs.util.FieldVisuals.SPOKES;
+        int flowCount = Mth.clamp((int) (range / 2), 4, 10);
+        for (int i = 0; i < flowCount; i++) {
+            Vec3 dir = spokes[random.nextInt(spokes.length)];
+            double distance = 1.0 + random.nextDouble() * (range - 1.0);
             Vec3 pos = center.add(dir.scale(distance));
-            // attract: flow toward the core; repulse: flow away
-            Vec3 vel = dir.scale(attracting ? -0.1 : 0.1);
+            Vec3 vel = dir.scale(attracting ? -0.12 : 0.12);
 
-            world.addParticle(
-                attracting
-                    ? net.minecraft.core.particles.ParticleTypes.SOUL_FIRE_FLAME
-                    : net.minecraft.core.particles.ParticleTypes.FLAME,
+            world.addAlwaysVisibleParticle(
+                net.cama.gravityapivs.util.FieldVisuals.flow(attracting),
                 pos.x, pos.y, pos.z, vel.x, vel.y, vel.z
             );
         }
