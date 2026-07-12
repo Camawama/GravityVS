@@ -106,59 +106,16 @@ public class GravityCoreBlockEntity extends BlockEntity {
         be.applyToEntities(world, center, range, searchBox);
 
         if (world.isClientSide()) {
-            be.spawnFieldParticles(world, center, range);
+            if (be.showParticles) {
+                // grid-local center: the renderer applies the ship's per-frame
+                // render transform, so the visual sticks to moving ships
+                net.cama.gravityapivs.util.FieldVisuals.submitCore(
+                    world, blockPos, Vec3.atCenterOf(blockPos), range, be.attracting, ownShip
+                );
+            }
         }
         else if (GravityConfig.gravityCoreAffectsShips.get()) {
             be.applyToShips(world, ownShip, center, range, searchBox);
-        }
-    }
-
-    /**
-     * Field visualization (toggled with a glow ink sac).
-     *
-     * The field EXTENT is drawn as three dust great-circle rings on the range
-     * sphere, and the DIRECTION as flames riding 26 fixed radial spokes —
-     * successive spawns on the same spoke trace dashed rays flowing inward
-     * (attract, blue) or outward (repulse, orange), making the spherical field
-     * readable at a glance.
-     */
-    private void spawnFieldParticles(Level world, Vec3 center, double range) {
-        if (!showParticles) {
-            return;
-        }
-        var random = world.getRandom();
-
-        // boundary: three world-axis great circles on the range sphere
-        int ringPoints = Mth.clamp((int) (range * 1.5), 6, 24);
-        for (int i = 0; i < ringPoints; i++) {
-            double angle = random.nextDouble() * Math.PI * 2.0;
-            double cos = Math.cos(angle) * range;
-            double sin = Math.sin(angle) * range;
-            Vec3 offset = switch (random.nextInt(3)) {
-                case 0 -> new Vec3(cos, sin, 0);
-                case 1 -> new Vec3(cos, 0, sin);
-                default -> new Vec3(0, cos, sin);
-            };
-            Vec3 pos = center.add(offset);
-            world.addAlwaysVisibleParticle(
-                net.cama.gravityapivs.util.FieldVisuals.boundary(attracting),
-                pos.x, pos.y, pos.z, 0, 0, 0
-            );
-        }
-
-        // flow: flames along fixed radial spokes (dashed rays)
-        Vec3[] spokes = net.cama.gravityapivs.util.FieldVisuals.SPOKES;
-        int flowCount = Mth.clamp((int) (range / 2), 4, 10);
-        for (int i = 0; i < flowCount; i++) {
-            Vec3 dir = spokes[random.nextInt(spokes.length)];
-            double distance = 1.0 + random.nextDouble() * (range - 1.0);
-            Vec3 pos = center.add(dir.scale(distance));
-            Vec3 vel = dir.scale(attracting ? -0.12 : 0.12);
-
-            world.addAlwaysVisibleParticle(
-                net.cama.gravityapivs.util.FieldVisuals.flow(attracting),
-                pos.x, pos.y, pos.z, vel.x, vel.y, vel.z
-            );
         }
     }
 

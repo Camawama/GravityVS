@@ -63,10 +63,15 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     public static class SideData {
         public boolean isAttracting = true;
         public int level = 1;
-        // glow-ink-sac toggle: render the field as flowing particles
+        // glow-ink-sac toggle: render the field visualization
         public boolean showParticles = false;
 
         public @Nullable AABB effectBoxCache = null;
+
+        // visual grouping cache: adjacent same-config plates render as ONE
+        // merged field; only the group's master plate submits the visual
+        public @Nullable AABB visualBoxCache = null;
+        public boolean visualMaster = true;
 
         public SideData(boolean isAttracting, int level) {
             this.isAttracting = isAttracting;
@@ -253,6 +258,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             for (SideData sideDatum : sideData) {
                 if (sideDatum != null) {
                     sideDatum.effectBoxCache = null;
+                    sideDatum.visualBoxCache = null;
                 }
             }
         }
@@ -295,7 +301,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
         }
 
         if (world.isClientSide()) {
-            be.spawnFieldParticles(world, blockPos, ship);
+            be.submitFieldVisuals(world, blockPos, ship);
         }
 
         List<Entity> entities = world.getEntitiesOfClass(
@@ -411,19 +417,21 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     }
 
     /**
-     * Field visualization (toggled per side with a glow ink sac).
+     * Field visualization (toggled per side with a glow ink sac), rendered as
+     * line geometry by {@code client.FieldVisualsRenderer} — this only submits
+     * the field's box each tick.
      *
-     * The field EXTENT is drawn as a dust wireframe of the effect box, and the
-     * DIRECTION as flame particles on a fixed lattice of streamlines (block
-     * centers), so repeated spawns trace dashed flow lines instead of random
-     * sparks. Blue = attract, orange = repulse. Positions/directions are
-     * grid-local, so on ships they are transformed into world space.
+     * Adjacent plates with the same facing/polarity/range that all have the
+     * visual enabled are GROUPED: only the group's master plate submits, with
+     * the merged box — a 3x3 wall of plates draws one 3x3 field, not nine
+     * overlapping ones. The box is the plates' own footprint extended outward
+     * by the effect range (the visual intentionally does not show the 1-block
+     * sideways trigger bleed).
      */
-    private void spawnFieldParticles(Level world, BlockPos blockPos, @Nullable Ship ship) {
+    private void submitFieldVisuals(Level world, BlockPos blockPos, @Nullable Ship ship) {
         if (sideData == null) {
             return;
         }
-        var random = world.getRandom();
 
         for (Direction plateDir : Direction.values()) {
             SideData sideDatum = sideData[plateDir.ordinal()];
@@ -431,57 +439,117 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 continue;
             }
 
-            AABB box = sideDatum.getEffectBox(blockPos, plateDir, world);
-            Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
-            boolean attracting = sideDatum.isAttracting;
-
-            // boundary: dust points along the effect box wireframe
-            for (int i = 0; i < 5; i++) {
-                Vec3 edgePoint = net.cama.gravityapivs.util.FieldVisuals.randomPointOnBoxEdge(box, random);
-                Vector3d pos = new Vector3d(edgePoint.x, edgePoint.y, edgePoint.z);
-                if (ship != null) {
-                    ship.getTransform().getShipToWorldMatrix().transformPosition(pos);
-                }
-                world.addAlwaysVisibleParticle(
-                    net.cama.gravityapivs.util.FieldVisuals.boundary(attracting),
-                    pos.x, pos.y, pos.z, 0, 0, 0
-                );
+            if (sideDatum.visualBoxCache == null) {
+                computeVisualGroup(world, blockPos, plateDir, sideDatum);
+            }
+            if (!sideDatum.visualMaster || sideDatum.visualBoxCache == null) {
+                continue;
             }
 
-            // flow: flames on streamlines through block centers, drifting along
-            // the field; the two axes tangent to the plate are snapped to the
-            // lattice so successive spawns line up into dashed flow lines
-            for (int i = 0; i < 3; i++) {
-                double px = box.minX + random.nextDouble() * (box.maxX - box.minX);
-                double py = box.minY + random.nextDouble() * (box.maxY - box.minY);
-                double pz = box.minZ + random.nextDouble() * (box.maxZ - box.minZ);
-                Direction.Axis axis = plateDir.getAxis();
-                if (axis != Direction.Axis.X) {
-                    px = Math.floor(px) + 0.5;
-                }
-                if (axis != Direction.Axis.Y) {
-                    py = Math.floor(py) + 0.5;
-                }
-                if (axis != Direction.Axis.Z) {
-                    pz = Math.floor(pz) + 0.5;
-                }
+            Direction flowDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
+            net.cama.gravityapivs.util.FieldVisuals.submitPlate(
+                world, blockPos, plateDir,
+                sideDatum.visualBoxCache, flowDir, sideDatum.isAttracting, ship
+            );
+        }
+    }
 
-                Vector3d pos = new Vector3d(px, py, pz);
-                Vector3d vel = new Vector3d(
-                    localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ()
-                );
-                if (ship != null) {
-                    ship.getTransform().getShipToWorldMatrix().transformPosition(pos);
-                    ship.getTransform().getShipToWorldMatrix().transformDirection(vel);
-                }
-                vel.mul(0.1);
+    /**
+     * Flood-fills the in-plane group of adjacent, same-config plates (same
+     * facing, polarity, range, visual enabled). Rectangular groups merge into
+     * one box submitted by the lexicographically-smallest member; irregular
+     * groups fall back to per-plate boxes.
+     */
+    private void computeVisualGroup(Level world, BlockPos origin, Direction plateDir, SideData side) {
+        Direction.Axis axis = plateDir.getAxis();
 
-                world.addAlwaysVisibleParticle(
-                    net.cama.gravityapivs.util.FieldVisuals.flow(attracting),
-                    pos.x, pos.y, pos.z, vel.x, vel.y, vel.z
-                );
+        java.util.HashSet<BlockPos> members = new java.util.HashSet<>();
+        java.util.ArrayDeque<BlockPos> queue = new java.util.ArrayDeque<>();
+        members.add(origin);
+        queue.add(origin);
+
+        int minX = origin.getX(), minY = origin.getY(), minZ = origin.getZ();
+        int maxX = minX, maxY = minY, maxZ = minZ;
+        boolean overflow = false;
+
+        while (!queue.isEmpty()) {
+            BlockPos cur = queue.poll();
+            for (Direction tangent : Direction.values()) {
+                if (tangent.getAxis() == axis) {
+                    continue;
+                }
+                BlockPos next = cur.relative(tangent);
+                if (members.contains(next) || !isSameVisualGroup(world, next, plateDir, side)) {
+                    continue;
+                }
+                if (members.size() >= 121) {
+                    overflow = true;
+                    break;
+                }
+                members.add(next.immutable());
+                queue.add(next);
+                minX = Math.min(minX, next.getX());
+                minY = Math.min(minY, next.getY());
+                minZ = Math.min(minZ, next.getZ());
+                maxX = Math.max(maxX, next.getX());
+                maxY = Math.max(maxY, next.getY());
+                maxZ = Math.max(maxZ, next.getZ());
             }
         }
+
+        // group must fill its bounding rectangle to merge into a single box
+        long area = (long) (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+        boolean rectangular = !overflow && members.size() == area;
+
+        if (!rectangular) {
+            side.visualMaster = true;
+            side.visualBoxCache = buildFieldBox(
+                origin.getX(), origin.getY(), origin.getZ(),
+                origin.getX(), origin.getY(), origin.getZ(),
+                plateDir, side.getEffectRange()
+            );
+            return;
+        }
+
+        side.visualMaster = origin.getX() == minX && origin.getY() == minY && origin.getZ() == minZ;
+        side.visualBoxCache = buildFieldBox(minX, minY, minZ, maxX, maxY, maxZ, plateDir, side.getEffectRange());
+    }
+
+    private boolean isSameVisualGroup(Level world, BlockPos pos, Direction plateDir, SideData ref) {
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof GravityPlatingBlock) || !GravityPlatingBlock.hasDir(state, plateDir)) {
+            return false;
+        }
+        if (!(world.getBlockEntity(pos) instanceof GravityPlatingBlockEntity be) || be.sideData == null) {
+            return false;
+        }
+        SideData other = be.sideData[plateDir.ordinal()];
+        return other != null
+            && other.showParticles
+            && other.isAttracting == ref.isAttracting
+            && other.level == ref.level;
+    }
+
+    /**
+     * The visual field box: the member plates' footprint extended outward
+     * (opposite the plate facing, where the field lives) by the effect range.
+     */
+    private static AABB buildFieldBox(
+        int minX, int minY, int minZ, int maxX, int maxY, int maxZ,
+        Direction plateDir, double effectRange
+    ) {
+        double x1 = minX, y1 = minY, z1 = minZ;
+        double x2 = maxX + 1, y2 = maxY + 1, z2 = maxZ + 1;
+
+        switch (plateDir.getOpposite()) {
+            case UP -> { y1 = y2; y2 += effectRange; }
+            case DOWN -> { y2 = y1; y1 -= effectRange; }
+            case SOUTH -> { z1 = z2; z2 += effectRange; }
+            case NORTH -> { z2 = z1; z1 -= effectRange; }
+            case EAST -> { x1 = x2; x2 += effectRange; }
+            case WEST -> { x2 = x1; x1 -= effectRange; }
+        }
+        return new AABB(x1, y1, z1, x2, y2, z2);
     }
 
     private static AABB gravityapivs$shipToWorldBox(Ship ship, AABB box) {

@@ -1,86 +1,75 @@
 package net.cama.gravityapivs.util;
 
-import org.joml.Vector3f;
+import java.util.HashMap;
+import java.util.Map;
 
-import net.minecraft.core.particles.DustParticleOptions;
-import net.minecraft.core.particles.ParticleOptions;
-import net.minecraft.core.particles.ParticleTypes;
-import net.minecraft.util.RandomSource;
+import org.jetbrains.annotations.Nullable;
+import org.valkyrienskies.core.api.ships.Ship;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Shared pieces of the glow-ink-sac gravity field visualization.
+ * Registry of active gravity field visuals (glow-ink-sac toggle).
  *
- * Design: the field EXTENT is drawn with large, long-lived colored dust
- * (boundary wireframe/rings), and the field DIRECTION with flame particles on
- * FIXED streamlines — repeated spawns on the same line read as dashed flow
- * lines instead of uncorrelated sparks. Blue = attract, orange = repulse.
- * Everything is spawned "always visible" so vanilla's 32-block particle cull
- * cannot eat the far side of a large field.
+ * Block entities SUBMIT their field geometry every client tick; the client
+ * renderer ({@code client.FieldVisualsRenderer}) draws all submitted fields as
+ * animated line geometry in the level render pass. Entries expire a few ticks
+ * after the last submission, so unloading, breaking or toggling a block cleans
+ * itself up automatically.
+ *
+ * Geometry is in GRID coordinates (shipyard space for blocks on ships, world
+ * space otherwise) together with the owning ship; the renderer applies the
+ * ship's per-frame render transform, so visuals stick to moving ships
+ * smoothly.
+ *
+ * This class is dist-neutral (no client imports) so common block entity code
+ * can call it safely; only the renderer is client-only.
  */
 public final class FieldVisuals {
 
-    /** Boundary marker colors (dust is big, bright and does not fade fast). */
-    public static final DustParticleOptions BOUNDARY_ATTRACT =
-        new DustParticleOptions(new Vector3f(0.35f, 0.55f, 1.0f), 1.4f);
-    public static final DustParticleOptions BOUNDARY_REPULSE =
-        new DustParticleOptions(new Vector3f(1.0f, 0.55f, 0.2f), 1.4f);
+    private static final int TTL_TICKS = 10;
 
-    public static DustParticleOptions boundary(boolean attracting) {
-        return attracting ? BOUNDARY_ATTRACT : BOUNDARY_REPULSE;
+    public record PlateKey(BlockPos pos, Direction side) {}
+
+    /** A plate field: a box with flow along {@code flowDir} (the pull direction). */
+    public record PlateField(
+        AABB box, Direction flowDir, boolean attracting, @Nullable Ship ship, long expiresAt
+    ) {}
+
+    /** A core field: a sphere with radial flow. */
+    public record CoreField(
+        Vec3 center, double range, boolean attracting, @Nullable Ship ship, long expiresAt
+    ) {}
+
+    public static final Map<PlateKey, PlateField> PLATES = new HashMap<>();
+    public static final Map<BlockPos, CoreField> CORES = new HashMap<>();
+
+    public static void submitPlate(
+        Level level, BlockPos pos, Direction side,
+        AABB box, Direction flowDir, boolean attracting, @Nullable Ship ship
+    ) {
+        PLATES.put(
+            new PlateKey(pos.immutable(), side),
+            new PlateField(box, flowDir, attracting, ship, level.getGameTime() + TTL_TICKS)
+        );
     }
 
-    /** Flow marker: blue soul flame for attract, orange flame for repulse. */
-    public static ParticleOptions flow(boolean attracting) {
-        return attracting ? ParticleTypes.SOUL_FIRE_FLAME : ParticleTypes.FLAME;
+    public static void submitCore(
+        Level level, BlockPos pos, Vec3 center, double range, boolean attracting, @Nullable Ship ship
+    ) {
+        CORES.put(
+            pos.immutable(),
+            new CoreField(center, range, attracting, ship, level.getGameTime() + TTL_TICKS)
+        );
     }
 
-    /** A uniformly random point on one of the 12 edges of a box (wireframe). */
-    public static Vec3 randomPointOnBoxEdge(AABB box, RandomSource random) {
-        int edge = random.nextInt(12);
-        int alongAxis = edge / 4;   // the axis the edge runs along
-        int corner = edge % 4;      // min/max combination of the other two axes
-        double t = random.nextDouble();
-
-        return switch (alongAxis) {
-            case 0 -> new Vec3(
-                box.minX + t * (box.maxX - box.minX),
-                (corner & 1) == 0 ? box.minY : box.maxY,
-                (corner & 2) == 0 ? box.minZ : box.maxZ
-            );
-            case 1 -> new Vec3(
-                (corner & 1) == 0 ? box.minX : box.maxX,
-                box.minY + t * (box.maxY - box.minY),
-                (corner & 2) == 0 ? box.minZ : box.maxZ
-            );
-            default -> new Vec3(
-                (corner & 1) == 0 ? box.minX : box.maxX,
-                (corner & 2) == 0 ? box.minY : box.maxY,
-                box.minZ + t * (box.maxZ - box.minZ)
-            );
-        };
-    }
-
-    /**
-     * The 26 fixed radial spoke directions (all sign combinations, normalized).
-     * Core flow particles ride these so they trace readable dashed rays.
-     */
-    public static final Vec3[] SPOKES = buildSpokes();
-
-    private static Vec3[] buildSpokes() {
-        java.util.List<Vec3> spokes = new java.util.ArrayList<>(26);
-        for (int x = -1; x <= 1; x++) {
-            for (int y = -1; y <= 1; y++) {
-                for (int z = -1; z <= 1; z++) {
-                    if (x == 0 && y == 0 && z == 0) {
-                        continue;
-                    }
-                    spokes.add(new Vec3(x, y, z).normalize());
-                }
-            }
-        }
-        return spokes.toArray(new Vec3[0]);
+    public static void prune(long gameTime) {
+        PLATES.values().removeIf(field -> gameTime > field.expiresAt());
+        CORES.values().removeIf(field -> gameTime > field.expiresAt());
     }
 
     private FieldVisuals() {}
