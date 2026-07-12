@@ -88,16 +88,168 @@ public final class FieldVisualsRenderer {
             poseStack.popPose();
         }
 
-        for (FieldVisuals.CoreField field : FieldVisuals.CORES.values()) {
+        java.util.List<FieldVisuals.CoreField> coreList =
+            new java.util.ArrayList<>(FieldVisuals.CORES.values());
+
+        for (int i = 0; i < coreList.size(); i++) {
+            FieldVisuals.CoreField field = coreList.get(i);
+
+            // the other cores, with centers expressed in THIS core's grid, so
+            // spokes can yield to the combined-field dashes in blend zones
+            java.util.List<OtherCore> others = new java.util.ArrayList<>();
+            for (int j = 0; j < coreList.size(); j++) {
+                if (j == i) {
+                    continue;
+                }
+                FieldVisuals.CoreField other = coreList.get(j);
+                others.add(new OtherCore(
+                    toGrid(other.center(), other.ship(), field.ship()), other.range()
+                ));
+            }
+
             poseStack.pushPose();
             applyGridPose(poseStack, cam, field.ship(), field.center());
             float[] color = field.attracting() ? ATTRACT : REPULSE;
             drawCoreRings(poseStack, lines, Vec3.ZERO, field.range(), color);
-            drawCoreSpokes(poseStack, lines, Vec3.ZERO, field.range(), field.attracting(), phase, color);
+            drawCoreSpokes(poseStack, lines, field.center(), field.range(), field.attracting(), phase, color, others);
             poseStack.popPose();
         }
 
+        drawCoreIntersections(poseStack, lines, cam, phase, coreList);
+
         buffers.endBatch(RenderType.lines());
+    }
+
+    private record OtherCore(Vec3 center, double range) {}
+
+    // mirrors GravityCapabilityImpl.resolveGravityTarget: effects blend when
+    // their priorities (base - distance) are within this range of each other
+    private static final double BLEND_RANGE = 5.0;
+
+    /**
+     * Where two core spheres overlap AND their priorities are close enough to
+     * blend, sample the zone on a lattice and draw a dash at each sample along
+     * the ACTUAL combined gravity vector — the same weighted blend the gravity
+     * resolution computes. Dash length scales with the net pull, so mutual
+     * cancellation zones fade out naturally (no net gravity, no dash).
+     * Cross-grid pairs (ship core over a world core) are re-evaluated every
+     * frame in the first core's grid, so the zone tracks moving ships.
+     */
+    private static void drawCoreIntersections(
+        PoseStack poseStack, VertexConsumer lines, Vec3 cam, float phase,
+        java.util.List<FieldVisuals.CoreField> coreList
+    ) {
+        for (int i = 0; i < coreList.size(); i++) {
+            for (int j = i + 1; j < coreList.size(); j++) {
+                FieldVisuals.CoreField a = coreList.get(i);
+                FieldVisuals.CoreField b = coreList.get(j);
+
+                Vec3 bCenter = toGrid(b.center(), b.ship(), a.ship());
+                double centerDistance = a.center().distanceTo(bCenter);
+                if (centerDistance >= a.range() + b.range()) {
+                    continue;
+                }
+
+                float[] colorA = a.attracting() ? ATTRACT : REPULSE;
+                float[] colorB = b.attracting() ? ATTRACT : REPULSE;
+                float[] mix = {
+                    Math.min(1.0f, (colorA[0] + colorB[0]) * 0.5f + 0.35f),
+                    Math.min(1.0f, (colorA[1] + colorB[1]) * 0.5f + 0.35f),
+                    Math.min(1.0f, (colorA[2] + colorB[2]) * 0.5f + 0.35f)
+                };
+
+                AABB lens = new AABB(
+                    a.center().x - a.range(), a.center().y - a.range(), a.center().z - a.range(),
+                    a.center().x + a.range(), a.center().y + a.range(), a.center().z + a.range()
+                ).intersect(new AABB(
+                    bCenter.x - b.range(), bCenter.y - b.range(), bCenter.z - b.range(),
+                    bCenter.x + b.range(), bCenter.y + b.range(), bCenter.z + b.range()
+                ));
+
+                // integer lattice stride keeping the sample count bounded
+                double volume = lens.getXsize() * lens.getYsize() * lens.getZsize();
+                int stride = 1;
+                while (volume / ((double) stride * stride * stride) > 250) {
+                    stride++;
+                }
+
+                poseStack.pushPose();
+                Vec3 origin = new Vec3(lens.minX, lens.minY, lens.minZ);
+                applyGridPose(poseStack, cam, a.ship(), origin);
+
+                double travel = 0.9;
+                double offset = phase * travel - travel * 0.5;
+
+                for (double x = latticeStart(lens.minX, stride); x < lens.maxX; x += stride) {
+                    for (double y = latticeStart(lens.minY, stride); y < lens.maxY; y += stride) {
+                        for (double z = latticeStart(lens.minZ, stride); z < lens.maxZ; z += stride) {
+                            Vec3 p = new Vec3(x, y, z);
+                            double d1 = p.distanceTo(a.center());
+                            double d2 = p.distanceTo(bCenter);
+                            if (d1 > a.range() || d2 > b.range() || d1 < 0.75 || d2 < 0.75) {
+                                continue;
+                            }
+                            if (Math.abs(d1 - d2) > BLEND_RANGE) {
+                                continue;   // one core fully dominates here
+                            }
+
+                            Vec3 dir1 = a.center().subtract(p).scale((a.attracting() ? 1.0 : -1.0) / d1);
+                            Vec3 dir2 = bCenter.subtract(p).scale((b.attracting() ? 1.0 : -1.0) / d2);
+                            double nearest = Math.min(d1, d2);
+                            double w1 = 1.0 - (d1 - nearest) / BLEND_RANGE;
+                            double w2 = 1.0 - (d2 - nearest) / BLEND_RANGE;
+
+                            Vec3 sum = dir1.scale(w1).add(dir2.scale(w2));
+                            double length = sum.length();
+                            double magnitude = length / (w1 + w2);
+                            if (magnitude < 0.12) {
+                                continue;   // cancellation: no net pull to show
+                            }
+                            Vec3 dir = sum.scale(1.0 / length);
+
+                            Vec3 local = p.subtract(origin);
+                            Vec3 p1 = local.add(dir.scale(offset));
+                            Vec3 p2 = local.add(dir.scale(
+                                Math.min(offset + 0.1 + DASH_LENGTH * magnitude, travel * 0.5)
+                            ));
+                            line(poseStack, lines, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, mix, 1.0f);
+                        }
+                    }
+                }
+
+                poseStack.popPose();
+            }
+        }
+    }
+
+    /** First absolute-grid-aligned lattice point (stride multiples, +0.5) at or after min. */
+    private static double latticeStart(double min, int stride) {
+        double start = Math.floor(min / stride) * stride + 0.5;
+        while (start < min) {
+            start += stride;
+        }
+        return start;
+    }
+
+    /** Transforms a grid-local position from one grid into another (per-frame render transforms). */
+    private static Vec3 toGrid(Vec3 pos, @Nullable Ship from, @Nullable Ship to) {
+        if (from == to) {
+            return pos;
+        }
+        org.joml.Vector3d v = new org.joml.Vector3d(pos.x, pos.y, pos.z);
+        if (from != null) {
+            (from instanceof ClientShip clientShip
+                ? clientShip.getRenderTransform().getShipToWorld()
+                : from.getTransform().getShipToWorld()
+            ).transformPosition(v);
+        }
+        if (to != null) {
+            (to instanceof ClientShip clientShip
+                ? clientShip.getRenderTransform().getWorldToShip()
+                : to.getTransform().getWorldToShip()
+            ).transformPosition(v);
+        }
+        return new Vec3(v.x, v.y, v.z);
     }
 
     /**
@@ -250,10 +402,16 @@ public final class FieldVisualsRenderer {
         };
     }
 
-    /** Dashes marching along the 26 fixed radial spokes. */
+    /**
+     * Dashes marching along the 26 fixed radial spokes, drawn relative to the
+     * core (the pose is already rebased onto the core center). Dashes inside
+     * another core's BLEND ZONE are suppressed — the combined-field dashes
+     * from {@link #drawCoreIntersections} own that region.
+     */
     private static void drawCoreSpokes(
         PoseStack poseStack, VertexConsumer vc,
-        Vec3 center, double range, boolean attracting, float phase, float[] color
+        Vec3 gridCenter, double range, boolean attracting, float phase, float[] color,
+        java.util.List<OtherCore> others
     ) {
         double inner = 1.5;
         double span = range - inner;
@@ -265,11 +423,21 @@ public final class FieldVisualsRenderer {
         float march = attracting ? 1.0f - phase : phase;
 
         for (Vec3 dir : SPOKES) {
+            spokeDashes:
             for (int k = 0; k < dashes; k++) {
                 double s = inner + ((k + march) * spacing) % span;
                 double end = Math.min(s + DASH_LENGTH, range);
-                Vec3 p1 = center.add(dir.scale(s));
-                Vec3 p2 = center.add(dir.scale(end));
+
+                Vec3 gridPos = gridCenter.add(dir.scale(s));
+                for (OtherCore other : others) {
+                    double otherDistance = gridPos.distanceTo(other.center());
+                    if (otherDistance <= other.range() && Math.abs(s - otherDistance) < BLEND_RANGE) {
+                        continue spokeDashes;
+                    }
+                }
+
+                Vec3 p1 = dir.scale(s);
+                Vec3 p2 = dir.scale(end);
                 line(poseStack, vc, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, color, 1.0f);
             }
         }

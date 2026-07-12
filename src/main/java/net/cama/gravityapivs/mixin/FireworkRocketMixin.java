@@ -36,6 +36,12 @@ public abstract class FireworkRocketMixin extends Entity {
 
         return GravityChangerAPI.getGravityDirection((FireworkRocketEntity)(Object)this);
     }*/
+    // The elytra boost mixes the rider's WORLD-space look angle directly into
+    // their velocity — which lives in the rider's movement frame. Convert the
+    // look into that frame: the VISUAL (arbitrary-angle) frame for players,
+    // the cardinal frame for mobs. Using the snapped cardinal direction here
+    // boosted players sideways whenever their frame was off-cardinal (radial
+    // fields, tilted ships, mid-transition).
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/projectile/FireworkRocketEntity;tick()V",
         at = @At(
@@ -45,7 +51,7 @@ public abstract class FireworkRocketMixin extends Entity {
     )
     public Vec3 tick(Vec3 value) {
         if (attachedToEntity != null) {
-            value = RotationUtil.vecWorldToPlayer(value, GravityChangerAPI.getGravityDirection(attachedToEntity));
+            value = RotationUtil.vecWorldToPlayer(value, GravityChangerAPI.getMovementRotation(attachedToEntity));
         }
         return value;
     }
