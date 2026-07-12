@@ -70,20 +70,11 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // after leaving a field, keep its pull for a few ticks (jumping off a plate
     // must not instantly revert gravity mid-air)
     private static final int FIELD_GRACE_TICKS = 6;
-    // after losing ground contact, keep aligning to the last surface normal for
-    // a few ticks (contact flicker and jumps must not wobble the frame)
+    // after the ground probe stops hitting, keep the surface alignment for a
+    // few ticks (small hops and probe flicker must not wobble the frame)
     private static final int GROUND_NORMAL_GRACE_TICKS = 5;
-    // past the grace window, keep snapping to the last surface normal while the
-    // field stays within this cone of it (~20 degrees: jumps in a radial field
-    // must not release the surface alignment)
-    private static final double GROUND_NORMAL_SNAP_DOT = Math.cos(Math.toRadians(20));
-    // a ground normal within this cone of the current one tracks it immediately
-    // (rotating ship decks); a very different one (another face) must persist…
-    private static final double GROUND_NORMAL_TRACK_DOT = Math.cos(Math.toRadians(25));
-    // …for this many consecutive ticks before it is adopted — at a convex edge
-    // the contacts alternate between the two faces every tick, and without this
-    // the frame target ping-pongs 90 degrees ("stuck between two faces")
-    private static final int GROUND_NORMAL_SWITCH_TICKS = 3;
+    // how far past the feet the ground probe reaches, along the field's down
+    private static final double GROUND_PROBE_DEPTH = 0.6;
 
     public boolean initialized = false;
 
@@ -119,13 +110,10 @@ public class GravityCapabilityImpl implements IGravityCapability {
     public @Nullable org.valkyrienskies.core.api.ships.Ship capsuleGroundShip = null;
     // world-space normal of the surface being stood on
     public @Nullable Vec3 capsuleGroundNormal = null;
-    // surface-normal memory for the planet-walk rule (grace + snap cone),
-    // stability-filtered: this is what the frame aligns to, never the raw
-    // per-tick contact normal
+    // the block face under the feet found by the ground probe; this — never a
+    // per-tick contact normal — is what the frame aligns to
     private @Nullable Vec3 lastGroundNormal = null;
     private int groundNormalGraceTicks = 0;
-    private @Nullable Vec3 pendingGroundNormal = null;
-    private int pendingGroundNormalTicks = 0;
 
     // chase-target stability: a still target is converged on decisively, a
     // moving one is followed with smoothing
@@ -256,7 +244,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
         updateGravityStatus();
         applyGravityChange();
-        updateGroundNormalMemory();
+        updateSurfaceProbe();
         advanceVisualRotation();
         applyStaticFriction();
 
@@ -266,73 +254,67 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
 
     /**
-     * Remembers the surface normal the capsule stands on, stability-filtered.
+     * Probes the terrain under the feet along the FIELD's down direction and
+     * remembers the supporting block FACE.
      *
-     * - A normal close to the current one tracks immediately (rotating decks).
-     * - A very different normal (another face of the planet) must persist for
-     *   {@link #GROUND_NORMAL_SWITCH_TICKS} consecutive ticks before it is
-     *   adopted: at a convex edge the deepest contact alternates between the
-     *   two faces every tick, and following it raw ping-pongs the frame target
-     *   90 degrees ("stuck between two faces, goes back and forth").
-     * - After contact is lost it stays authoritative through a short grace
-     *   window (contact flicker, jumps), and beyond that for as long as the
-     *   field vector stays inside a cone around it — gravity close enough to a
-     *   surface normal snaps to the normal.
+     * This raycast — never a contact normal — is what drives surface
+     * alignment. Contact normals are per-tick collision noise: at an edge the
+     * deepest contact alternates between the two faces every tick, jumps drop
+     * them entirely, and every hysteresis machine layered on top oscillated
+     * against another one. The probe is a pure function of position and field:
+     * standing still yields the identical answer every tick (nothing CAN
+     * oscillate), corners resolve deterministically to whichever face is under
+     * the feet, the result is always axis-pure in its grid (Valkyrien Skies
+     * transforms raycasts through ships natively), and client and server
+     * agree by construction. No probe hit — airborne, or gravity pointing away
+     * from every surface — unlocks the frame back to the raw field.
      */
-    private void updateGroundNormalMemory() {
-        if (!(entity instanceof Player)) {
+    private void updateSurfaceProbe() {
+        if (!(entity instanceof Player) || shouldAcceptServerSync()) {
             return;
         }
 
         if (!useCapsuleCollision()) {
-            // capsule collision is off (e.g. the frame is exactly vanilla on the
-            // "top" of a planet), so the capsule fields are not being refreshed —
-            // sync them from vanilla so they can't go stale and poison the
-            // surface-normal memory when the player walks over an edge
+            // vanilla-mode bookkeeping so the capsule state cannot go stale
             capsuleGrounded = entity.onGround();
-            capsuleGroundNormal = capsuleGrounded ? getUpVector() : null;
+            capsuleGroundNormal = null;
             capsuleGroundShip = null;
         }
 
-        if (capsuleGrounded && capsuleGroundNormal != null) {
-            Vec3 candidate = capsuleGroundNormal;
-            if (lastGroundNormal == null
-                || candidate.dot(lastGroundNormal) > GROUND_NORMAL_TRACK_DOT) {
-                lastGroundNormal = candidate;
-                pendingGroundNormal = null;
-                pendingGroundNormalTicks = 0;
+        Vec3 fieldDown = targetGravityVector != null && targetGravityVector.lengthSqr() > 1.0E-6
+            ? targetGravityVector.normalize()
+            : getCurrGravityDirectionVec();
+
+        Vec3 feet = entity.position();
+        net.minecraft.world.phys.BlockHitResult hit = entity.level().clip(new net.minecraft.world.level.ClipContext(
+            feet.subtract(fieldDown.scale(0.2)),
+            feet.add(fieldDown.scale(GROUND_PROBE_DEPTH)),
+            net.minecraft.world.level.ClipContext.Block.COLLIDER,
+            net.minecraft.world.level.ClipContext.Fluid.NONE,
+            entity
+        ));
+
+        if (hit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK) {
+            Vec3 normal = Vec3.atLowerCornerOf(hit.getDirection().getNormal());
+            org.valkyrienskies.core.api.ships.Ship ship =
+                org.valkyrienskies.mod.common.VSGameUtilsKt.getShipManagingPos(entity.level(), hit.getBlockPos());
+            if (ship != null) {
+                org.joml.Vector3d n = new org.joml.Vector3d(normal.x, normal.y, normal.z);
+                ship.getTransform().getShipToWorldMatrix().transformDirection(n);
+                n.normalize();
+                normal = new Vec3(n.x, n.y, n.z);
             }
-            else if (pendingGroundNormal != null
-                && candidate.dot(pendingGroundNormal) > GROUND_NORMAL_TRACK_DOT) {
-                if (++pendingGroundNormalTicks >= GROUND_NORMAL_SWITCH_TICKS) {
-                    lastGroundNormal = candidate;
-                    pendingGroundNormal = null;
-                    pendingGroundNormalTicks = 0;
-                }
+            if (normal.dot(fieldDown.scale(-1)) > 0.35) {
+                lastGroundNormal = normal;
+                groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
+                return;
             }
-            else {
-                pendingGroundNormal = candidate;
-                pendingGroundNormalTicks = 1;
-            }
-            groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
-            return;
         }
 
-        pendingGroundNormal = null;
-        pendingGroundNormalTicks = 0;
-
-        if (lastGroundNormal == null) {
-            return;
-        }
         if (groundNormalGraceTicks > 0) {
             groundNormalGraceTicks--;
-            return;
         }
-        Vec3 fieldUp = targetGravityVector != null && targetGravityVector.lengthSqr() > 1.0E-6
-            ? targetGravityVector.normalize().scale(-1)
-            : getCurrGravityDirectionVec().scale(-1);
-        if (fieldUp.dot(lastGroundNormal) < GROUND_NORMAL_SNAP_DOT) {
-            // the field left the cone: the surface is no longer relevant
+        else {
             lastGroundNormal = null;
         }
     }
