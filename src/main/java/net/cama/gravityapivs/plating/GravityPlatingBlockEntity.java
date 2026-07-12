@@ -531,8 +531,10 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     }
 
     /**
-     * The visual field box: the member plates' footprint extended outward
-     * (opposite the plate facing, where the field lives) by the effect range.
+     * The visual field box. The plate sits flush against the {@code plateDir}
+     * face of its own block space, and the field fills that block space plus
+     * the effect range beyond it — so the box KEEPS the footprint cells and
+     * extends outward (opposite the plate facing).
      */
     private static AABB buildFieldBox(
         int minX, int minY, int minZ, int maxX, int maxY, int maxZ,
@@ -542,12 +544,12 @@ public class GravityPlatingBlockEntity extends BlockEntity {
         double x2 = maxX + 1, y2 = maxY + 1, z2 = maxZ + 1;
 
         switch (plateDir.getOpposite()) {
-            case UP -> { y1 = y2; y2 += effectRange; }
-            case DOWN -> { y2 = y1; y1 -= effectRange; }
-            case SOUTH -> { z1 = z2; z2 += effectRange; }
-            case NORTH -> { z2 = z1; z1 -= effectRange; }
-            case EAST -> { x1 = x2; x2 += effectRange; }
-            case WEST -> { x2 = x1; x1 -= effectRange; }
+            case UP -> y2 += effectRange;
+            case DOWN -> y1 -= effectRange;
+            case SOUTH -> z2 += effectRange;
+            case NORTH -> z1 -= effectRange;
+            case EAST -> x2 += effectRange;
+            case WEST -> x1 -= effectRange;
         }
         return new AABB(x1, y1, z1, x2, y2, z2);
     }

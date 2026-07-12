@@ -75,19 +75,25 @@ public final class FieldVisualsRenderer {
 
         for (FieldVisuals.PlateField field : FieldVisuals.PLATES.values()) {
             poseStack.pushPose();
-            applyGridPose(poseStack, cam, field.ship());
+            // rebase all geometry onto the box corner so every vertex is a
+            // SMALL number before it becomes a float — grid coordinates on
+            // ships are shipyard-scale (~200k), where floats only resolve
+            // ~1/60 of a block (visible as jagged, wobbling lines)
+            Vec3 origin = new Vec3(field.box().minX, field.box().minY, field.box().minZ);
+            applyGridPose(poseStack, cam, field.ship(), origin);
+            AABB box = field.box().move(-origin.x, -origin.y, -origin.z);
             float[] color = field.attracting() ? ATTRACT : REPULSE;
-            drawBoxOutline(poseStack, lines, field.box(), color);
-            drawPlateFlow(poseStack, lines, field.box(), field.flowDir(), field.attracting(), phase, color);
+            drawBoxOutline(poseStack, lines, box, color);
+            drawPlateFlow(poseStack, lines, box, field.flowDir(), field.attracting(), phase, color);
             poseStack.popPose();
         }
 
         for (FieldVisuals.CoreField field : FieldVisuals.CORES.values()) {
             poseStack.pushPose();
-            applyGridPose(poseStack, cam, field.ship());
+            applyGridPose(poseStack, cam, field.ship(), field.center());
             float[] color = field.attracting() ? ATTRACT : REPULSE;
-            drawCoreRings(poseStack, lines, field.center(), field.range(), color);
-            drawCoreSpokes(poseStack, lines, field.center(), field.range(), field.attracting(), phase, color);
+            drawCoreRings(poseStack, lines, Vec3.ZERO, field.range(), color);
+            drawCoreSpokes(poseStack, lines, Vec3.ZERO, field.range(), field.attracting(), phase, color);
             poseStack.popPose();
         }
 
@@ -95,14 +101,16 @@ public final class FieldVisualsRenderer {
     }
 
     /**
-     * Positions are grid-local: apply camera-relative translation, and for
-     * ships the per-frame RENDER transform (composed in doubles first — the
-     * shipyard sits hundreds of thousands of blocks out, so going through
-     * floats before subtracting the camera would destroy all precision).
+     * Sets up the pose so that geometry drawn relative to {@code origin}
+     * (grid-local) lands in the right place. The whole chain
+     * camera-translation ∘ ship-render-transform ∘ origin-translation is
+     * composed in DOUBLES and only the final matrix (whose translation is
+     * camera-relative and therefore small) is handed to the float pose stack —
+     * shipyard coordinates must never pass through a float.
      */
-    private static void applyGridPose(PoseStack poseStack, Vec3 cam, @Nullable Ship ship) {
+    private static void applyGridPose(PoseStack poseStack, Vec3 cam, @Nullable Ship ship, Vec3 origin) {
         if (ship == null) {
-            poseStack.translate(-cam.x, -cam.y, -cam.z);
+            poseStack.translate(origin.x - cam.x, origin.y - cam.y, origin.z - cam.z);
             return;
         }
 
@@ -110,7 +118,8 @@ public final class FieldVisualsRenderer {
             .translate(-cam.x, -cam.y, -cam.z)
             .mul(ship instanceof ClientShip clientShip
                 ? clientShip.getRenderTransform().getShipToWorld()
-                : ship.getTransform().getShipToWorld());
+                : ship.getTransform().getShipToWorld())
+            .translate(origin.x, origin.y, origin.z);
         poseStack.mulPoseMatrix(new Matrix4f(
             (float) m.m00(), (float) m.m01(), (float) m.m02(), (float) m.m03(),
             (float) m.m10(), (float) m.m11(), (float) m.m12(), (float) m.m13(),
