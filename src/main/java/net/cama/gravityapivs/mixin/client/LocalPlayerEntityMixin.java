@@ -27,7 +27,7 @@ public abstract class LocalPlayerEntityMixin extends AbstractClientPlayer {
     
     @Shadow
     protected abstract boolean suffocatesAt(BlockPos pos);
-    
+
     @Redirect(
         method = "Lnet/minecraft/client/player/LocalPlayer;suffocatesAt(Lnet/minecraft/core/BlockPos;)Z",
         at = @At(

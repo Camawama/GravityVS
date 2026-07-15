@@ -55,7 +55,8 @@
       "fall_distance.ServerGamePacketListenerImplMixin",
       "item.BehaviorUtilsMixin",
       "forge.MixinForgeHooks",
-      "compat.ACEntityMixin"
+      "compat.ACEntityMixin",
+      "compat.VSEntityShipCollisionMixin"
 	],
 	"client": [
       "client.CameraMixin",

@@ -71,8 +71,10 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // must not instantly revert gravity mid-air)
     private static final int FIELD_GRACE_TICKS = 6;
     // after the ground probe stops hitting, keep the surface alignment for a
-    // few ticks (small hops and probe flicker must not wobble the frame)
-    private static final int GROUND_NORMAL_GRACE_TICKS = 5;
+    // few ticks (jumps and probe flicker must not wobble the frame; the probe
+    // re-acquires during a jump's descent, so this only needs to bridge the
+    // ascent and apex)
+    private static final int GROUND_NORMAL_GRACE_TICKS = 10;
     // how far past the feet the ground probe reaches, along the field's down
     private static final double GROUND_PROBE_DEPTH = 0.6;
 
@@ -114,6 +116,11 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // per-tick contact normal — is what the frame aligns to
     private @Nullable Vec3 lastGroundNormal = null;
     private int groundNormalGraceTicks = 0;
+    // commitment window after a face change: no further face changes until the
+    // frame has finished rotating to the new face (kills every transition
+    // ping-pong oscillator by construction)
+    private int surfaceChangeCooldown = 0;
+    private static final int SURFACE_CHANGE_COOLDOWN_TICKS = 8;
 
     // chase-target stability: a still target is converged on decisively, a
     // moving one is followed with smoothing
@@ -238,7 +245,23 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
     @Override
     public void tick() {
-        if (entity == null || !canChangeGravity()) {
+        if (entity == null) {
+            return;
+        }
+
+        // Spectators are not affected by gravity: smoothly reset to default
+        // instead of freezing in whatever orientation the player last had
+        // (canChangeGravity() excludes spectators, so without this the whole
+        // capability just stopped ticking and the rotated frame stuck forever).
+        if (entity instanceof Player player && player.isSpectator()) {
+            resetForSpectator();
+            if (!entity.level().isClientSide()) {
+                maybeSendSync();
+            }
+            return;
+        }
+
+        if (!canChangeGravity()) {
             return;
         }
 
@@ -246,11 +269,35 @@ public class GravityCapabilityImpl implements IGravityCapability {
         applyGravityChange();
         updateSurfaceProbe();
         advanceVisualRotation();
+        applyTransitionPull();
         applyStaticFriction();
 
         if (!entity.level().isClientSide()) {
             maybeSendSync();
         }
+    }
+
+    /**
+     * Spectator tick: drop every field influence and chase the frame smoothly
+     * back to plain downward gravity. Base gravity (set by command/items) is
+     * deliberately kept — it re-applies when the player leaves spectator mode.
+     */
+    private void resetForSpectator() {
+        tempEffects.clear();
+        delayApplyDirEffects.clear();
+        delayApplyStrengthEffect = 1.0;
+        fieldGraceTicks = 0;
+        lastFieldVector = null;
+        lastGroundNormal = null;
+        groundNormalGraceTicks = 0;
+        surfaceChangeCooldown = 0;
+
+        targetGravityVector = DOWN;
+        targetGravityStrength = 1.0;
+        currGravityStrength = 1.0;
+        currGravityDirection = Direction.DOWN;
+        applyGravityChange();
+        advanceVisualRotation();
     }
 
     /**
@@ -281,34 +328,125 @@ public class GravityCapabilityImpl implements IGravityCapability {
             capsuleGroundShip = null;
         }
 
+        // Surface alignment exists to serve gravity FIELDS (plating, cores) and
+        // non-default BASE gravity. Under plain default gravity it must stay
+        // off: otherwise standing on any tilted Valkyrien Skies ship captured
+        // the deck's face normal, tilted the frame, and gravity pinned the
+        // player to the ship face — with no plating or core anywhere near.
+        //
+        // Deliberately NOT part of this gate: currGravityDirection. The held
+        // surface normal keeps the cardinal non-default, which would keep the
+        // gate open, which keeps the normal held... a self-sustaining lock that
+        // made gravity stay glued to a plate face after walking OFF the plating
+        // (until a jump broke the probe). Field influence has a grace window of
+        // its own, so releasing here the moment fields are gone is correct.
+        boolean gravityActive = fieldGraceTicks > 0 || !baseGravityDirection.equals(DOWN);
+        if (!gravityActive) {
+            lastGroundNormal = null;
+            groundNormalGraceTicks = 0;
+            surfaceChangeCooldown = 0;
+            return;
+        }
+
+        if (surfaceChangeCooldown > 0) {
+            surfaceChangeCooldown--;
+        }
+
         Vec3 fieldDown = targetGravityVector != null && targetGravityVector.lengthSqr() > 1.0E-6
             ? targetGravityVector.normalize()
             : getCurrGravityDirectionVec();
+        Vec3 fieldUp = fieldDown.scale(-1);
+
+        // support-first: a held surface is only released when the field
+        // actively opposes it (repulsion), not when merely perpendicular
+        boolean held = lastGroundNormal != null && lastGroundNormal.dot(fieldUp) > -0.1;
+        Vec3 heldNormal = held ? lastGroundNormal : null;
+
+        // Probe along the HELD surface alignment while one exists, not the raw
+        // field: near the edge between two plate groups the blended field is
+        // diagonal, and a diagonal ray hits the NEXT face while the feet still
+        // stand on the current one — the frame flipped early, wedging the
+        // player into the corner (locked in place, camera ping-ponging).
+        Vec3 probeDown = held ? heldNormal.scale(-1) : fieldDown;
 
         Vec3 feet = entity.position();
-        net.minecraft.world.phys.BlockHitResult hit = entity.level().clip(new net.minecraft.world.level.ClipContext(
-            feet.subtract(fieldDown.scale(0.2)),
-            feet.add(fieldDown.scale(GROUND_PROBE_DEPTH)),
-            net.minecraft.world.level.ClipContext.Block.COLLIDER,
-            net.minecraft.world.level.ClipContext.Fluid.NONE,
-            entity
-        ));
 
-        if (hit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK) {
-            Vec3 normal = Vec3.atLowerCornerOf(hit.getDirection().getNormal());
-            org.valkyrienskies.core.api.ships.Ship ship =
-                org.valkyrienskies.mod.common.VSGameUtilsKt.getShipManagingPos(entity.level(), hit.getBlockPos());
-            if (ship != null) {
-                org.joml.Vector3d n = new org.joml.Vector3d(normal.x, normal.y, normal.z);
-                ship.getTransform().getShipToWorldMatrix().transformDirection(n);
-                n.normalize();
-                normal = new Vec3(n.x, n.y, n.z);
+        // tangential (along-surface) component of last tick's actual movement;
+        // drives the edge-transition probes below
+        Vec3 moved = new Vec3(entity.getX() - entity.xo, entity.getY() - entity.yo, entity.getZ() - entity.zo);
+        Vec3 tangent = held ? moved.subtract(heldNormal.scale(moved.dot(heldNormal))) : Vec3.ZERO;
+        double tangentSpeed = tangent.length();
+        Vec3 tangentDir = tangentSpeed > 1.0E-6 ? tangent.scale(1.0 / tangentSpeed) : Vec3.ZERO;
+
+        Vec3 normal = probeSurfaceNormal(feet.subtract(probeDown.scale(0.2)), probeDown, 0.2 + GROUND_PROBE_DEPTH);
+        if (normal != null && normal.dot(fieldUp) > -0.1) {
+            adoptGroundNormal(normal);
+
+            // CONCAVE corner (walking on a plated floor into a plated wall, or
+            // up a plated wall into a plated ceiling): the held normal keeps
+            // the frame on the current face forever, so a wall whose field
+            // wants to be our new floor must be adopted explicitly — cast a
+            // short ray along the movement; a blocking face that the FIELD
+            // accepts as up (an unplated wall never passes this gate, because
+            // the blend has no component toward it) becomes the new surface.
+            if (held && tangentSpeed > 0.02) {
+                Vec3 wall = probeSurfaceNormal(feet.add(heldNormal.scale(0.2)), tangentDir, 0.5);
+                if (wall != null
+                    && wall.dot(fieldUp) > 0.35
+                    && wall.dot(heldNormal) < 0.7
+                    && wall.dot(tangentDir) < -0.5
+                ) {
+                    adoptGroundNormal(wall);
+                }
             }
-            if (normal.dot(fieldDown.scale(-1)) > 0.35) {
-                lastGroundNormal = normal;
-                groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
+            return;
+        }
+
+        // Support acquisition relative to the CURRENT frame: when nothing is
+        // held and the field probe found nothing (a player standing upright on
+        // plain ground inside a plate field that points SIDEWAYS — the field
+        // volume extends its whole range outward from the plate), the surface
+        // actually under the feet is the support. Without this the frame had
+        // nothing to hold and rotated toward the field while the player stood
+        // on flat ground. Rejected only when the field opposes the surface
+        // (repulsion must still launch).
+        if (!held) {
+            Vec3 frameUp = getUpVector();
+            Vec3 frameDown = frameUp.scale(-1);
+            Vec3 support = probeSurfaceNormal(feet.subtract(frameDown.scale(0.2)), frameDown, 0.2 + GROUND_PROBE_DEPTH);
+            if (support != null && support.dot(frameUp) > 0.35 && support.dot(fieldUp) > -0.1) {
+                adoptGroundNormal(support);
                 return;
             }
+        }
+
+        // CONVEX edge wrap (walking off the top face of a plated cube onto a
+        // side face): the feet just left the face — before giving up, look
+        // BACK toward the face we walked off, slightly below its plane. The
+        // adjacent face found there is adopted directly: one clean flip,
+        // instead of falling off and letting the diagonal blended field
+        // ping-pong between the two faces. A running jump never triggers this
+        // (the feet are above the old plane, so the ray misses), and a genuine
+        // cliff edge never passes the field gate (the field there still points
+        // along the old face, not around the edge).
+        if (held && tangentSpeed > 0.02) {
+            Vec3 wrap = probeSurfaceNormal(feet.subtract(heldNormal.scale(0.15)), tangentDir.scale(-1), 0.75);
+            if (wrap != null
+                && wrap.dot(fieldUp) > 0.35
+                && wrap.dot(heldNormal) < 0.7
+                && wrap.dot(tangentDir) > 0.1
+            ) {
+                adoptGroundNormal(wrap);
+                return;
+            }
+        }
+
+        // during a transition the held face is kept alive even when the probe
+        // misses — the feet often hover past the old face's plane while the
+        // frame is still rotating onto the new one
+        if (surfaceChangeCooldown > 0 && lastGroundNormal != null) {
+            groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
+            return;
         }
 
         if (groundNormalGraceTicks > 0) {
@@ -320,18 +458,131 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
 
     /**
+     * Adopt a probed surface normal, with COMMITMENT: after any change of face
+     * the choice is locked for {@link #SURFACE_CHANGE_COOLDOWN_TICKS} while the
+     * frame finishes rotating. Without this, transitions oscillated — at a
+     * corner the two faces alternately win the probe while the player is
+     * pushed around by the half-rotated frame's controls, which was the
+     * "camera snaps back and forth between the faces and I cannot move
+     * forward" deadlock at plate-field boundaries. A same-face refresh (the
+     * overwhelmingly common case) never starts a commitment window.
+     */
+    private void adoptGroundNormal(Vec3 normal) {
+        if (lastGroundNormal != null && lastGroundNormal.dot(normal) < 0.99) {
+            if (surfaceChangeCooldown > 0) {
+                // mid-transition: keep the committed face, just keep it alive
+                groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
+                return;
+            }
+            surfaceChangeCooldown = SURFACE_CHANGE_COOLDOWN_TICKS;
+        }
+        lastGroundNormal = normal;
+        groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
+    }
+
+    /**
+     * Raycast against collision shapes and return the hit face's WORLD-space
+     * normal (Valkyrien Skies raycasts hit ships natively in shipyard
+     * coordinates; the face normal is transformed back), or null on a miss.
+     */
+    private @Nullable Vec3 probeSurfaceNormal(Vec3 from, Vec3 direction, double distance) {
+        net.minecraft.world.phys.BlockHitResult hit = entity.level().clip(new net.minecraft.world.level.ClipContext(
+            from,
+            from.add(direction.scale(distance)),
+            net.minecraft.world.level.ClipContext.Block.COLLIDER,
+            net.minecraft.world.level.ClipContext.Fluid.NONE,
+            entity
+        ));
+        if (hit.getType() != net.minecraft.world.phys.HitResult.Type.BLOCK) {
+            return null;
+        }
+
+        Vec3 normal = Vec3.atLowerCornerOf(hit.getDirection().getNormal());
+        org.valkyrienskies.core.api.ships.Ship ship =
+            org.valkyrienskies.mod.common.VSGameUtilsKt.getShipManagingPos(entity.level(), hit.getBlockPos());
+        if (ship != null) {
+            org.joml.Vector3d n = new org.joml.Vector3d(normal.x, normal.y, normal.z);
+            ship.getTransform().getShipToWorldMatrix().transformDirection(n);
+            n.normalize();
+            normal = new Vec3(n.x, n.y, n.z);
+        }
+        return normal;
+    }
+
+    /**
      * The up direction the player's frame (and physics cardinal) should chase:
-     * the filtered surface normal while standing on a compatible surface,
-     * otherwise the field's up. The 0.35 dot gate keeps repulsion fields
-     * working — gravity pointing AWAY from the surface must not be captured
-     * by the floor the player is still standing on.
+     * SUPPORT-FIRST — the surface being stood on wins over the field, unless
+     * the field actively OPPOSES that surface (repulsion pushing away from the
+     * floor, dot < -0.1, must still launch).
+     *
+     * The old gate (dot > 0.35) also discarded the support whenever the field
+     * was merely PERPENDICULAR to it — but plate fields extend sideways
+     * (invisible trigger bleed) and their whole range outward, so a player
+     * standing upright on plain ground inside a sideways field had their frame
+     * yanked toward the plate: "spheres stay after leaving the field", getting
+     * stuck on nothing while walking, clinging to walls. Standing on a surface
+     * now always means standing on it; fields orient the player when airborne,
+     * and walls are adopted through the explicit corner transitions.
      */
     private Vec3 effectiveTargetUp(Vec3 fieldVector) {
         Vec3 targetUp = fieldVector.scale(-1);
-        if (lastGroundNormal != null && lastGroundNormal.dot(targetUp) > 0.35) {
+        if (lastGroundNormal != null && lastGroundNormal.dot(targetUp) > -0.1) {
             return lastGroundNormal;
         }
         return targetUp;
+    }
+
+    /**
+     * Gravity must pull toward the frame's TARGET, not along the frame itself.
+     *
+     * Vanilla gravity accelerates along local down, which the visual frame
+     * maps onto the field vector — exact once the frame has converged, but the
+     * frame takes up to a second to rotate. During that whole transition the
+     * pull swept from the OLD direction to the new one, so stepping onto a
+     * plated wall of a 90-degree-tilted ship kept pulling the player
+     * world-down for a second: they slid down the wall and off the ship before
+     * alignment finished, at a speed depending on the tilt. (Not a Valkyrien
+     * Skies system — VS entity collision is fully bypassed in capsule mode;
+     * the sliding force was our own lagging gravity.)
+     *
+     * This adds the difference so the NET pull each tick is already the target
+     * direction: travel contributes frameDown·g, we add (targetDown−frameDown)·g.
+     * At steady state the correction is exactly zero.
+     */
+    private void applyTransitionPull() {
+        if (!useCapsuleCollision() || !(entity instanceof LivingEntity living)) {
+            return;
+        }
+        boolean controlled = entity.level().isClientSide()
+            ? entity.isControlledByLocalInstance()
+            : !(entity instanceof Player);
+        if (!controlled) {
+            return;
+        }
+        if (entity instanceof Player player && player.getAbilities().flying) {
+            return;
+        }
+        if (living.isFallFlying() || living.isNoGravity() || entity.isInWater() || entity.isInLava()) {
+            return;
+        }
+
+        Vec3 field = getTargetGravityVector();
+        if (field.lengthSqr() < 1.0E-6) {
+            return;
+        }
+        // chase target down: the held surface's inward direction while locked
+        // to a surface, the raw field otherwise — the same up the frame chases
+        Vec3 targetDown = effectiveTargetUp(field.normalize()).scale(-1);
+        Vec3 frameDown = RotationUtil.vecPlayerToWorld(new Vec3(0, -1, 0), visualRotation);
+        if (targetDown.dot(frameDown) > 0.9998) {
+            return; // aligned (within ~1 degree): correction is zero
+        }
+
+        // 0.08 is the standard living-entity gravity that travel() applies
+        Vec3 correction = targetDown.subtract(frameDown).scale(0.08 * currGravityStrength);
+        entity.setDeltaMovement(entity.getDeltaMovement().add(
+            RotationUtil.vecWorldToPlayer(correction, visualRotation)
+        ));
     }
 
     /**
@@ -362,10 +613,18 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return;
         }
 
-        Vec3 velocity = entity.getDeltaMovement();
-        // brake tangential (local x/z) movement; leave the gravity axis alone so
-        // jumping and falling are unaffected
-        entity.setDeltaMovement(velocity.x * 0.3, velocity.y, velocity.z * 0.3);
+        // Brake the velocity component tangential to the SURFACE, not the
+        // frame's local x/z: while the frame is still rotating toward a plated
+        // ship wall, the leftover world-down slide sits on the frame's local Y
+        // axis — the old local-x/z brake never touched it, so the player slid
+        // straight off the ship before alignment finished. The surface-normal
+        // component is left alone so jumping and landing are unaffected.
+        Vec3 normal = capsuleGroundNormal != null ? capsuleGroundNormal : getUpVector();
+        Vec3 worldVelocity = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), visualRotation);
+        double normalComponent = worldVelocity.dot(normal);
+        Vec3 tangential = worldVelocity.subtract(normal.scale(normalComponent));
+        Vec3 braked = normal.scale(normalComponent).add(tangential.scale(0.3));
+        entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(braked, visualRotation));
     }
 
     /**

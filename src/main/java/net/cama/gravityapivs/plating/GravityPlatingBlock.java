@@ -267,10 +267,21 @@ public class GravityPlatingBlock extends BaseEntityBlock {
         BlockState state, Level level, BlockPos pos, Player player,
         InteractionHand hand, BlockHitResult hit
     ) {
+        // only empty hand, amethyst cluster and glow ink sac interact with the
+        // plate; anything else (spawn eggs, blocks, tools...) passes through to
+        // normal item behavior with no message
+        ItemStack handItem = player.getItemInHand(hand);
+        if (!handItem.isEmpty()
+            && !handItem.is(net.minecraft.world.item.Items.AMETHYST_CLUSTER)
+            && !handItem.is(net.minecraft.world.item.Items.GLOW_INK_SAC)
+        ) {
+            return InteractionResult.PASS;
+        }
+
         if (level.isClientSide()) {
             return InteractionResult.SUCCESS;
         }
-        
+
         Direction hitDir = hit.getDirection();
         Direction plateDir = hitDir.getOpposite();
         
@@ -283,34 +294,8 @@ public class GravityPlatingBlock extends BaseEntityBlock {
         return be.interact(level, pos, plateDir, player, hand);
     }
     
-    /**
-     * Similar to {@link ShulkerBoxBlock#playerWillDestroy(Level, BlockPos, BlockState, Player)}
-     * Make it drop in creative mode.
-     *
-     * @return
-     */
-    @Override
-    public void playerWillDestroy(Level level, BlockPos pos, BlockState state, Player player) {
-        BlockEntity blockEntity = level.getBlockEntity(pos);
-        if (blockEntity instanceof GravityPlatingBlockEntity be &&
-            !level.isClientSide && player.isCreative()
-        ) {
-            List<ItemStack> drops = be.getDrops();
-        
-            for (ItemStack itemStack : drops) {
-                ItemEntity itemEntity = new ItemEntity(
-                    level,
-                    (double) pos.getX() + 0.5, (double) pos.getY() + 0.5, (double) pos.getZ() + 0.5,
-                    itemStack
-                );
-                itemEntity.setDefaultPickUpDelay();
-                level.addFreshEntity(itemEntity);
-            }
-        }
-        
-        super.playerWillDestroy(level, pos, state, player);
-    }
-    
+    // breaking in creative intentionally drops nothing (like vanilla blocks);
+    // survival drops come from getDrops below
     @Override
     public List<ItemStack> getDrops(BlockState blockState, LootParams.Builder builder) {
         BlockEntity blockEntity = builder.getOptionalParameter(LootContextParams.BLOCK_ENTITY);

@@ -52,8 +52,18 @@ public final class CapsuleCollider {
         }
     }
 
-    /** An obstacle box; when ship != null, the box is in shipyard coordinates. */
-    private record Obstacle(AABB box, @Nullable Ship ship) {}
+    /**
+     * An obstacle box; when ship != null, the box is in shipyard coordinates.
+     * exposedMask has bit i set when face i of the block (order: -x,+x,-y,+y,
+     * -z,+z, matching {@link #supportFaceNormal}) borders air/no-collision —
+     * only exposed faces may act as support faces.
+     */
+    private record Obstacle(AABB box, @Nullable Ship ship, int exposedMask) {}
+
+    // face index -> neighbor offset, order -x,+x,-y,+y,-z,+z
+    private static final int[][] FACE_OFFSETS = {
+        {-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}
+    };
 
     private static final class ResolveState {
         boolean grounded = false;
@@ -105,9 +115,20 @@ public final class CapsuleCollider {
         // touched come back BIT-IDENTICAL to the input (see sweep)
         Vec3 collided = movement.add(correction);
 
-        // step assist: when walking along the ground into a low obstacle, retry the
-        // move lifted by the step height, then settle back down
-        if (wasGrounded) {
+        // Step assist: when walking along the ground into a low obstacle, retry
+        // the move lifted by the step height, then settle back down.
+        //
+        // Guards (both essential):
+        // - never during upward motion: a jump made while brushing a wall used
+        //   to trigger the lift+settle cycle every tick, yo-yoing the player
+        //   against the wall ("stuck to the wall, jittering");
+        // - never below: the caller additionally disables it while the frame's
+        //   up disagrees with the surface being stood on (see EntityMixin) —
+        //   with gravity pressing the player against a tilted ship wall
+        //   mid-transition, each step attempt teleported them 0.6 along a
+        //   diagonal "up", a per-tick escalator that launched players off
+        //   plated walls at tilt-dependent speed.
+        if (wasGrounded && movement.dot(up) < 0.05) {
             Vec3 tangentIntended = rejectFrom(movement, up);
             Vec3 tangentAchieved = rejectFrom(collided, up);
             double intendedLen = tangentIntended.length();
@@ -125,7 +146,9 @@ public final class CapsuleCollider {
 
                 Vec3 stepMovement = settled.subtract(start);
                 Vec3 stepTangent = rejectFrom(stepMovement, up);
-                if (stepTangent.length() > tangentAchieved.length() + 0.01) {
+                // only accept a step that actually LANDS on ground — an assist
+                // that ends airborne is not a step, it is a launch
+                if (stepState.grounded && stepTangent.length() > tangentAchieved.length() + 0.01) {
                     collided = stepMovement;
                     state.grounded = state.grounded || stepState.grounded;
                     if (state.groundShip == null) {
@@ -299,7 +322,10 @@ public final class CapsuleCollider {
             double pushLen = worstDepth + SKIN;
             double upDot = Math.max(worstNormal.dot(up), worstNormal.dot(state.gravityUp));
 
-            Vec3 support = supportFaceNormal(worstLocalCenter, worstObstacle.box, worstObstacle.ship, up, state.gravityUp);
+            Vec3 support = supportFaceNormal(
+                worstLocalCenter, worstObstacle.box, worstObstacle.ship,
+                up, state.gravityUp, worstObstacle.exposedMask
+            );
             if (support != null) {
                 double supportUpDot = Math.max(support.dot(up), support.dot(state.gravityUp));
                 double align = worstNormal.dot(support);
@@ -329,15 +355,26 @@ public final class CapsuleCollider {
 
     /**
      * The face of the obstacle box that supports the capsule for this contact:
-     * among the faces the sphere center lies beyond, the one whose world-space
-     * outward normal points most along up. Null when the center is inside the
-     * box (deep penetration keeps the nearest-face push).
+     * among the EXPOSED faces the sphere center lies beyond, the one whose
+     * world-space outward normal points most along up. Null when the center is
+     * inside the box (deep penetration keeps the nearest-face push).
+     *
+     * Only exposed faces qualify: a wall of stacked blocks has an interior
+     * "top" face at every block seam, and promoting contacts onto those pushed
+     * the player UP a little at each seam — jumping against a wall while
+     * holding forward hovered/stuck on the wall instead of sliding down, and
+     * walking past walls stuttered on nothing.
      */
-    private static @Nullable Vec3 supportFaceNormal(Vec3 localCenter, AABB box, @Nullable Ship ship, Vec3 up, Vec3 gravityUp) {
+    private static @Nullable Vec3 supportFaceNormal(
+        Vec3 localCenter, AABB box, @Nullable Ship ship, Vec3 up, Vec3 gravityUp, int exposedMask
+    ) {
         Vec3 best = null;
         double bestDot = 0;
 
         for (int i = 0; i < 6; i++) {
+            if ((exposedMask & (1 << i)) == 0) {
+                continue;
+            }
             double beyond = switch (i) {
                 case 0 -> box.minX - localCenter.x;
                 case 1 -> localCenter.x - box.maxX;
@@ -447,6 +484,7 @@ public final class CapsuleCollider {
         }
 
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos neighbor = new BlockPos.MutableBlockPos();
         for (int x = minX; x <= maxX; x++) {
             for (int y = minY; y <= maxY; y++) {
                 for (int z = minZ; z <= maxZ; z++) {
@@ -459,8 +497,20 @@ public final class CapsuleCollider {
                     if (shape.isEmpty()) {
                         continue;
                     }
+
+                    // which faces are actually walkable surface (not buried
+                    // against a neighboring collider)
+                    int exposedMask = 0;
+                    for (int i = 0; i < 6; i++) {
+                        neighbor.set(x + FACE_OFFSETS[i][0], y + FACE_OFFSETS[i][1], z + FACE_OFFSETS[i][2]);
+                        BlockState n = level.getBlockState(neighbor);
+                        if (n.isAir() || n.getCollisionShape(level, neighbor).isEmpty()) {
+                            exposedMask |= 1 << i;
+                        }
+                    }
+
                     for (AABB aabb : shape.toAabbs()) {
-                        out.add(new Obstacle(aabb.move(x, y, z), ship));
+                        out.add(new Obstacle(aabb.move(x, y, z), ship, exposedMask));
                     }
                 }
             }

@@ -173,8 +173,16 @@ public abstract class EntityMixin {
             ? fieldVector.normalize().scale(-1)
             : up;
 
+        // step assist only while the frame's up agrees with the surface being
+        // stood on: mid-transition (gravity pressing the player against a
+        // surface the frame hasn't aligned to yet) the step lift points
+        // diagonally away from the surface and fires every tick — the
+        // "launched off the tilted plated wall" escalator
+        boolean stepEligible = comp.capsuleGrounded
+            && (comp.capsuleGroundNormal == null || comp.capsuleGroundNormal.dot(up) > 0.85);
+
         net.cama.gravityapivs.util.CapsuleCollider.Result result =
-            net.cama.gravityapivs.util.CapsuleCollider.collide(self, up, gravityUp, movement, comp.capsuleGrounded);
+            net.cama.gravityapivs.util.CapsuleCollider.collide(self, up, gravityUp, movement, stepEligible);
 
         boolean grounded = result.grounded;
         org.valkyrienskies.core.api.ships.Ship groundShip = result.groundShip;

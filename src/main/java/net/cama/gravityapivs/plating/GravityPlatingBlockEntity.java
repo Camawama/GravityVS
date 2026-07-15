@@ -410,7 +410,16 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 gravityapivs$applyShipFriction(ship, be, bestPlateDir, entity);
             }
 
-            if (controlsEntity && GravityConfig.autoJumpOnGravityPlateInnerCorner.get()) {
+            // The legacy corner auto-jump is for the cardinal-snap entities
+            // (mobs, items). Capsule players handle inner corners by rotating
+            // their frame onto the wall instead; with the smooth transition
+            // the auto-jump's trigger condition stayed true for many ticks in
+            // a row, stacking its 0.4-block hop every tick — the "walking from
+            // floor plating onto wall plating launches me into the air" bug.
+            if (controlsEntity
+                && GravityConfig.autoJumpOnGravityPlateInnerCorner.get()
+                && !comp.useCapsuleCollision()
+            ) {
                 tryToDoCornerAutoJump(blockState, blockPos, entity, comp, ship);
             }
         }

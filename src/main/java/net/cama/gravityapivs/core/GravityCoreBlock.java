@@ -58,6 +58,16 @@ public class GravityCoreBlock extends BaseEntityBlock {
         BlockState state, Level level, BlockPos pos, Player player,
         InteractionHand hand, BlockHitResult hit
     ) {
+        // only empty hand, amethyst cluster and glow ink sac interact with the
+        // core; anything else passes through to normal item behavior, no message
+        net.minecraft.world.item.ItemStack handItem = player.getItemInHand(hand);
+        if (!handItem.isEmpty()
+            && !handItem.is(net.minecraft.world.item.Items.AMETHYST_CLUSTER)
+            && !handItem.is(net.minecraft.world.item.Items.GLOW_INK_SAC)
+        ) {
+            return InteractionResult.PASS;
+        }
+
         if (level.isClientSide()) {
             return InteractionResult.SUCCESS;
         }
