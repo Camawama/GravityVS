@@ -41,6 +41,7 @@
       "ProjectileMixin",
       "RamTargetMixin",
       "ServerGamePacketListenerImplMixin",
+      "ServerPlayerGameModeMixin",
       "ShulkerBoxBlockEntityMixin",
       "ShulkerMixin",
       "SnowGolemMixin",
@@ -56,6 +57,7 @@
       "item.BehaviorUtilsMixin",
       "forge.MixinForgeHooks",
       "compat.ACEntityMixin",
+      "compat.VSEntityDraggerMixin",
       "compat.VSEntityShipCollisionMixin"
 	],
 	"client": [

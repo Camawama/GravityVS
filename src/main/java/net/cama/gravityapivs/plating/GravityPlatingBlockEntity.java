@@ -68,6 +68,11 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
         public @Nullable AABB effectBoxCache = null;
 
+        // the plate's own footprint + outward range (what the visual shows):
+        // gravity applied outside this but inside the effect box (the hidden
+        // sideways bleed) is only a SECONDARY, blend-supporting contribution
+        public @Nullable AABB primaryBoxCache = null;
+
         // visual grouping cache: adjacent same-config plates render as ONE
         // merged field; only the group's master plate submits the visual
         public @Nullable AABB visualBoxCache = null;
@@ -159,11 +164,52 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
             return effectBoxCache;
         }
+
+        /**
+         * The plate's own cell extended outward by the effect range — the
+         * region the visual shows. A small tolerance keeps positions right on
+         * the boundary inside.
+         */
+        public AABB getPrimaryBox(BlockPos blockPos, Direction plateDir) {
+            if (primaryBoxCache == null) {
+                double expand = 0.05;
+
+                double minX = blockPos.getX() - expand;
+                double minY = blockPos.getY() - expand;
+                double minZ = blockPos.getZ() - expand;
+                double maxX = blockPos.getX() + 1 + expand;
+                double maxY = blockPos.getY() + 1 + expand;
+                double maxZ = blockPos.getZ() + 1 + expand;
+
+                double delta = getEffectRange() - 1;
+                switch (plateDir) {
+                    case DOWN -> maxY += delta;
+                    case UP -> minY -= delta;
+                    case NORTH -> maxZ += delta;
+                    case SOUTH -> minZ -= delta;
+                    case WEST -> maxX += delta;
+                    case EAST -> minX -= delta;
+                }
+
+                primaryBoxCache = new AABB(minX, minY, minZ, maxX, maxY, maxZ);
+            }
+
+            return primaryBoxCache;
+        }
     }
 
     private @Nullable SideData[] sideData = null;
 
     private @Nullable AABB roughAreaBoxCache = null;
+
+    // True once this block entity has AUTHORITATIVE side data: loaded from NBT
+    // or a server update packet, or configured server-side on placement. A
+    // client-side block entity that never got data is a prediction artifact —
+    // e.g. a break on a ship that the server silently rejected as "too far"
+    // rolls the block back with a FRESH block entity. refreshCache would give
+    // it default side data (attracting, level 1, visual off), creating an
+    // invisible phantom gravity field. Such a block entity stays inert.
+    private boolean dataInitialized = false;
 
     public @Nullable SideData getSideData(Direction dir) {
         if (sideData == null) {
@@ -176,6 +222,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     public void load(CompoundTag tag) {
         super.load(tag);
 
+        dataInitialized = true;
         sideData = new SideData[6];
         for (Direction dir : Direction.values()) {
             String dirName = dir.getName();
@@ -258,6 +305,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             for (SideData sideDatum : sideData) {
                 if (sideDatum != null) {
                     sideDatum.effectBoxCache = null;
+                    sideDatum.primaryBoxCache = null;
                     sideDatum.visualBoxCache = null;
                 }
             }
@@ -286,6 +334,12 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
     public static void tick(Level world, BlockPos blockPos, BlockState blockState, GravityPlatingBlockEntity be) {
         if (!(blockState.getBlock() instanceof GravityPlatingBlock)) {
+            return;
+        }
+
+        // client block entities apply fields/visuals only once the server's
+        // data has actually arrived (see dataInitialized)
+        if (world.isClientSide() && !be.dataInitialized) {
             return;
         }
 
@@ -324,6 +378,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             Vec3 entityGravityDir = comp.getCurrGravityDirectionVec();
 
             boolean applies = false;
+            boolean primaryApplies = false;
             Direction bestPlateDir = null;
             double bestDistance = Double.MAX_VALUE;
 
@@ -385,10 +440,18 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 if (isOpposite) {
                     priority -= 10;
                 }
+                // inside the plate's own column (footprint + outward) the
+                // field is PRIMARY; in the hidden sideways bleed it is only a
+                // blend-supporting secondary — a player standing one block
+                // beside a plate must not have their gravity changed, but the
+                // bleed still smooths cube-edge transitions where a primary
+                // field is present
+                boolean secondary = !sideDatum.getPrimaryBox(blockPos, plateDir).contains(testingPos);
                 comp.applyGravityDirectionEffect(
-                        worldEffectDir, PLATING_ROTATION_PARAMS, priority
+                        worldEffectDir, PLATING_ROTATION_PARAMS, priority, secondary
                 );
                 applies = true;
+                primaryApplies = primaryApplies || !secondary;
 
                 if (distanceToPlate < bestDistance) {
                     bestDistance = distanceToPlate;
@@ -396,7 +459,9 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 }
             }
 
-            if (!applies) {
+            // bleed-only contact is not a field (the capability drops it too):
+            // no artificial-gravity force, friction or corner assist from it
+            if (!applies || !primaryApplies) {
                 continue;
             }
 
@@ -848,6 +913,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     }
 
     public void onPlacing(Direction side, SideData sideData) {
+        dataInitialized = true;
         refreshCache();
         this.sideData[side.ordinal()] = sideData;
         invalidateBoxCaches();

@@ -67,6 +67,11 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private static final int OPPOSITE_FLIP_STABLE_TICKS = 3;
     // how fast the visual frame may rotate
     private static final float VISUAL_TURN_PER_TICK = (float) Math.toRadians(15);
+    // during a COMMITTED surface change (walking around a cube edge) the frame
+    // turns faster: while it rotates, gravity pins the player against the edge
+    // corner and movement input points half-way between the faces — the longer
+    // that window, the longer the player is visibly stuck on the edge
+    private static final float TRANSITION_TURN_PER_TICK = (float) Math.toRadians(30);
     // after leaving a field, keep its pull for a few ticks (jumping off a plate
     // must not instantly revert gravity mid-air)
     private static final int FIELD_GRACE_TICKS = 6;
@@ -271,6 +276,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         advanceVisualRotation();
         applyTransitionPull();
         applyStaticFriction();
+        followShipYawRotation();
 
         if (!entity.level().isClientSide()) {
             maybeSendSync();
@@ -449,6 +455,18 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return;
         }
 
+        // FALLING away from the held face with nothing under it (walked off a
+        // convex edge and the wrap probe found no adjacent face): release the
+        // hold almost immediately. The full grace is sized for JUMP ascent —
+        // holding a stale "up" for 10 ticks while falling kept gravity pulling
+        // along the OLD face's down the whole time, so a player stepping off
+        // the top of a plated cube sailed straight past the side faces before
+        // the field could catch them. Jump ascent moves ALONG the held normal
+        // (dot > 0) and keeps the full grace.
+        if (lastGroundNormal != null && !capsuleGrounded && moved.dot(lastGroundNormal) < -0.08) {
+            groundNormalGraceTicks = Math.min(groundNormalGraceTicks, 1);
+        }
+
         if (groundNormalGraceTicks > 0) {
             groundNormalGraceTicks--;
         }
@@ -475,9 +493,45 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 return;
             }
             surfaceChangeCooldown = SURFACE_CHANGE_COOLDOWN_TICKS;
+            rotateVelocityAcrossSurfaceChange(lastGroundNormal, normal);
         }
         lastGroundNormal = normal;
         groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
+    }
+
+    /**
+     * Carry momentum AROUND a surface change instead of straight through it.
+     *
+     * Walking off the top face of a plated cube: by the time the side face is
+     * adopted, a tick or two of falling has built velocity along the OLD down.
+     * That component is TANGENTIAL to the new face, so the player slid down
+     * the side face at fall speed, straight past it — new-face gravity (only
+     * 0.08/tick) never had a chance against it. Rotating the velocity by the
+     * old-to-new-normal arc maps "falling onto the old face" into "pressing
+     * onto the new face": walking around an edge keeps walking speed, and the
+     * concave floor-to-wall case maps forward motion into up-the-wall motion.
+     * Opposite faces (dot < -0.5) are skipped — the arc is ambiguous there and
+     * such flips only happen through fields, not surface walking.
+     */
+    private void rotateVelocityAcrossSurfaceChange(Vec3 oldNormal, Vec3 newNormal) {
+        if (!useCapsuleCollision()) {
+            return;
+        }
+        boolean controlled = entity.level().isClientSide()
+            ? entity.isControlledByLocalInstance()
+            : !(entity instanceof Player);
+        if (!controlled) {
+            return;
+        }
+        double dot = oldNormal.dot(newNormal);
+        if (dot > 0.99 || dot < -0.5) {
+            return;
+        }
+
+        Quaternionf arc = QuaternionUtil.getRotationBetween(oldNormal, newNormal);
+        Vec3 worldVelocity = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), visualRotation);
+        Vec3 rotated = QuaternionUtil.rotate(worldVelocity, arc);
+        entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(rotated, visualRotation));
     }
 
     /**
@@ -628,6 +682,50 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
 
     /**
+     * Correct Valkyrien Skies' ship yaw-follow for rotated gravity frames.
+     *
+     * When a ship yaw-rotates under a dragged player, VS adds the ship's yaw
+     * delta directly to the player's yaw. Player yaw is FRAME-RELATIVE here:
+     * a yaw increment rotates the look about the frame's OWN up axis, so VS's
+     * world-space delta only lands correctly when the frame is upright. Stood
+     * upside down the same increment turns the camera the OPPOSITE way (and
+     * the parallel-transported frame itself never yaw-follows, because the
+     * plate normal doesn't change under a yaw rotation) — the reported
+     * "camera rotates against the ship". The proper local delta is the ship's
+     * yaw projected onto the frame's up axis: delta * (frameUp . worldUp).
+     * VS already applied delta * 1, so apply the difference. Upright frames
+     * get exactly zero — vanilla VS behavior is untouched.
+     */
+    private void followShipYawRotation() {
+        if (!(entity instanceof Player) || !entity.level().isClientSide() || !GCUtil.isClientPlayer(entity)) {
+            return;
+        }
+        if (isVisuallyDefault()) {
+            return;
+        }
+
+        org.valkyrienskies.mod.common.util.EntityDraggingInformation dragInfo =
+            ((org.valkyrienskies.mod.common.util.IEntityDraggingInformationProvider) entity)
+                .getDraggingInformation();
+        double applied = dragInfo.getAddedYawRotLastTick();
+        if (Math.abs(applied) < 1.0E-4) {
+            return;
+        }
+
+        double sense = getUpVector().y;
+        float correction = (float) (applied * (sense - 1.0));
+        if (Math.abs(correction) < 1.0E-4f) {
+            return;
+        }
+
+        entity.setYRot(entity.getYRot() + correction);
+        if (entity instanceof LivingEntity living) {
+            living.yHeadRot += correction;
+            living.yBodyRot += correction;
+        }
+    }
+
+    /**
      * Moves the visual/aim frame toward the frame requested by the field vector,
      * rate-limited so it is continuous. Converges exactly onto the canonical
      * cardinal frame when the field is cardinal.
@@ -668,7 +766,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
             float proportion = targetStableTicks >= 5
                 ? 0.5f
                 : Mth.lerp(Mth.clamp(angle / (float) Math.toRadians(3), 0.0f, 1.0f), 0.08f, 0.35f);
-            float step = Math.min(angle * proportion, VISUAL_TURN_PER_TICK);
+            float maxTurn = VISUAL_TURN_PER_TICK;
+            if (surfaceChangeCooldown > 0) {
+                // committed surface change: converge decisively (the player is
+                // pinned against the edge until the frame reaches the new face)
+                proportion = Math.max(proportion, 0.45f);
+                maxTurn = TRANSITION_TURN_PER_TICK;
+            }
+            float step = Math.min(angle * proportion, maxTurn);
             visualRotation.slerp(visualTarget, step / angle).normalize();
         }
 
@@ -932,6 +1037,19 @@ public class GravityCapabilityImpl implements IGravityCapability {
             isFiringUpdateEvent = false;
         }
 
+        // secondary (bleed) contributions only blend alongside a primary
+        // field; alone they are not a field (see applyGravityDirectionEffect)
+        boolean anyPrimary = false;
+        for (GravityDirEffect effect : tempEffects) {
+            if (!effect.secondary()) {
+                anyPrimary = true;
+                break;
+            }
+        }
+        if (!anyPrimary) {
+            tempEffects.clear();
+        }
+
         boolean hadFieldEffects = !tempEffects.isEmpty();
         resolveGravityTarget();
 
@@ -1185,7 +1303,24 @@ public class GravityCapabilityImpl implements IGravityCapability {
         @Nullable RotationParameters rotationParameters,
         double priority
     ) {
-        GravityDirEffect effect = new GravityDirEffect(direction, rotationParameters, priority);
+        applyGravityDirectionEffect(direction, rotationParameters, priority, false);
+    }
+
+    /**
+     * @param secondary a supporting/blending contribution (e.g. the hidden
+     *                  sideways bleed of a plate field): it participates in
+     *                  blending when a PRIMARY field is also present, but a
+     *                  tick with only secondary effects counts as no field at
+     *                  all — standing on plain ground one block beside a plate
+     *                  must not change gravity.
+     */
+    public void applyGravityDirectionEffect(
+        @NotNull Vec3 direction,
+        @Nullable RotationParameters rotationParameters,
+        double priority,
+        boolean secondary
+    ) {
+        GravityDirEffect effect = new GravityDirEffect(direction, rotationParameters, priority, secondary);
         if (isFiringUpdateEvent) {
             tempEffects.add(effect);
         }
@@ -1467,6 +1602,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
 
     /**
+     * The up direction gravity is CHASING right now: the adopted surface
+     * normal while one is held (support-first), otherwise the raw field's up.
+     * This — not the raw blended field — is the correct "which way is down
+     * meant to be" reference for collision/grounding during transitions.
+     */
+    public Vec3 getEffectiveUpVector() {
+        Vec3 field = getTargetGravityVector();
+        Vec3 fieldNormalized = field.lengthSqr() > 1.0E-6
+            ? field.normalize()
+            : getCurrGravityDirectionVec();
+        return effectiveTargetUp(fieldNormalized);
+    }
+
+    /**
      * When the visual frame has fully converged onto the canonical cardinal
      * frame, that direction; otherwise null. Non-player movement keeps the
      * original mod's exact cardinal code path when settled.
@@ -1530,7 +1679,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private record GravityDirEffect(
         @NotNull Vec3 direction,
         @Nullable RotationParameters rotationParameters,
-        double priority
+        double priority,
+        boolean secondary
     ) {
     }
 }

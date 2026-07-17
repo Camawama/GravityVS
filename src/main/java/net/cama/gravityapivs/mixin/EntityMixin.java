@@ -165,13 +165,15 @@ public abstract class EntityMixin {
         Entity self = (Entity) (Object) this;
         Vec3 up = comp.getUpVector();
 
-        // second ground reference: where the FIELD says up is — during a landing
-        // on a steep face the frame's up still points the old way, and contacts
-        // opposing the field must count as ground or alignment never engages
-        Vec3 fieldVector = comp.getTargetGravityVector();
-        Vec3 gravityUp = fieldVector.lengthSqr() > 1.0E-6
-            ? fieldVector.normalize().scale(-1)
-            : up;
+        // second ground reference: where gravity WANTS up to be — during a
+        // landing on a steep face the frame's up still points the old way, and
+        // contacts opposing the target must count as ground or alignment never
+        // engages. Uses the EFFECTIVE target (the adopted surface normal while
+        // one is held, the raw field otherwise): during an edge transition the
+        // raw blended field is diagonal and kept promoting contacts back onto
+        // the OLD face, pinning the player on the corner while the frame
+        // rotated — the "stuck at every cube edge for a second or two" bug.
+        Vec3 gravityUp = comp.getEffectiveUpVector();
 
         // step assist only while the frame's up agrees with the surface being
         // stood on: mid-transition (gravity pressing the player against a
@@ -193,12 +195,33 @@ public abstract class EntityMixin {
         // interpolation AND its anticheat exemptions — without this the server
         // rejects ship-carried movement ("moved wrongly") and rubber-bands the
         // player into the ship.
+        org.valkyrienskies.mod.common.util.EntityDraggingInformation dragInfo =
+            ((org.valkyrienskies.mod.common.util.IEntityDraggingInformationProvider) self)
+                .getDraggingInformation();
         if (grounded && groundShip != null) {
-            org.valkyrienskies.mod.common.util.EntityDraggingInformation dragInfo =
-                ((org.valkyrienskies.mod.common.util.IEntityDraggingInformationProvider) self)
-                    .getDraggingInformation();
+            // setLastShipStoodOn(non-null) also resets ticksSinceStoodOnShip to 0
             dragInfo.setLastShipStoodOn(groundShip.getId());
             dragInfo.setTicksSinceStoodOnShip(0);
+            // VS's collide wrapper (entity_collision.MixinEntity.collideWithShips)
+            // WIPES lastShipStoodOn whenever the collide result differs from its
+            // own ship-adjusted movement — and the capsule legitimately changes
+            // the movement every grounded tick, so standing on a ship erased the
+            // standing info the moment we set it (the ship moved away under the
+            // player). ignoreNextGroundStand is VS's own escape hatch: the
+            // wrapper consumes it and skips exactly that wipe.
+            dragInfo.setIgnoreNextGroundStand(true);
+        }
+        else if (!grounded && dragInfo.isEntityBeingDraggedByAShip()) {
+            // Airborne with recent ship-standing state (a jump on a moving
+            // ship): the capsule may still brush geometry mid-air, which
+            // changes the movement and would trigger the same wrapper wipe —
+            // losing the drag mid-jump and letting the ship slide out from
+            // under the player. Keep the state alive; VS's own 25-tick window
+            // (ticksSinceStoodOnShip keeps counting) still ends it naturally.
+            // Landing on WORLD ground takes the grounded-without-ship path
+            // above, where the flag is deliberately NOT set, so VS's normal
+            // hand-off wipe still happens the moment the player steps off.
+            dragInfo.setIgnoreNextGroundStand(true);
         }
 
         comp.capsuleGrounded = grounded;
@@ -477,6 +500,28 @@ public abstract class EntityMixin {
         if (comp == null) return;
         BlockPos blockPos = BlockPos.containing(RotationUtil.vecPlayerToWorld(0.0D, -0.20000000298023224D, 0.0D, gravityapivs$movementRotation(comp)).add(this.position));
         cir.setReturnValue(blockPos);
+    }
+
+    // The generic "block I stand on" probe must follow the gravity frame too.
+    // Vanilla computes it straight world-down (via mainSupportingBlockPos or a
+    // y-offset), so standing on a wall/ceiling face it lands in AIR — which
+    // silenced footstep sounds on gravity-core cubes (step sounds require the
+    // getOnPos() block to be non-air; plated cubes only worked by accident
+    // because the feet cell contains the non-air plating block itself).
+    // The vanilla epsilon offset (1e-5) is smaller than the capsule's skin
+    // gap, so a minimum of 0.05 keeps the probe inside the supporting block.
+    @Inject(
+        method = "Lnet/minecraft/world/entity/Entity;getOnPos(F)Lnet/minecraft/core/BlockPos;",
+        at = @At("HEAD"),
+        cancellable = true
+    )
+    private void inject_getOnPos(float offset, CallbackInfoReturnable<BlockPos> cir) {
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) return;
+        double depth = Math.max(offset, 0.05F);
+        cir.setReturnValue(BlockPos.containing(
+            RotationUtil.vecPlayerToWorld(0.0D, -depth, 0.0D, gravityapivs$movementRotation(comp)).add(this.position)
+        ));
     }
 
     // transform the argument to local coordinate

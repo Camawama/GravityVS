@@ -233,5 +233,39 @@ public abstract class ServerGamePacketListenerImplMixin {
         );
         return original.call(instance, argVec.x, argVec.y, argVec.z);
     }
-    
+
+    /**
+     * Movement acceptance for capsule players cannot use the stored AABB.
+     *
+     * After replaying a client movement, the server only accepts the packet
+     * position if moving the player's bounding box there collides with
+     * nothing it wasn't already colliding with. In capsule mode the stored
+     * box is a loose world-aligned ENVELOPE of the rotated capsule — it
+     * legitimately overlaps geometry the spheres are nowhere near (that is
+     * the entire point of the capsule), and Valkyrien Skies feeds its ships'
+     * world-space shapes into getCollisions. So a player standing on a
+     * rotated/plated ship failed this check on every packet, was teleported
+     * back each time, and the SERVER-side position froze: other clients saw
+     * them floating in place while the ship moved on (their own client kept
+     * looking normal, because the local ship drag instantly re-applied).
+     * The capsule replay in ServerPlayer.move() has already resolved real
+     * collisions at this point, so the envelope test adds nothing but false
+     * positives — skip it for capsule players.
+     */
+    @org.spongepowered.asm.mixin.injection.Inject(
+        method = "isPlayerCollidingWithAnythingNew",
+        at = @At("HEAD"),
+        cancellable = true
+    )
+    private void gravityapivs$capsuleSkipCollidingWithAnythingNew(
+        net.minecraft.world.level.LevelReader level, AABB box, double x, double y, double z,
+        org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Boolean> cir
+    ) {
+        net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
+            GravityChangerAPI.getGravityComponentOrNull(this.player);
+        if (comp != null && comp.useCapsuleCollision()) {
+            cir.setReturnValue(false);
+        }
+    }
+
 }
