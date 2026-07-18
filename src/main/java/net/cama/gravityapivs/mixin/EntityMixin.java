@@ -192,13 +192,42 @@ public abstract class EntityMixin {
         if (comp.capsuleGrounded && comp.capsuleGroundNormal != null
             && self.level().isClientSide() && self.isControlledByLocalInstance()
             && self instanceof net.minecraft.world.entity.LivingEntity living
-            && Math.abs(living.xxa) < 0.01 && Math.abs(living.zza) < 0.01
             && movement.dot(up) <= 0.01
         ) {
             Vec3 normal = comp.capsuleGroundNormal;
             Vec3 tangential = movement.subtract(normal.scale(movement.dot(normal)));
-            if (tangential.lengthSqr() < 0.15 * 0.15) {
-                movement = normal.scale(movement.dot(normal));
+            boolean hasInput = Math.abs(living.xxa) >= 0.01 || Math.abs(living.zza) >= 0.01;
+            if (!hasInput) {
+                if (tangential.lengthSqr() < 0.15 * 0.15) {
+                    movement = normal.scale(movement.dot(normal));
+                }
+            }
+            else {
+                // DIRECTIONAL pin while walking: on a tilted surface (a ship
+                // deck at a shallow angle) the downhill gravity creep reaches
+                // an equilibrium comparable to walk speed — the player slid
+                // downhill no matter which way they walked. Keep only the
+                // tangential component along the INPUT direction; the residue
+                // (the creep) is removed exactly like the idle pin. Real
+                // pushes exceed the threshold and pass through unchanged.
+                float yawRad = living.getYRot() * ((float) Math.PI / 180.0F);
+                double sin = Math.sin(yawRad);
+                double cos = Math.cos(yawRad);
+                Vec3 inputLocal = new Vec3(
+                    living.xxa * cos - living.zza * sin,
+                    0,
+                    living.zza * cos + living.xxa * sin
+                );
+                Vec3 inputWorld = RotationUtil.vecPlayerToWorld(inputLocal, comp.getVisualRotation());
+                Vec3 inputTangent = inputWorld.subtract(normal.scale(inputWorld.dot(normal)));
+                if (inputTangent.lengthSqr() > 1.0E-6) {
+                    Vec3 inputDir = inputTangent.normalize();
+                    Vec3 keep = inputDir.scale(Math.max(tangential.dot(inputDir), 0.0));
+                    Vec3 residue = tangential.subtract(keep);
+                    if (residue.lengthSqr() < 0.15 * 0.15) {
+                        movement = normal.scale(movement.dot(normal)).add(keep);
+                    }
+                }
             }
         }
 

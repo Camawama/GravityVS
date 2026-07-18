@@ -475,6 +475,23 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 gravityapivs$applyShipFriction(ship, be, bestPlateDir, entity);
             }
 
+            // Non-player entities on a ship: register them with Valkyrien
+            // Skies' own dragging every tick they stand in a plated field.
+            // Under rotated gravity our collide mixins change the collide
+            // result, which trips VS's "movement changed -> wipe ship-standing
+            // state" heuristic every tick — mobs were never dragged, so a
+            // moving ship slid out from under them (looked like they phased
+            // through the hull and fell off; players were unaffected because
+            // the capsule path already does exactly this).
+            if (controlsEntity && ship != null && !(entity instanceof Player) && entity.onGround()) {
+                org.valkyrienskies.mod.common.util.EntityDraggingInformation dragInfo =
+                    ((org.valkyrienskies.mod.common.util.IEntityDraggingInformationProvider) entity)
+                        .getDraggingInformation();
+                dragInfo.setLastShipStoodOn(ship.getId());
+                dragInfo.setTicksSinceStoodOnShip(0);
+                dragInfo.setIgnoreNextGroundStand(true);
+            }
+
             // The legacy corner auto-jump is for the cardinal-snap entities
             // (mobs, items). Capsule players handle inner corners by rotating
             // their frame onto the wall instead; with the smooth transition
@@ -617,13 +634,17 @@ public class GravityPlatingBlockEntity extends BlockEntity {
         double x1 = minX, y1 = minY, z1 = minZ;
         double x2 = maxX + 1, y2 = maxY + 1, z2 = maxZ + 1;
 
+        // the effect range COUNTS the plate's own block cell (see
+        // getPrimaryBox: cell + range - 1) — extending the full range past the
+        // cell drew the visual exactly one block longer than the real field
+        double outward = Math.max(0.0, effectRange - 1);
         switch (plateDir.getOpposite()) {
-            case UP -> y2 += effectRange;
-            case DOWN -> y1 -= effectRange;
-            case SOUTH -> z2 += effectRange;
-            case NORTH -> z1 -= effectRange;
-            case EAST -> x2 += effectRange;
-            case WEST -> x1 -= effectRange;
+            case UP -> y2 += outward;
+            case DOWN -> y1 -= outward;
+            case SOUTH -> z2 += outward;
+            case NORTH -> z1 -= outward;
+            case EAST -> x2 += outward;
+            case WEST -> x1 -= outward;
         }
         return new AABB(x1, y1, z1, x2, y2, z2);
     }

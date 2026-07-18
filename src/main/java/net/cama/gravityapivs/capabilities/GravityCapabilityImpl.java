@@ -127,6 +127,29 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private int surfaceChangeCooldown = 0;
     private static final int SURFACE_CHANGE_COOLDOWN_TICKS = 8;
 
+    // a face normal that was RELEASED moments ago (walked off an edge while
+    // the wrap probe missed): if a new face is acquired shortly after, the
+    // pair still counts as a face change so momentum rotates around the edge
+    // (see rotateVelocityAcrossSurfaceChange). Without this, falling onto the
+    // next face of a cube kept the built-up fall velocity TANGENTIAL to that
+    // face — the player flew far along it (or straight past it) instead of
+    // being pressed onto it.
+    private @Nullable Vec3 recentReleasedNormal = null;
+    private int recentReleasedTicks = 0;
+    private static final int RECENT_RELEASE_MEMORY_TICKS = 15;
+
+    // ship-relative idle anchor: standing still on ship plating pins the feet
+    // to a fixed SHIPYARD-space point (drift-free on rotating contraptions by
+    // construction — the pinned point rotates exactly with the ship)
+    private @Nullable org.joml.Vector3d shipAnchorPos = null;
+    private long shipAnchorShipId = 0;
+
+    // watchdog: capsule mode with zero gravity influence should be impossible;
+    // if it persists anyway, snap out instead of leaving the player stuck with
+    // sphere collision in the plain world
+    private int capsuleNoInfluenceTicks = 0;
+    private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
+
     // chase-target stability: a still target is converged on decisively, a
     // moving one is followed with smoothing
     private final Quaternionf lastChaseTarget = new Quaternionf();
@@ -270,12 +293,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return;
         }
 
+        applyShipIdleAnchor();
         updateGravityStatus();
         applyGravityChange();
         updateSurfaceProbe();
         advanceVisualRotation();
         applyTransitionPull();
         applyStaticFriction();
+        capsuleExitWatchdog();
 
         if (!entity.level().isClientSide()) {
             maybeSendSync();
@@ -296,6 +321,9 @@ public class GravityCapabilityImpl implements IGravityCapability {
         lastGroundNormal = null;
         groundNormalGraceTicks = 0;
         surfaceChangeCooldown = 0;
+        recentReleasedNormal = null;
+        recentReleasedTicks = 0;
+        shipAnchorPos = null;
 
         targetGravityVector = DOWN;
         targetGravityStrength = 1.0;
@@ -303,6 +331,110 @@ public class GravityCapabilityImpl implements IGravityCapability {
         currGravityDirection = Direction.DOWN;
         applyGravityChange();
         advanceVisualRotation();
+    }
+
+    /**
+     * Standing IDLE on a ship in capsule mode: pin the feet to a fixed
+     * shipyard-space point. Valkyrien Skies' drag carries standing entities
+     * with the ship, but its per-tick reposition accumulates a slow tangential
+     * error on rotating contraptions — "standing still on the spinning wall
+     * slowly slides me off, and sliding off carries launch velocity".
+     * Anchoring in the SHIP's own coordinate space cannot drift, and stripping
+     * the tangential velocity while pinned empties the reservoir that used to
+     * discharge as a launch. Any input, jump, real push (knockback, piston) or
+     * ground change releases the anchor immediately.
+     */
+    private void applyShipIdleAnchor() {
+        if (!entity.level().isClientSide() || !entity.isControlledByLocalInstance()) {
+            return;
+        }
+        org.valkyrienskies.core.api.ships.Ship ship = capsuleGroundShip;
+        if (!useCapsuleCollision() || !capsuleGrounded || ship == null
+            || !(entity instanceof LivingEntity living)
+            || living.isFallFlying()
+            || (entity instanceof Player player && player.getAbilities().flying)
+            || Math.abs(living.xxa) > 0.01 || Math.abs(living.zza) > 0.01
+        ) {
+            shipAnchorPos = null;
+            return;
+        }
+
+        Vec3 normal = capsuleGroundNormal != null ? capsuleGroundNormal : getUpVector();
+        Vec3 worldVelocity = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), visualRotation);
+        double normalVel = worldVelocity.dot(normal);
+        if (normalVel > 0.05) {
+            // jumping / being launched away from the surface
+            shipAnchorPos = null;
+            return;
+        }
+        Vec3 tangentialVel = worldVelocity.subtract(normal.scale(normalVel));
+        if (tangentialVel.lengthSqr() > 0.2 * 0.2) {
+            // a real push is in flight: let it play out
+            shipAnchorPos = null;
+            return;
+        }
+
+        if (shipAnchorPos == null || shipAnchorShipId != ship.getId()) {
+            org.joml.Vector3d p = new org.joml.Vector3d(entity.getX(), entity.getY(), entity.getZ());
+            ship.getTransform().getWorldToShipMatrix().transformPosition(p);
+            shipAnchorPos = p;
+            shipAnchorShipId = ship.getId();
+            return;
+        }
+
+        org.joml.Vector3d w = new org.joml.Vector3d(shipAnchorPos);
+        ship.getTransform().getShipToWorldMatrix().transformPosition(w);
+        if (entity.position().distanceToSqr(w.x, w.y, w.z) > 1.0) {
+            // ship teleported or badly desynced: don't yank the player around
+            shipAnchorPos = null;
+            return;
+        }
+        entity.setPos(w.x, w.y, w.z);
+        entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(normal.scale(normalVel), visualRotation));
+    }
+
+    /**
+     * Last line of defense for "the spheres never went away": capsule mode
+     * active for two full seconds with NO gravity influence at all (no field,
+     * no grace, no held surface, default base gravity, not riding anything)
+     * cannot be a legitimate state — the frame should long have converged and
+     * exited. Whatever kept it out (a server direction flip war, a
+     * hemisphere-flipped quaternion, state carried through a respawn), snap to
+     * exact vanilla with full look/velocity compensation and log it.
+     */
+    private void capsuleExitWatchdog() {
+        if (!(entity instanceof Player) || shouldAcceptServerSync()) {
+            capsuleNoInfluenceTicks = 0;
+            return;
+        }
+        boolean influenced = fieldGraceTicks > 0
+            || lastGroundNormal != null
+            || !baseGravityDirection.equals(DOWN)
+            || entity.getVehicle() != null;
+        if (influenced || !useCapsuleCollision()) {
+            capsuleNoInfluenceTicks = 0;
+            return;
+        }
+        if (++capsuleNoInfluenceTicks < 40) {
+            return;
+        }
+
+        LOGGER.warn(
+            "[GravityVS] capsule mode stuck with no gravity influence (dir={}, w={}); forcing exit",
+            currGravityDirection, visualRotation.w()
+        );
+        Quaternionf old = new Quaternionf(visualRotation);
+        currGravityDirection = Direction.DOWN;
+        prevGravityDirection = Direction.DOWN;
+        serverDirectionDisagreeStreak = 0;
+        Quaternionf canonical = RotationUtil.getWorldRotationQuaternion(Direction.DOWN);
+        visualRotation.set(canonical);
+        visualTarget.set(canonical);
+        prevVisualRotation.set(canonical);
+        compensateFrameChange(old, visualRotation);
+        updateBoundingBox();
+        needsSync = true;
+        capsuleNoInfluenceTicks = 0;
     }
 
     /**
@@ -350,11 +482,16 @@ public class GravityCapabilityImpl implements IGravityCapability {
             lastGroundNormal = null;
             groundNormalGraceTicks = 0;
             surfaceChangeCooldown = 0;
+            recentReleasedNormal = null;
+            recentReleasedTicks = 0;
             return;
         }
 
         if (surfaceChangeCooldown > 0) {
             surfaceChangeCooldown--;
+        }
+        if (recentReleasedTicks > 0 && --recentReleasedTicks == 0) {
+            recentReleasedNormal = null;
         }
 
         Vec3 fieldDown = targetGravityVector != null && targetGravityVector.lengthSqr() > 1.0E-6
@@ -382,6 +519,34 @@ public class GravityCapabilityImpl implements IGravityCapability {
         Vec3 tangent = held ? moved.subtract(heldNormal.scale(moved.dot(heldNormal))) : Vec3.ZERO;
         double tangentSpeed = tangent.length();
         Vec3 tangentDir = tangentSpeed > 1.0E-6 ? tangent.scale(1.0 / tangentSpeed) : Vec3.ZERO;
+
+        // Pressed against an obstacle, the ACTUAL movement is blocked to ~zero
+        // — but the INPUT still says where the player is trying to go. Without
+        // this, walking on a plated floor into a plated wall never fired the
+        // concave adoption below (the wall itself zeroed the movement that was
+        // supposed to drive the probe): the player just bumped into the wall
+        // forever instead of walking up it.
+        if (held && tangentSpeed <= 0.02
+            && entity instanceof LivingEntity living
+            && (Math.abs(living.xxa) > 0.01 || Math.abs(living.zza) > 0.01)
+            && entity.level().isClientSide() && entity.isControlledByLocalInstance()
+        ) {
+            float yawRad = living.getYRot() * ((float) Math.PI / 180.0F);
+            double sin = Math.sin(yawRad);
+            double cos = Math.cos(yawRad);
+            // vanilla getInputVector: input (strafe, forward) rotated by yaw
+            Vec3 inputLocal = new Vec3(
+                living.xxa * cos - living.zza * sin,
+                0,
+                living.zza * cos + living.xxa * sin
+            );
+            Vec3 inputWorld = RotationUtil.vecPlayerToWorld(inputLocal, visualRotation);
+            Vec3 inputTangent = inputWorld.subtract(heldNormal.scale(inputWorld.dot(heldNormal)));
+            if (inputTangent.lengthSqr() > 1.0E-6) {
+                tangentDir = inputTangent.normalize();
+                tangentSpeed = 0.1;
+            }
+        }
 
         Vec3 normal = probeSurfaceNormal(feet.subtract(probeDown.scale(0.2)), probeDown, 0.2 + GROUND_PROBE_DEPTH);
         if (normal != null && normal.dot(fieldUp) > -0.1) {
@@ -470,6 +635,12 @@ public class GravityCapabilityImpl implements IGravityCapability {
             groundNormalGraceTicks--;
         }
         else {
+            if (lastGroundNormal != null) {
+                // remember what we just let go of: catching the next face a
+                // few ticks later must still count as a face change
+                recentReleasedNormal = lastGroundNormal;
+                recentReleasedTicks = RECENT_RELEASE_MEMORY_TICKS;
+            }
             lastGroundNormal = null;
         }
     }
@@ -494,6 +665,26 @@ public class GravityCapabilityImpl implements IGravityCapability {
             surfaceChangeCooldown = SURFACE_CHANGE_COOLDOWN_TICKS;
             rotateVelocityAcrossSurfaceChange(lastGroundNormal, normal);
         }
+        else if (lastGroundNormal == null && recentReleasedNormal != null
+            && recentReleasedNormal.dot(normal) < 0.99
+        ) {
+            // Acquisition shortly after walking off a face (the hold lapsed
+            // while airborne between the two): this IS a face change, so
+            // commit and carry momentum around the edge — otherwise the fall
+            // velocity built between release and re-acquisition stays
+            // tangential to the new face and slides the player along/past it.
+            // Only when the FIELD endorses the new face as up: landing back on
+            // plain ground under a lingering field must not rotate velocity.
+            Vec3 fieldUp = targetGravityVector != null && targetGravityVector.lengthSqr() > 1.0E-6
+                ? targetGravityVector.normalize().scale(-1)
+                : getCurrGravityDirectionVec().scale(-1);
+            if (normal.dot(fieldUp) > 0.35 && surfaceChangeCooldown == 0) {
+                surfaceChangeCooldown = SURFACE_CHANGE_COOLDOWN_TICKS;
+                rotateVelocityAcrossSurfaceChange(recentReleasedNormal, normal);
+            }
+        }
+        recentReleasedNormal = null;
+        recentReleasedTicks = 0;
         lastGroundNormal = normal;
         groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
     }
@@ -648,10 +839,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
      * character when idle — so do we.
      */
     private void applyStaticFriction() {
-        if (!useCapsuleCollision() || !capsuleGrounded) {
+        if (!(entity instanceof LivingEntity living)) {
             return;
         }
-        if (!(entity instanceof LivingEntity living)) {
+        // Players: capsule mode only (vanilla handles the default case).
+        // NON-players too: mobs under blended fields (spawned inside a plated
+        // cube, standing on a plated ship) have a permanently tilted pull
+        // whose tangential component vanilla's multiplicative friction only
+        // slows to a constant creep — idle mobs slid to the corners of the
+        // cube and off plated platforms.
+        if (isVisuallyDefault()) {
+            return;
+        }
+        boolean grounded = entity instanceof Player ? capsuleGrounded : entity.onGround();
+        if (!grounded) {
             return;
         }
 
@@ -672,7 +873,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // axis — the old local-x/z brake never touched it, so the player slid
         // straight off the ship before alignment finished. The surface-normal
         // component is left alone so jumping and landing are unaffected.
-        Vec3 normal = capsuleGroundNormal != null ? capsuleGroundNormal : getUpVector();
+        Vec3 normal = entity instanceof Player && capsuleGroundNormal != null
+            ? capsuleGroundNormal : getUpVector();
         Vec3 worldVelocity = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), visualRotation);
         double normalComponent = worldVelocity.dot(normal);
         Vec3 tangential = worldVelocity.subtract(normal.scale(normalComponent));
@@ -691,6 +893,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
      */
     private void advanceVisualRotation() {
         prevVisualRotation.set(visualRotation);
+        Quaternionf frameBefore = new Quaternionf(visualRotation);
 
         if (syncedVisualTarget != null && shouldAcceptServerSync()) {
             visualTarget.set(syncedVisualTarget);
@@ -734,6 +937,29 @@ public class GravityCapabilityImpl implements IGravityCapability {
             }
             float step = Math.min(angle * proportion, maxTurn);
             visualRotation.slerp(visualTarget, step / angle).normalize();
+        }
+
+        // WORLD VELOCITY IS INVARIANT UNDER THE CHASE. Local velocity would
+        // otherwise be dragged with the rotating frame — which fabricated
+        // momentum out of thin air: releasing from a rotated surface swung the
+        // built-up velocity through world space as the frame chased back
+        // upright (the "slid off the spinning contraption and got LAUNCHED far
+        // away" bug), and every face transition rotated momentum TWICE (once
+        // implicitly here, once explicitly in rotateVelocityAcrossSurfaceChange
+        // — which undid the concave up-the-wall conversion and overshot convex
+        // edges). The explicit face-change rotation is now the single owner of
+        // momentum redirection. Creative flight keeps the frame-dragged
+        // behavior: velocity rotating with the frame is what closes orbits
+        // around gravity cores (a deliberate design).
+        if (!visualRotation.equals(frameBefore)) {
+            boolean controlled = entity.level().isClientSide()
+                ? entity.isControlledByLocalInstance()
+                : !(entity instanceof Player);
+            boolean flying = entity instanceof Player player && player.getAbilities().flying;
+            if (controlled && !flying) {
+                Vec3 world = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), frameBefore);
+                entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(world, visualRotation));
+            }
         }
 
         normalizeTwist();
@@ -1536,9 +1762,12 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
     /** True when both physics and the visual frame are exactly vanilla. */
     public boolean isVisuallyDefault() {
+        // |w|: q and -q are the same rotation, and long premul/mul chains can
+        // legitimately converge onto the NEGATIVE identity — which would keep
+        // capsule mode latched on forever in the plain world
         return currGravityDirection == Direction.DOWN
-            && visualRotation.w() >= 0.9999999f
-            && prevVisualRotation.w() >= 0.9999999f;
+            && Math.abs(visualRotation.w()) >= 0.9999999f
+            && Math.abs(prevVisualRotation.w()) >= 0.9999999f;
     }
 
     /** True while the visual frame is rotating (this tick differs from last). */
