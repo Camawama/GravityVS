@@ -268,4 +268,41 @@ public abstract class ServerGamePacketListenerImplMixin {
         }
     }
 
+    /**
+     * The other half of movement acceptance for capsule players. The accept
+     * expression is
+     * {@code (!movedWrongly || !noCollision(player, preMoveBox)) && !collidingWithAnythingNew}
+     * — vanilla forgives a "moved wrongly" only if the player was ALREADY
+     * stuck in something. A capsule player's envelope box frequently sits in
+     * open air (standing upside down under a ship's plating), so any replay
+     * mismatch (Valkyrien Skies ship transforms lag differently on client and
+     * server, and gravity snapping on a ship guarantees a mismatch window)
+     * fell into the reject/teleport branch: the SERVER-side position froze,
+     * VS's ship-relative broadcast replacement (MixinServerEntity) went
+     * silent, and other clients saw the player frozen mid-air with only head
+     * rotation updating — exactly and only from the moment gravity snapped to
+     * the ship face. Reporting "was already colliding" routes capsule players
+     * into the forgiving branch; combined with the skip above, their reported
+     * position is always accepted (the capsule replay plus VS's server-side
+     * drag keep it sane, same as VS's own dragged-entity exemptions).
+     */
+    @WrapOperation(
+        method = "handleMovePlayer",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/server/level/ServerLevel;noCollision(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/AABB;)Z"
+        )
+    )
+    private boolean gravityapivs$capsuleMoveAcceptance(
+        net.minecraft.server.level.ServerLevel level, net.minecraft.world.entity.Entity entity, AABB box,
+        Operation<Boolean> original
+    ) {
+        net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
+            GravityChangerAPI.getGravityComponentOrNull(this.player);
+        if (comp != null && comp.useCapsuleCollision()) {
+            return false;
+        }
+        return original.call(level, entity, box);
+    }
+
 }

@@ -18,12 +18,9 @@ public class GravityCapabilities
 	
 	public static void attachEntityCapability(AttachCapabilitiesEvent<Entity> e)
 	{
-		LazyOptional<IGravityCapability> inst = LazyOptional.of(() ->
-		{
-			GravityCapabilityImpl i = new GravityCapabilityImpl();
-			i.setEntity(e.getObject());
-			return i;
-		});
+		GravityCapabilityImpl impl = new GravityCapabilityImpl();
+		impl.setEntity(e.getObject());
+		LazyOptional<IGravityCapability> inst = LazyOptional.of(() -> impl);
 		// invalidate the LazyOptional when the entity's capabilities are invalidated
 		e.addListener(inst::invalidate);
 		e.addCapability(IGravityCapability.ID, new ICapabilitySerializable<CompoundTag>()
@@ -36,16 +33,19 @@ public class GravityCapabilities
 				return GRAVITY.orEmpty(capability, inst.cast());
 			}
 
+			// NBT (de)serialization goes through the impl directly, not the LazyOptional:
+			// Forge still saves entity NBT after caps are invalidated (e.g. dead players
+			// during autosave), and the invalidated optional would throw.
 			@Override
 			public CompoundTag serializeNBT()
 			{
-				return inst.orElseThrow(NullPointerException::new).serializeNBT();
+				return impl.serializeNBT();
 			}
 
 			@Override
 			public void deserializeNBT(CompoundTag nbt)
 			{
-				inst.orElseThrow(NullPointerException::new).deserializeNBT(nbt);
+				impl.deserializeNBT(nbt);
 			}
 		});
 	}

@@ -276,7 +276,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
         advanceVisualRotation();
         applyTransitionPull();
         applyStaticFriction();
-        followShipYawRotation();
 
         if (!entity.level().isClientSide()) {
             maybeSendSync();
@@ -681,49 +680,9 @@ public class GravityCapabilityImpl implements IGravityCapability {
         entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(braked, visualRotation));
     }
 
-    /**
-     * Correct Valkyrien Skies' ship yaw-follow for rotated gravity frames.
-     *
-     * When a ship yaw-rotates under a dragged player, VS adds the ship's yaw
-     * delta directly to the player's yaw. Player yaw is FRAME-RELATIVE here:
-     * a yaw increment rotates the look about the frame's OWN up axis, so VS's
-     * world-space delta only lands correctly when the frame is upright. Stood
-     * upside down the same increment turns the camera the OPPOSITE way (and
-     * the parallel-transported frame itself never yaw-follows, because the
-     * plate normal doesn't change under a yaw rotation) — the reported
-     * "camera rotates against the ship". The proper local delta is the ship's
-     * yaw projected onto the frame's up axis: delta * (frameUp . worldUp).
-     * VS already applied delta * 1, so apply the difference. Upright frames
-     * get exactly zero — vanilla VS behavior is untouched.
-     */
-    private void followShipYawRotation() {
-        if (!(entity instanceof Player) || !entity.level().isClientSide() || !GCUtil.isClientPlayer(entity)) {
-            return;
-        }
-        if (isVisuallyDefault()) {
-            return;
-        }
-
-        org.valkyrienskies.mod.common.util.EntityDraggingInformation dragInfo =
-            ((org.valkyrienskies.mod.common.util.IEntityDraggingInformationProvider) entity)
-                .getDraggingInformation();
-        double applied = dragInfo.getAddedYawRotLastTick();
-        if (Math.abs(applied) < 1.0E-4) {
-            return;
-        }
-
-        double sense = getUpVector().y;
-        float correction = (float) (applied * (sense - 1.0));
-        if (Math.abs(correction) < 1.0E-4f) {
-            return;
-        }
-
-        entity.setYRot(entity.getYRot() + correction);
-        if (entity instanceof LivingEntity living) {
-            living.yHeadRot += correction;
-            living.yBodyRot += correction;
-        }
-    }
+    // (ship yaw-follow correction for rotated frames lives in
+    // compat.VSEntityDraggerMixin, wrapping the yaw writes inside VS's own
+    // drag — applying it here, one tick later, produced a per-tick sawtooth)
 
     /**
      * Moves the visual/aim frame toward the frame requested by the field vector,

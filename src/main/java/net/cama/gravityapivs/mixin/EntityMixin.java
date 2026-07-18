@@ -175,6 +175,33 @@ public abstract class EntityMixin {
         // rotated — the "stuck at every cube edge for a second or two" bug.
         Vec3 gravityUp = comp.getEffectiveUpVector();
 
+        // STATIC PIN: standing idle on a sloped surface (a tilted ship deck,
+        // a blocky planet face), the tangential component of gravity
+        // regenerates every tick before any post-hoc friction can see it — a
+        // sphere resting on a tilted plane slowly creeps downhill forever
+        // ("sliding off ships at any angle"). A vanilla box doesn't slide
+        // because the collision itself blocks the motion; give the capsule
+        // the same behavior by removing the small tangential part of the
+        // movement while grounded with no input. Real pushes (knockback,
+        // pistons) exceed the threshold and pass through; the axis comparison
+        // in move() then also zeroes the corresponding velocity, so the pin
+        // is stable instead of re-accelerating each tick.
+        // controlled side only: on the server the replayed client movement has
+        // no input state (xxa/zza are always zero there), so the pin would
+        // wrongly eat genuine walking movements during the replay
+        if (comp.capsuleGrounded && comp.capsuleGroundNormal != null
+            && self.level().isClientSide() && self.isControlledByLocalInstance()
+            && self instanceof net.minecraft.world.entity.LivingEntity living
+            && Math.abs(living.xxa) < 0.01 && Math.abs(living.zza) < 0.01
+            && movement.dot(up) <= 0.01
+        ) {
+            Vec3 normal = comp.capsuleGroundNormal;
+            Vec3 tangential = movement.subtract(normal.scale(movement.dot(normal)));
+            if (tangential.lengthSqr() < 0.15 * 0.15) {
+                movement = normal.scale(movement.dot(normal));
+            }
+        }
+
         // step assist only while the frame's up agrees with the surface being
         // stood on: mid-transition (gravity pressing the player against a
         // surface the frame hasn't aligned to yet) the step lift points
