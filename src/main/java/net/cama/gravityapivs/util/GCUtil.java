@@ -24,6 +24,12 @@ public class GCUtil {
 		});
 	}
 
+	// Level#getEntities() (SRG m_142646_) is protected in 1.20.1, so the O(1)
+	// client-side UUID lookup goes through a cached reflective accessor;
+	// ObfuscationReflectionHelper resolves the SRG name in both dev and prod.
+	private static java.lang.reflect.Method levelGetEntities;
+
+	@SuppressWarnings("unchecked")
 	public static Entity getEntityByUUID(Level level, UUID uuid)
 	{
 		if (level instanceof ServerLevel serverLevel)
@@ -32,11 +38,25 @@ public class GCUtil {
 		}
 		if (level instanceof ClientLevel clientLevel)
 		{
-			for (Entity entity : clientLevel.entitiesForRendering())
+			try
 			{
-				if (entity.getUUID().equals(uuid))
+				if (levelGetEntities == null)
 				{
-					return entity;
+					levelGetEntities = net.minecraftforge.fml.util.ObfuscationReflectionHelper
+						.findMethod(Level.class, "m_142646_");
+				}
+				return ((net.minecraft.world.level.entity.LevelEntityGetter<Entity>)
+					levelGetEntities.invoke(clientLevel)).get(uuid);
+			}
+			catch (ReflectiveOperationException | RuntimeException e)
+			{
+				// fall back to the linear scan if the accessor is unavailable
+				for (Entity entity : clientLevel.entitiesForRendering())
+				{
+					if (entity.getUUID().equals(uuid))
+					{
+						return entity;
+					}
 				}
 			}
 		}

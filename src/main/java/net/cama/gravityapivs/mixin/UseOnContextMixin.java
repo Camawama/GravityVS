@@ -9,7 +9,6 @@ import org.spongepowered.asm.mixin.injection.At;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 
-import net.minecraft.core.Direction;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.context.UseOnContext;
 
@@ -24,11 +23,11 @@ public abstract class UseOnContextMixin {
         )
     )
     private float wrapOperation_getPlayerYaw_getYaw_0(Player entity, Operation<Float> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        // Player aim angles live in the visual aim frame, not the snapped cardinal frame.
+        if (GravityChangerAPI.isAimDefault(entity)) {
             return original.call(entity);
         }
-        
-        return RotationUtil.rotPlayerToWorld(original.call(entity), entity.getXRot(), gravityDirection).x;
+
+        return RotationUtil.rotPlayerToWorld(original.call(entity), entity.getXRot(), GravityChangerAPI.getAimRotation(entity)).x;
     }
 }

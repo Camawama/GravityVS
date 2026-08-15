@@ -971,6 +971,116 @@ public abstract class EntityMixin {
     }
 
 
+    // Fluid currents: the flow push is accumulated in WORLD space and added
+    // straight onto deltaMovement — which this mod interprets in the
+    // entity's LOCAL frame. Unconverted, a water current pushes a rotated
+    // player along the wrong axis entirely (e.g. into the stream bed).
+    // The wrapped call is `setDeltaMovement(getDeltaMovement().add(flow))`,
+    // so the world-space flow is recovered as (arg - currentDm) and
+    // re-expressed through the same frame move() uses.
+    //
+    // TARGET: Forge's fluid-API patch rewrites Entity's fluid handling — the
+    // vanilla-named updateFluidHeightAndDoFluidPushing(TagKey,double) is
+    // reduced to a pure query shim, and the real push logic (including the
+    // setDeltaMovement call) lives in the per-fluid-type BiConsumer lambda
+    // of the Forge-added updateFluidHeightAndDoFluidPushing(Predicate)
+    // overload. The synthetic lambda name is stable for a given Forge build
+    // (verified against 1.20.1-47.4.16 bytecode); require = 0 so a future
+    // Forge bump that renumbers lambdas degrades to vanilla behavior instead
+    // of crashing the launch.
+    @WrapOperation(
+        method = "lambda$updateFluidHeightAndDoFluidPushing$29(Lnet/minecraftforge/fluids/FluidType;Lnet/minecraft/world/entity/Entity$FluidCalcs;)V",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/world/entity/Entity;setDeltaMovement(Lnet/minecraft/world/phys/Vec3;)V"
+        ),
+        require = 0
+    )
+    private void gravityapivs$rotateFluidPush(Entity self, Vec3 newDm, Operation<Void> original) {
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) {
+            original.call(self, newDm);
+            return;
+        }
+        Vec3 localDm = this.getDeltaMovement();
+        Vec3 worldFlow = newDm.subtract(localDm);
+        original.call(self, localDm.add(gravityapivs$worldToLocal(worldFlow, comp)));
+    }
+
+    @Shadow
+    protected abstract void onInsideBlock(BlockState state);
+
+    // In capsule mode the stored AABB is a loose world-aligned ENVELOPE of the
+    // tilted capsule — up to a block larger than the body in every direction.
+    // Vanilla's inside-block check (fire damage, cobwebs, berry bushes, powder
+    // snow, portals) iterates that envelope, so a tilted player touched blocks
+    // they were nowhere near. Re-run the same check but only visit cells the
+    // capsule's spheres actually overlap.
+    @Inject(method = "checkInsideBlocks", at = @At("HEAD"), cancellable = true)
+    private void gravityapivs$capsuleCheckInsideBlocks(CallbackInfo ci) {
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull((Entity) (Object) this);
+        if (comp == null || !comp.useCapsuleCollision()) {
+            return;
+        }
+        ci.cancel();
+
+        Entity self = (Entity) (Object) this;
+        AABB aabb = this.getBoundingBox();
+        BlockPos min = BlockPos.containing(aabb.minX + 1.0E-7D, aabb.minY + 1.0E-7D, aabb.minZ + 1.0E-7D);
+        BlockPos max = BlockPos.containing(aabb.maxX - 1.0E-7D, aabb.maxY - 1.0E-7D, aabb.maxZ - 1.0E-7D);
+        if (!this.level.hasChunksAt(min, max)) {
+            return;
+        }
+
+        double radius = net.cama.gravityapivs.util.CapsuleCollider.capsuleRadius(self);
+        double height = net.cama.gravityapivs.util.CapsuleCollider.capsuleHeight(self, radius);
+        double[] offsets = net.cama.gravityapivs.util.CapsuleCollider.sphereOffsets(height, radius);
+        Vec3 up = comp.getUpVector();
+        Vec3 feet = this.position();
+        double radiusSq = radius * radius;
+
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (int x = min.getX(); x <= max.getX(); x++) {
+            for (int y = min.getY(); y <= max.getY(); y++) {
+                for (int z = min.getZ(); z <= max.getZ(); z++) {
+                    boolean touched = false;
+                    for (double offset : offsets) {
+                        double cx = feet.x + up.x * offset;
+                        double cy = feet.y + up.y * offset;
+                        double cz = feet.z + up.z * offset;
+                        double dx = cx - Mth.clamp(cx, x, x + 1.0);
+                        double dy = cy - Mth.clamp(cy, y, y + 1.0);
+                        double dz = cz - Mth.clamp(cz, z, z + 1.0);
+                        if (dx * dx + dy * dy + dz * dz < radiusSq) {
+                            touched = true;
+                            break;
+                        }
+                    }
+                    if (!touched) {
+                        continue;
+                    }
+
+                    cursor.set(x, y, z);
+                    BlockState blockState = this.level.getBlockState(cursor);
+                    try {
+                        blockState.entityInside(this.level, cursor, self);
+                        this.onInsideBlock(blockState);
+                    }
+                    catch (Throwable throwable) {
+                        net.minecraft.CrashReport crashReport =
+                            net.minecraft.CrashReport.forThrowable(throwable, "Colliding entity with block");
+                        net.minecraft.CrashReportCategory category =
+                            crashReport.addCategory("Block being collided with");
+                        net.minecraft.CrashReportCategory.populateBlockDetails(
+                            category, this.level, cursor, blockState
+                        );
+                        throw new net.minecraft.ReportedException(crashReport);
+                    }
+                }
+            }
+        }
+    }
+
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;updateFluidOnEyes()V",
         at = @At(

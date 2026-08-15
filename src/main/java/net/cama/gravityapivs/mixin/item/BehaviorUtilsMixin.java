@@ -1,6 +1,7 @@
 package net.cama.gravityapivs.mixin.item;
 
 import net.cama.gravityapivs.api.GravityChangerAPI;
+import net.cama.gravityapivs.util.RotationUtil;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 
@@ -51,10 +52,15 @@ public class BehaviorUtilsMixin {
     )
     private static void onSetDeltaMovement(
         ItemEntity itemEntity, Vec3 deltaMovement,
-        Operation<Void> operation,
-        @Local LivingEntity entity
+        Operation<Void> operation
     ) {
-        GravityChangerAPI.setWorldVelocity(entity, deltaMovement);
+        // The throw vector is computed in world space, but the item's deltaMovement is in the
+        // item's local frame (its gravity was just set to the thrower's direction above).
+        // Apply the converted velocity to the ITEM - never touch the thrower's velocity.
+        operation.call(
+            itemEntity,
+            RotationUtil.vecWorldToPlayer(deltaMovement, GravityChangerAPI.getGravityDirection(itemEntity))
+        );
     }
     
 }

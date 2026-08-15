@@ -97,17 +97,42 @@ public class GravityNodeEvaluator extends WalkNodeEvaluator
         return this.getStartNode(blockPos);
     }
     
+    /**
+     * Returns a GRAVITY-LOCAL floor height: bigger always means gravity-locally
+     * higher, so {@code candidateFloor - originFloor > jumpHeight} reads as
+     * "too high to jump" for every gravity direction. For NEGATIVE axis
+     * directions (DOWN/NORTH/WEST) the local height equals the world
+     * coordinate; for POSITIVE directions (UP/SOUTH/EAST) height DECREASES
+     * with the world coordinate, so the coordinate is negated.
+     */
     @Override
-    protected double getFloorLevel(BlockPos p_164733_) 
+    protected double getFloorLevel(BlockPos p_164733_)
     {
-    	return (this.canFloat() || this.isAmphibious()) && this.level.getFluidState(p_164733_).is(FluidTags.WATER) ? (double)p_164733_.get(this.gravityDirection.getAxis()) + 0.5D : this.getFloorLevelForGravity(this.level, p_164733_);
+    	if((this.canFloat() || this.isAmphibious()) && this.level.getFluidState(p_164733_).is(FluidTags.WATER))
+    	{
+    		// water surface: half a block above the node's gravity-local bottom face
+    		if(this.gravityDirection.getAxisDirection() == Direction.AxisDirection.POSITIVE)
+    		{
+    			return -((double)p_164733_.get(this.gravityDirection.getAxis()) + 0.5D);
+    		}
+    		return (double)p_164733_.get(this.gravityDirection.getAxis()) + 0.5D;
+    	}
+    	return this.getFloorLevelForGravity(this.level, p_164733_);
     }
-    
-    public double getFloorLevelForGravity(BlockGetter p_77612_, BlockPos p_77613_) 
+
+    public double getFloorLevelForGravity(BlockGetter p_77612_, BlockPos p_77613_)
     {
     	BlockPos blockpos = p_77613_.relative(this.gravityDirection);
     	VoxelShape voxelshape = p_77612_.getBlockState(blockpos).getCollisionShape(p_77612_, blockpos);
-        return (double)blockpos.get(this.gravityDirection.getAxis()) + (voxelshape.isEmpty() ? 0.0D : voxelshape.max(this.gravityDirection.getOpposite().getAxis()));
+    	Direction.Axis axis = this.gravityDirection.getAxis();
+    	if(this.gravityDirection.getAxisDirection() == Direction.AxisDirection.POSITIVE)
+    	{
+    		// the supporting surface is the shape's MIN face, and gravity-local
+    		// height decreases with the world coordinate — negate so bigger =
+    		// gravity-locally higher (mirrors isLower/isLowerOrSame)
+    		return -((double)blockpos.get(axis) + (voxelshape.isEmpty() ? 1.0D : voxelshape.min(axis)));
+    	}
+        return (double)blockpos.get(axis) + (voxelshape.isEmpty() ? 0.0D : voxelshape.max(axis));
     }
     
     @Override
@@ -247,6 +272,9 @@ public class GravityNodeEvaluator extends WalkNodeEvaluator
         BlockPos currentPos = new BlockPos(p_164726_, p_164727_, p_164728_);
         BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos(p_164726_, p_164727_, p_164728_);
 
+        // both floors are gravity-local heights (see getFloorLevel), so this
+        // comparison means "candidate floor too high above origin floor" for
+        // every gravity direction
         double d0 = this.getFloorLevel(mutablePos);
         if(d0 - p_164730_ > this.getMobJumpHeight())
         {
@@ -274,12 +302,23 @@ public class GravityNodeEvaluator extends WalkNodeEvaluator
 
                 if (node != null && (node.type == BlockPathTypes.OPEN || node.type == BlockPathTypes.WALKABLE) && this.mob.getBbWidth() < 1.0F)
                 {
+                	// headroom test for the jump-up node: build the mob's raw
+                	// gravity-local box at the origin, rotate it into world
+                	// space, then move it to where the mob's feet would stand
+                	// in the node's cell (see RotationUtil.makeBoxFromDimensions
+                	// for the pattern)
                 	AABB rawAABB = this.getBoundingBoxForPose(this.mob.getPose());
                 	if(this.gravityDirection.getAxisDirection() == Direction.AxisDirection.POSITIVE)
                 	{
-                		rawAABB = rawAABB.move(0.0D, -1.0E-6D, 0.0D);
+                		// lift a hair off the supporting face (gravity-local up)
+                		// so the box cannot register a false collision with the
+                		// block the mob would stand on
+                		rawAABB = rawAABB.move(0.0D, 1.0E-6D, 0.0D);
                 	}
-                    Vec3 targetPosition = Vec3.atBottomCenterOf(node.asBlockPos());
+                    // feet anchor: cell center shifted half a block toward gravity
+                    // (equals Vec3.atBottomCenterOf for DOWN gravity)
+                    Vec3 targetPosition = Vec3.atCenterOf(node.asBlockPos())
+                        .add(Vec3.atLowerCornerOf(this.gravityDirection.getNormal()).scale(0.5D));
                     AABB aabb = RotationUtil.boxPlayerToWorld(rawAABB, this.gravityDirection).move(targetPosition);
                     if(this.hasCollisions(aabb))
                     {
@@ -297,7 +336,10 @@ public class GravityNodeEvaluator extends WalkNodeEvaluator
                 }
                 
                 mutablePos.set(currentPos);
-                while(mutablePos.getY() > this.mob.level.getMinBuildHeight())
+                // the Y-based guard never triggers for horizontal gravity
+                // directions, so cap the iterations like the fall loop below
+                int guard = this.mob.level.getHeight();
+                while(mutablePos.getY() > this.mob.level.getMinBuildHeight() && guard-- > 0)
                 {
                     mutablePos.move(this.gravityDirection);
                     blockpathtypes = this.getCachedBlockType(this.mob, mutablePos.getX(), mutablePos.getY(), mutablePos.getZ());
@@ -353,13 +395,16 @@ public class GravityNodeEvaluator extends WalkNodeEvaluator
         return node;
     }
     
-    protected AABB getBoundingBoxForPose(Pose p_20218_) 
+    /**
+     * The mob's RAW gravity-local bounding box: centered on x/z zero, sitting
+     * on y=0 — ready to be rotated with
+     * {@link RotationUtil#boxPlayerToWorld(AABB, Direction)} and moved to a
+     * world anchor (never built at the mob's absolute position).
+     */
+    protected AABB getBoundingBoxForPose(Pose p_20218_)
     {
     	EntityDimensions entitydimensions = this.mob.getDimensions(p_20218_);
-    	float f = entitydimensions.width / 2.0F;
-        Vec3 vec3 = new Vec3(this.mob.getX() - (double)f, this.mob.getY(), this.mob.getZ() - (double)f);
-        Vec3 vec31 = new Vec3(this.mob.getX() + (double)f, this.mob.getY() + (double)entitydimensions.height, this.mob.getZ() + (double)f);
-        return new AABB(vec3, vec31);
+    	return entitydimensions.makeBoundingBox(0.0D, 0.0D, 0.0D);
     }
     
     @Nullable

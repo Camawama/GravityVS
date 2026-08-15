@@ -89,14 +89,16 @@ public abstract class ClientPacketListenerMixin {
     private Vec3 wrapOperation_onExplosion_add_0(
         Vec3 vec3d, double x, double y, double z, Operation<Vec3> original
     ) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(
-            Minecraft.getInstance().player
-        );
-        if (gravityDirection == Direction.DOWN) {
+        // the knockback is added to deltaMovement, which lives in the VISUAL
+        // frame — converting with the snapped cardinal (or skipping when the
+        // cardinal was DOWN but the frame tilted, e.g. on a tilted ship) put
+        // explosion knockback off by the full tilt angle
+        Player player = Minecraft.getInstance().player;
+        if (GravityChangerAPI.isAimDefault(player)) {
             return original.call(vec3d, x, y, z);
         }
-        
-        Vec3 player = RotationUtil.vecWorldToPlayer(x, y, z, gravityDirection);
-        return original.call(vec3d, player.x, player.y, player.z);
+
+        Vec3 local = RotationUtil.vecWorldToPlayer(x, y, z, GravityChangerAPI.getAimRotation(player));
+        return original.call(vec3d, local.x, local.y, local.z);
     }
 }

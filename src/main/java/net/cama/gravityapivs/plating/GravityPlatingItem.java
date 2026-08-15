@@ -93,5 +93,6 @@ public class GravityPlatingItem extends BlockItem {
         tooltip.add(Component.translatable("gravity_changer.plating.tooltip.0").withStyle(ChatFormatting.GRAY));
         tooltip.add(Component.translatable("gravity_changer.plating.tooltip.1").withStyle(ChatFormatting.GRAY));
         tooltip.add(Component.translatable("gravity_changer.plating.tooltip.2").withStyle(ChatFormatting.GRAY));
+        tooltip.add(Component.translatable("gravity_changer.plating.tooltip.3").withStyle(ChatFormatting.GRAY));
     }
 }

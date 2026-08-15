@@ -61,43 +61,8 @@ public abstract class LocalPlayerEntityMixin extends AbstractClientPlayer {
     private void inject_pushOutOfBlocks(double x, double z, CallbackInfo ci) {
         if (GravityChangerAPI.isGravityDefault(this)) return;
 
-        ci.cancel();
         // the capsule collider keeps the player out of blocks; the vanilla
         // box-based push-out fights it and causes jitter
-        if (true) return;
-        org.joml.Quaternionf gravityRotation = GravityChangerAPI.getGravityRotation(this);
-
-        Vec3 pos = RotationUtil.vecPlayerToWorld(x - this.getX(), 0.0D, z - this.getZ(), gravityRotation).add(this.position());
-        BlockPos blockPos = BlockPos.containing(pos);
-        if (this.suffocatesAt(blockPos)) {
-            double dx = pos.x - (double) blockPos.getX();
-            double dy = pos.y - (double) blockPos.getY();
-            double dz = pos.z - (double) blockPos.getZ();
-            Direction direction = null;
-            double minDistToEdge = Double.MAX_VALUE;
-
-            Direction[] directions = new Direction[]{Direction.WEST, Direction.EAST, Direction.NORTH, Direction.SOUTH};
-            for (Direction playerDirection : directions) {
-                Vec3 worldDirVec = RotationUtil.vecPlayerToWorld(Vec3.atLowerCornerOf(playerDirection.getNormal()), gravityRotation);
-                Direction worldDirection = Direction.getNearest(worldDirVec.x, worldDirVec.y, worldDirVec.z);
-
-                double g = worldDirection.getAxis().choose(dx, dy, dz);
-                double distToEdge = worldDirection.getAxisDirection() == Direction.AxisDirection.POSITIVE ? 1.0D - g : g;
-                if (distToEdge < minDistToEdge && !this.suffocatesAt(blockPos.relative(worldDirection))) {
-                    minDistToEdge = distToEdge;
-                    direction = playerDirection;
-                }
-            }
-            
-            if (direction != null) {
-                Vec3 velocity = this.getDeltaMovement();
-                if (direction.getAxis() == Direction.Axis.X) {
-                    this.setDeltaMovement(0.1D * (double) direction.getStepX(), velocity.y, velocity.z);
-                }
-                else if (direction.getAxis() == Direction.Axis.Z) {
-                    this.setDeltaMovement(velocity.x, velocity.y, 0.1D * (double) direction.getStepZ());
-                }
-            }
-        }
+        ci.cancel();
     }
 }

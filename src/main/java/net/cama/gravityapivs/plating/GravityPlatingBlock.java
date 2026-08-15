@@ -267,13 +267,14 @@ public class GravityPlatingBlock extends BaseEntityBlock {
         BlockState state, Level level, BlockPos pos, Player player,
         InteractionHand hand, BlockHitResult hit
     ) {
-        // only empty hand, amethyst cluster and glow ink sac interact with the
-        // plate; anything else (spawn eggs, blocks, tools...) passes through to
-        // normal item behavior with no message
+        // only empty hand, amethyst cluster, glow ink sac and echo shard
+        // interact with the plate; anything else (spawn eggs, blocks,
+        // tools...) passes through to normal item behavior with no message
         ItemStack handItem = player.getItemInHand(hand);
         if (!handItem.isEmpty()
             && !handItem.is(net.minecraft.world.item.Items.AMETHYST_CLUSTER)
             && !handItem.is(net.minecraft.world.item.Items.GLOW_INK_SAC)
+            && !handItem.is(net.minecraft.world.item.Items.ECHO_SHARD)
         ) {
             return InteractionResult.PASS;
         }

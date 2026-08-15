@@ -7,9 +7,12 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
+import com.llamalad7.mixinextras.sugar.Local;
+
 import net.minecraft.core.Direction;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.monster.Illusioner;
+import net.minecraft.world.phys.Vec3;
 
 @Mixin(Illusioner.class)
 public abstract class IllusionerMixin {
@@ -71,12 +74,16 @@ public abstract class IllusionerMixin {
             target = "Ljava/lang/Math;sqrt(D)D"
         )
     )
-    private double redirect_attack_sqrt_0(double value, LivingEntity target, float pullProgress) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(target);
-        if (gravityDirection == Direction.DOWN) {
+    private double redirect_attack_sqrt_0(double value, LivingEntity target, float pullProgress,
+                                          @Local(ordinal = 0) double dx, @Local(ordinal = 1) double dy, @Local(ordinal = 2) double dz) {
+        // The drop-compensation distance must follow the SHOOTER's gravity, not the target's.
+        Direction shooterGravity = GravityChangerAPI.getGravityDirection((Illusioner) (Object) this);
+        if (shooterGravity == Direction.DOWN) {
             return Math.sqrt(value);
         }
-        
-        return Math.sqrt(Math.sqrt(value));
+
+        // Distance in the plane perpendicular to the shooter's gravity axis.
+        Vec3 local = RotationUtil.vecWorldToPlayer(new Vec3(dx, dy, dz), shooterGravity);
+        return Math.sqrt(local.x * local.x + local.z * local.z);
     }
 }

@@ -257,8 +257,8 @@ public abstract class LivingEntityMixin extends Entity {
         )
     )
     private double redirect_damage_getX_0(Entity attacker) {
-        if (GravityChangerAPI.isGravityDefault(this)) {
-            if (GravityChangerAPI.isGravityDefault(attacker)) {
+        if (GravityChangerAPI.isAimDefault(this)) {
+            if (GravityChangerAPI.isAimDefault(attacker)) {
                 return attacker.getX();
             }
             else {
@@ -266,7 +266,7 @@ public abstract class LivingEntityMixin extends Entity {
             }
         }
 
-        return RotationUtil.vecWorldToPlayer(attacker.getEyePosition(), GravityChangerAPI.getGravityRotation(this)).x;
+        return RotationUtil.vecWorldToPlayer(attacker.getEyePosition(), GravityChangerAPI.getMovementRotation(this)).x;
     }
     
     @Redirect(
@@ -278,8 +278,8 @@ public abstract class LivingEntityMixin extends Entity {
         )
     )
     private double redirect_damage_getZ_0(Entity attacker) {
-        if (GravityChangerAPI.isGravityDefault(this)) {
-            if (GravityChangerAPI.isGravityDefault(attacker)) {
+        if (GravityChangerAPI.isAimDefault(this)) {
+            if (GravityChangerAPI.isAimDefault(attacker)) {
                 return attacker.getZ();
             }
             else {
@@ -287,7 +287,7 @@ public abstract class LivingEntityMixin extends Entity {
             }
         }
 
-        return RotationUtil.vecWorldToPlayer(attacker.getEyePosition(), GravityChangerAPI.getGravityRotation(this)).z;
+        return RotationUtil.vecWorldToPlayer(attacker.getEyePosition(), GravityChangerAPI.getMovementRotation(this)).z;
     }
     
     @Redirect(
@@ -299,11 +299,11 @@ public abstract class LivingEntityMixin extends Entity {
         )
     )
     private double redirect_damage_getX_0(LivingEntity target) {
-        if (GravityChangerAPI.isGravityDefault(target)) {
+        if (GravityChangerAPI.isAimDefault(target)) {
             return target.getX();
         }
 
-        return RotationUtil.vecWorldToPlayer(target.position(), GravityChangerAPI.getGravityRotation(target)).x;
+        return RotationUtil.vecWorldToPlayer(target.position(), GravityChangerAPI.getMovementRotation(target)).x;
     }
     
     @Redirect(
@@ -315,11 +315,11 @@ public abstract class LivingEntityMixin extends Entity {
         )
     )
     private double redirect_damage_getZ_0(LivingEntity target) {
-        if (GravityChangerAPI.isGravityDefault(target)) {
+        if (GravityChangerAPI.isAimDefault(target)) {
             return target.getZ();
         }
 
-        return RotationUtil.vecWorldToPlayer(target.position(), GravityChangerAPI.getGravityRotation(target)).z;
+        return RotationUtil.vecWorldToPlayer(target.position(), GravityChangerAPI.getMovementRotation(target)).z;
     }
     
     @Redirect(
@@ -331,11 +331,11 @@ public abstract class LivingEntityMixin extends Entity {
         )
     )
     private double redirect_knockback_getX_0(LivingEntity target) {
-        if (GravityChangerAPI.isGravityDefault(target)) {
+        if (GravityChangerAPI.isAimDefault(target)) {
             return target.getX();
         }
 
-        return RotationUtil.vecWorldToPlayer(target.position(), GravityChangerAPI.getGravityRotation(target)).x;
+        return RotationUtil.vecWorldToPlayer(target.position(), GravityChangerAPI.getMovementRotation(target)).x;
     }
     
     
@@ -348,11 +348,11 @@ public abstract class LivingEntityMixin extends Entity {
         )
     )
     private double redirect_knockback_getZ_0(LivingEntity target) {
-        if (GravityChangerAPI.isGravityDefault(target)) {
+        if (GravityChangerAPI.isAimDefault(target)) {
             return target.getZ();
         }
 
-        return RotationUtil.vecWorldToPlayer(target.position(), GravityChangerAPI.getGravityRotation(target)).z;
+        return RotationUtil.vecWorldToPlayer(target.position(), GravityChangerAPI.getMovementRotation(target)).z;
     }
     
     @Redirect(
@@ -364,8 +364,8 @@ public abstract class LivingEntityMixin extends Entity {
         )
     )
     private double redirect_knockback_getX_1(LivingEntity attacker, LivingEntity target) {
-        if (GravityChangerAPI.isGravityDefault(target)) {
-            if (GravityChangerAPI.isGravityDefault(attacker)) {
+        if (GravityChangerAPI.isAimDefault(target)) {
+            if (GravityChangerAPI.isAimDefault(attacker)) {
                 return attacker.getX();
             }
             else {
@@ -373,7 +373,7 @@ public abstract class LivingEntityMixin extends Entity {
             }
         }
 
-        return RotationUtil.vecWorldToPlayer(attacker.getEyePosition(), GravityChangerAPI.getGravityRotation(target)).x;
+        return RotationUtil.vecWorldToPlayer(attacker.getEyePosition(), GravityChangerAPI.getMovementRotation(target)).x;
     }
     
     @Redirect(
@@ -385,8 +385,8 @@ public abstract class LivingEntityMixin extends Entity {
         )
     )
     private double redirect_knockback_getZ_1(LivingEntity attacker, LivingEntity target) {
-        if (GravityChangerAPI.isGravityDefault(target)) {
-            if (GravityChangerAPI.isGravityDefault(attacker)) {
+        if (GravityChangerAPI.isAimDefault(target)) {
+            if (GravityChangerAPI.isAimDefault(attacker)) {
                 return attacker.getZ();
             }
             else {
@@ -394,7 +394,7 @@ public abstract class LivingEntityMixin extends Entity {
             }
         }
 
-        return RotationUtil.vecWorldToPlayer(attacker.getEyePosition(), GravityChangerAPI.getGravityRotation(target)).z;
+        return RotationUtil.vecWorldToPlayer(attacker.getEyePosition(), GravityChangerAPI.getMovementRotation(target)).z;
     }
     
     @WrapOperation(

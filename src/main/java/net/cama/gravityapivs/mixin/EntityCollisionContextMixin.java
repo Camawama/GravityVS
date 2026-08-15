@@ -14,7 +14,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.shapes.EntityCollisionContext;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
@@ -61,12 +60,12 @@ public abstract class EntityCollisionContextMixin {
             return;
         }
         
-        AABB shapeBox = RotationUtil.boxWorldToPlayer(
-            shape.bounds().inflate(-9.999999747378752E-6D), gravityDirection
-        );
-        AABB posBox = RotationUtil.boxWorldToPlayer(new AABB(pos), gravityDirection);
-        cir.setReturnValue(
-            this.entityBottom > posBox.minY + shapeBox.maxX
-        );
+        // Vanilla: entityBottom > pos.getY() + shape.max(Axis.Y) - 1.0E-5F.
+        // Transform the ABSOLUTE shape box into the entity's local frame and compare
+        // against its local up extent (entityBottom is local, see the <init> redirect above).
+        double topLocal = RotationUtil.boxWorldToPlayer(
+            shape.bounds().move(pos.getX(), pos.getY(), pos.getZ()), gravityDirection
+        ).maxY;
+        cir.setReturnValue(this.entityBottom > topLocal - 9.999999747378752E-6D);
     }
 }

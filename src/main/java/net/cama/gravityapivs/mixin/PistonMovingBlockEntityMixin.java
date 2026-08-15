@@ -23,11 +23,12 @@ public abstract class PistonMovingBlockEntityMixin {
         )
     )
     private static Vec3 redirect_moveEntity_Vec3d_0(double x, double y, double z, Direction direction, Entity entity, double d, Direction direction2) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        // World push vector -> the pushed entity's local movement frame
+        // (players: visual quaternion, mobs: cardinal).
+        if (GravityChangerAPI.isAimDefault(entity)) {
             return new Vec3(x, y, z);
         }
-        
-        return RotationUtil.vecWorldToPlayer(x, y, z, gravityDirection);
+
+        return RotationUtil.vecWorldToPlayer(x, y, z, GravityChangerAPI.getMovementRotation(entity));
     }
 }

@@ -72,8 +72,12 @@ public class CommonEvents
             GravityCapabilityImpl cap = GravityChangerAPI.getGravityComponentOrNull(serverPlayer);
             if (cap != null && cap.entity != null)
             {
+                // save/restore so the player's next genuine gravity change is
+                // not accidentally broadcast without animation
+                boolean wasNoAnimation = cap.noAnimation;
                 cap.noAnimation = true;
                 GravityNetwork.sendNonLocal(cap.makeSyncPacket(), serverPlayer);
+                cap.noAnimation = wasNoAnimation;
             }
         }
     }
@@ -87,6 +91,7 @@ public class CommonEvents
             Player original = event.getOriginal();
             original.revive();
             GravityChangerAPI.setBaseGravityDirection(player, GravityChangerAPI.getBaseGravityDirection(original));
+            GravityChangerAPI.setBaseGravityStrength(player, GravityChangerAPI.getBaseGravityStrength(original));
         }
     }
 }

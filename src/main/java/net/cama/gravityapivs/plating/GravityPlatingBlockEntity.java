@@ -65,6 +65,11 @@ public class GravityPlatingBlockEntity extends BlockEntity {
         public int level = 1;
         // glow-ink-sac toggle: render the field visualization
         public boolean showParticles = false;
+        // echo-shard toggle — falloff mode: FULL (false, default) applies the
+        // same force everywhere in the field; GRADUAL (true) weakens the
+        // force linearly with distance from the plate. Falloff affects FORCE
+        // only, never orientation (see roadmap "Gradual Field Behavior").
+        public boolean gradualFalloff = false;
 
         public @Nullable AABB effectBoxCache = null;
 
@@ -95,6 +100,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
 
             SideData data = new SideData(isAttracting_, level_);
             data.showParticles = tag.getBoolean("showParticles");
+            data.gradualFalloff = tag.getBoolean("gradualFalloff");
             return data;
         }
 
@@ -103,6 +109,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             tag.putBoolean("isAttracting", isAttracting);
             tag.putInt("level", level);
             tag.putBoolean("showParticles", showParticles);
+            tag.putBoolean("gradualFalloff", gradualFalloff);
             return tag;
         }
 
@@ -201,6 +208,15 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     private @Nullable SideData[] sideData = null;
 
     private @Nullable AABB roughAreaBoxCache = null;
+
+    // entity-query staggering: the AABB entity query is the dominant cost of
+    // the field system (every plate, every tick, both sides); reuse the
+    // result for one extra tick. Per-tick position tests below still use the
+    // entities' CURRENT positions, so a cached entity that left the field
+    // simply fails the contains() checks — only field ENTRY can lag by one
+    // tick, which the capability's grace machinery absorbs anyway.
+    private @Nullable List<Entity> cachedEntities = null;
+    private long entitiesCacheExpiry = Long.MIN_VALUE;
 
     // True once this block entity has AUTHORITATIVE side data: loaded from NBT
     // or a server update packet, or configured server-side on placement. A
@@ -358,13 +374,24 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             be.submitFieldVisuals(world, blockPos, ship);
         }
 
-        List<Entity> entities = world.getEntitiesOfClass(
-                Entity.class,
-                searchBox,
-                EntityTags::canChangeGravity
-        );
+        List<Entity> entities = be.cachedEntities;
+        long gameTime = world.getGameTime();
+        if (entities == null || gameTime >= be.entitiesCacheExpiry) {
+            entities = world.getEntitiesOfClass(
+                    Entity.class,
+                    searchBox,
+                    EntityTags::canChangeGravity
+            );
+            be.cachedEntities = entities;
+            // phase-offset by position hash so half the plates refresh on
+            // even ticks and half on odd ones
+            be.entitiesCacheExpiry = gameTime + (Math.floorMod(gameTime + blockPos.hashCode(), 2L) == 0 ? 2 : 1);
+        }
 
         for (Entity entity : entities) {
+            if (entity.isRemoved()) {
+                continue;
+            }
             // on the client, only the locally controlled entity computes gravity
             // from fields; remote entities follow the server sync
             if (world.isClientSide() && !entity.isControlledByLocalInstance() && !GCUtil.isClientPlayer(entity)) {
@@ -447,8 +474,19 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 // bleed still smooths cube-edge transitions where a primary
                 // field is present
                 boolean secondary = !sideDatum.getPrimaryBox(blockPos, plateDir).contains(testingPos);
+
+                // GRADUAL falloff: the force weakens linearly from full at
+                // the plate face to zero at the field edge. distanceToPlate
+                // includes the 1-block "adjustment" behind the face, so
+                // subtract it to measure from the surface. Orientation is
+                // never scaled — the direction effect stays fully weighted.
+                double strengthScale = 1.0;
+                if (sideDatum.gradualFalloff) {
+                    double surfaceDistance = Math.max(0.0, distanceToPlate - adjustment);
+                    strengthScale = Mth.clamp(1.0 - surfaceDistance / sideDatum.getEffectRange(), 0.0, 1.0);
+                }
                 comp.applyGravityDirectionEffect(
-                        worldEffectDir, PLATING_ROTATION_PARAMS, priority, secondary
+                        worldEffectDir, PLATING_ROTATION_PARAMS, priority, secondary, strengthScale
                 );
                 applies = true;
                 primaryApplies = primaryApplies || !secondary;
@@ -782,9 +820,26 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             entityPosLocal = entity.position();
         }
 
+        // the entity's gravity is a WORLD direction; every comparison below
+        // happens in SHIP-local space on ships, so bring it into that frame
+        // once (the old code dotted a ship-local offset against the world
+        // vector and later double-rotated the gravity component of the kick)
+        Vec3 entityGravityVecLocal = Vec3.atLowerCornerOf(entityGravityDir.getNormal());
+        if (ship != null) {
+            Vector3d g = new Vector3d(entityGravityVecLocal.x, entityGravityVecLocal.y, entityGravityVecLocal.z);
+            ship.getTransform().getWorldToShipMatrix().transformDirection(g);
+            g.normalize();
+            entityGravityVecLocal = new Vec3(g.x, g.y, g.z);
+        }
+
+        // axis comparison must also happen in ship-local space
+        Direction gravityDirShipLocal = Direction.getNearest(
+            entityGravityVecLocal.x, entityGravityVecLocal.y, entityGravityVecLocal.z
+        );
+
         for (Direction plateDir : Direction.values()) {
             if (GravityPlatingBlock.hasDir(blockState, plateDir)) {
-                boolean orthogonal = entityGravityDir.getAxis() != plateDir.getAxis();
+                boolean orthogonal = gravityDirShipLocal.getAxis() != plateDir.getAxis();
                 if (!orthogonal) {
                     continue;
                 }
@@ -794,7 +849,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 Vec3 effectCenter = Vec3.atCenterOf(blockPos).add(plateDirVec.scale(0.5));
 
                 Vec3 offset = effectCenter.subtract(entityPosLocal);
-                if (offset.dot(Vec3.atLowerCornerOf(entityGravityDir.getNormal())) > 0) {
+                if (offset.dot(entityGravityVecLocal) > 0) {
                     continue;
                 }
 
@@ -815,14 +870,13 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 if (distanceToPlate < 0.8) {
                     double strengthSqrt = Math.sqrt(comp.getCurrGravityStrength());
 
-                    Vec3 entityGravityVec = Vec3.atLowerCornerOf(entityGravityDir.getNormal());
-
+                    // compose the kick entirely in SHIP-local space (gravity
+                    // vector was already brought into it above), then rotate
+                    // the combined result to world exactly once
                     Vec3 deltaWorldVelocity =
-                            entityGravityVec.scale(-strengthSqrt * 0.4)
+                            entityGravityVecLocal.scale(-strengthSqrt * 0.4)
                                     .add(plateDirVec.scale(0.08));
 
-                    // deltaWorldVelocity was computed in ship-local space; transform
-                    // back to world space before applying
                     if (ship != null) {
                         Vector3d deltaJoml = new Vector3d(deltaWorldVelocity.x, deltaWorldVelocity.y, deltaWorldVelocity.z);
                         ship.getTransform().getShipToWorldMatrix().transformDirection(deltaJoml);
@@ -858,12 +912,25 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             if (sideDatum.level != 1) {
                 sideDatum.level -= 1;
                 if (!player.isCreative()) {
-                    player.getInventory().add(new ItemStack(Items.AMETHYST_CLUSTER));
+                    gravityapivs$refund(player, new ItemStack(Items.AMETHYST_CLUSTER));
                 }
             }
             else {
                 sideDatum.isAttracting = !sideDatum.isAttracting;
             }
+        }
+        else if (handItem.getItem() == Items.ECHO_SHARD) {
+            // falloff mode selector: FULL <-> GRADUAL (force-only falloff)
+            sideDatum.gradualFalloff = !sideDatum.gradualFalloff;
+            invalidateBoxCaches();
+            sync();
+            player.displayClientMessage(
+                    Component.translatable(sideDatum.gradualFalloff
+                            ? "gravity_changer.falloff.gradual"
+                            : "gravity_changer.falloff.full"),
+                    true
+            );
+            return InteractionResult.SUCCESS;
         }
         else if (handItem.getItem() == Items.AMETHYST_CLUSTER) {
             if (sideDatum.level >= maxLevel()) {
@@ -922,6 +989,14 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 isAttracting ?
                         "gravity_changer.plate.force.attract" : "gravity_changer.plate.force.repulse"
         );
+    }
+
+    /** Give a refund stack to the player; drop it if the inventory is full
+     *  (the old bare {@code Inventory.add} silently destroyed it). */
+    public static void gravityapivs$refund(Player player, ItemStack stack) {
+        if (!player.getInventory().add(stack) && !stack.isEmpty()) {
+            player.drop(stack, false);
+        }
     }
 
     public void sync() {

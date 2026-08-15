@@ -1,7 +1,6 @@
 package net.cama.gravityapivs.api;
 
 import net.cama.gravityapivs.EntityTags;
-import net.cama.gravityapivs.RotationAnimation;
 import org.apache.commons.lang3.Validate;
 import org.jetbrains.annotations.Nullable;
 import org.joml.Quaternionf;
@@ -158,13 +157,6 @@ public abstract class GravityChangerAPI {
     }
 
     @Nullable
-    public static RotationAnimation getRotationAnimation(Entity entity) {
-        GravityCapabilityImpl comp = getGravityComponentOrNull(entity);
-        if (comp == null) {
-            return null;
-        }
-        return comp.getRotationAnimation();
-    }
 
     /**
      * Instantly set gravity direction on client side without performing animation.

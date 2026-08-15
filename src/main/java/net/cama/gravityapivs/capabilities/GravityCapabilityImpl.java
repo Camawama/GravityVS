@@ -4,7 +4,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 import net.cama.gravityapivs.EntityTags;
-import net.cama.gravityapivs.RotationAnimation;
 import net.cama.gravityapivs.api.GravityChangerAPI;
 import net.cama.gravityapivs.api.RotationParameters;
 import net.cama.gravityapivs.config.GravityConfig;
@@ -138,6 +137,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private int recentReleasedTicks = 0;
     private static final int RECENT_RELEASE_MEMORY_TICKS = 15;
 
+    // the ship most recently stood on, kept alive through jumps/probe misses:
+    // the per-tick position delta used by the surface probes must have the
+    // SHIP's own carry subtracted (VS repositions dragged entities every
+    // tick), or standing still on a moving ship reads as fast tangential
+    // movement — firing the edge probes spuriously — and a descending ship
+    // reads as "falling away from the held face", releasing the hold early
+    private @Nullable org.valkyrienskies.core.api.ships.Ship lastGroundShip = null;
+
     // ship-relative idle anchor: standing still on ship plating pins the feet
     // to a fixed SHIPYARD-space point (drift-free on rotating contraptions by
     // construction — the pinned point rotates exactly with the ship)
@@ -162,10 +169,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
     @Nullable RotationParameters currentRotationParameters = RotationParameters.getDefault();
 
-    // Only used on client, not synchronized.
-    @Nullable
-    public RotationAnimation animation;
-
     public Entity entity;
 
     private boolean isFiringUpdateEvent = false;
@@ -186,12 +189,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
     @Override
     public void setEntity(Entity entity) {
         this.entity = entity;
-        if (entity.level().isClientSide()) {
-            animation = new RotationAnimation();
-        }
-        else {
-            animation = null;
-        }
     }
 
     // ------------------------------------------------------------------
@@ -324,6 +321,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         recentReleasedNormal = null;
         recentReleasedTicks = 0;
         shipAnchorPos = null;
+        lastGroundShip = null;
 
         targetGravityVector = DOWN;
         targetGravityStrength = 1.0;
@@ -484,6 +482,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             surfaceChangeCooldown = 0;
             recentReleasedNormal = null;
             recentReleasedTicks = 0;
+            lastGroundShip = null;
             return;
         }
 
@@ -516,6 +515,36 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // tangential (along-surface) component of last tick's actual movement;
         // drives the edge-transition probes below
         Vec3 moved = new Vec3(entity.getX() - entity.xo, entity.getY() - entity.yo, entity.getZ() - entity.zo);
+
+        // Standing on (or recently jumped from) a Valkyrien Skies ship: the
+        // position delta includes the ship CARRYING the player (VS's drag
+        // repositions dragged entities every tick). That part is not player
+        // movement — subtract where the ship itself moved this point since
+        // last tick, so the probes see only ship-relative motion. Without
+        // this, standing idle on a moving deck read as fast tangential
+        // movement (spurious convex-wrap probes, random face adoptions from
+        // deck clutter) and a descending ship read as "falling away from the
+        // held face", releasing the surface hold mid-ride.
+        if (capsuleGrounded) {
+            // null when standing on WORLD ground — landing off-ship must drop
+            // the stale ship or its motion would keep being subtracted while
+            // walking plain plated structures; the reference only needs to
+            // survive the AIRBORNE gap of a jump on a moving ship
+            lastGroundShip = capsuleGroundShip;
+        }
+        org.valkyrienskies.core.api.ships.Ship carryShip =
+            capsuleGroundShip != null ? capsuleGroundShip : lastGroundShip;
+        if (carryShip != null) {
+            org.joml.Vector3d prevPoint = new org.joml.Vector3d(entity.getX(), entity.getY(), entity.getZ());
+            carryShip.getTransform().getWorldToShipMatrix().transformPosition(prevPoint);
+            carryShip.getPrevTickTransform().getShipToWorldMatrix().transformPosition(prevPoint);
+            // the ship moved this world point by (pos - prevPoint) over the tick
+            moved = moved.subtract(
+                entity.getX() - prevPoint.x,
+                entity.getY() - prevPoint.y,
+                entity.getZ() - prevPoint.z
+            );
+        }
         Vec3 tangent = held ? moved.subtract(heldNormal.scale(moved.dot(heldNormal))) : Vec3.ZERO;
         double tangentSpeed = tangent.length();
         Vec3 tangentDir = tangentSpeed > 1.0E-6 ? tangent.scale(1.0 / tangentSpeed) : Vec3.ZERO;
@@ -622,7 +651,10 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // (the feet are above the old plane, so the ray misses), and a genuine
         // cliff edge never passes the field gate (the field there still points
         // along the old face, not around the edge).
-        if (held && tangentSpeed > 0.02) {
+        // gate 0.01, not 0.02: crawling (~0.015/tick) must still wrap around
+        // convex edges — safe now that `moved` has the ship carry subtracted
+        // (the old higher gate was partly guarding against that contamination)
+        if (held && tangentSpeed > 0.01) {
             Vec3 wrap = probeSurfaceNormal(feet.subtract(heldNormal.scale(0.15)), tangentDir.scale(-1), 0.75);
             if (wrap != null
                 && wrap.dot(fieldUp) > 0.35
@@ -845,8 +877,17 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return; // aligned (within ~1 degree): correction is zero
         }
 
-        // 0.08 is the standard living-entity gravity that travel() applies
-        Vec3 correction = targetDown.subtract(frameDown).scale(0.08 * currGravityStrength);
+        // match the gravity travel() actually applies this tick: 0.08
+        // normally, 0.01 while descending with slow falling — the correction
+        // redirects the pull, so its magnitude must equal the real pull or a
+        // slow-falling player in a field gets yanked harder sideways than down
+        double gravityAccel = 0.08;
+        if (living.hasEffect(net.minecraft.world.effect.MobEffects.SLOW_FALLING)
+            && entity.getDeltaMovement().y <= 0.0
+        ) {
+            gravityAccel = 0.01;
+        }
+        Vec3 correction = targetDown.subtract(frameDown).scale(gravityAccel * currGravityStrength);
         entity.setDeltaMovement(entity.getDeltaMovement().add(
             RotationUtil.vecWorldToPlayer(correction, visualRotation)
         ));
@@ -1239,8 +1280,12 @@ public class GravityCapabilityImpl implements IGravityCapability {
                     }
                 }
                 if (livingEntity.hasEffect(GravityMobEffects.INVERT.get())) {
+                    // invert relative to the BASE direction, not the current
+                    // one: inverting whatever is currently applied re-inverts
+                    // the already-inverted result a few ticks later — a
+                    // permanent flip-flop limit cycle
                     this.applyGravityDirectionEffect(
-                        Vec3.atLowerCornerOf(currGravityDirection.getOpposite().getNormal()),
+                        baseGravityDirection.scale(-1),
                         null, 5
                     );
                 }
@@ -1327,6 +1372,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         double BLEND_RANGE = 5.0;
         Vec3 accumulatedGravity = Vec3.ZERO;
         double totalWeight = 0;
+        double accumulatedStrengthScale = 0;
         RotationParameters bestParams = null;
         double bestParamPriority = -Double.MAX_VALUE;
 
@@ -1337,6 +1383,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
                 accumulatedGravity = accumulatedGravity.add(effect.direction.normalize().scale(weight));
                 totalWeight += weight;
+                accumulatedStrengthScale += effect.strengthScale() * weight;
 
                 if (effect.priority > bestParamPriority) {
                     bestParamPriority = effect.priority;
@@ -1358,6 +1405,11 @@ public class GravityCapabilityImpl implements IGravityCapability {
         if (totalWeight > 0.0001) {
             double cancellation = Mth.clamp(magnitude / totalWeight, 0.0, 1.0);
             targetGravityStrength *= cancellation * cancellation;
+
+            // gradual-falloff fields: the weighted-average per-effect force
+            // scale weakens the PULL with distance from the source while the
+            // orientation (the blended direction above) is untouched
+            targetGravityStrength *= Mth.clamp(accumulatedStrengthScale / totalWeight, 0.0, 1.0);
         }
 
         currentRotationParameters = bestParams != null ? bestParams : RotationParameters.getDefault();
@@ -1542,24 +1594,40 @@ public class GravityCapabilityImpl implements IGravityCapability {
         @Nullable RotationParameters rotationParameters,
         double priority
     ) {
-        applyGravityDirectionEffect(direction, rotationParameters, priority, false);
+        applyGravityDirectionEffect(direction, rotationParameters, priority, false, 1.0);
     }
 
-    /**
-     * @param secondary a supporting/blending contribution (e.g. the hidden
-     *                  sideways bleed of a plate field): it participates in
-     *                  blending when a PRIMARY field is also present, but a
-     *                  tick with only secondary effects counts as no field at
-     *                  all — standing on plain ground one block beside a plate
-     *                  must not change gravity.
-     */
     public void applyGravityDirectionEffect(
         @NotNull Vec3 direction,
         @Nullable RotationParameters rotationParameters,
         double priority,
         boolean secondary
     ) {
-        GravityDirEffect effect = new GravityDirEffect(direction, rotationParameters, priority, secondary);
+        applyGravityDirectionEffect(direction, rotationParameters, priority, secondary, 1.0);
+    }
+
+    /**
+     * @param secondary     a supporting/blending contribution (e.g. the hidden
+     *                      sideways bleed of a plate field): it participates in
+     *                      blending when a PRIMARY field is also present, but a
+     *                      tick with only secondary effects counts as no field at
+     *                      all — standing on plain ground one block beside a plate
+     *                      must not change gravity.
+     * @param strengthScale per-effect FORCE multiplier in [0,1] (gradual-falloff
+     *                      fields weaken with distance from the source). Scales
+     *                      only the pull strength — never the orientation: an
+     *                      entity at the far edge of a gradual field is still
+     *                      fully oriented by it, just pulled weakly. Blended
+     *                      with the same weights as the direction.
+     */
+    public void applyGravityDirectionEffect(
+        @NotNull Vec3 direction,
+        @Nullable RotationParameters rotationParameters,
+        double priority,
+        boolean secondary,
+        double strengthScale
+    ) {
+        GravityDirEffect effect = new GravityDirEffect(direction, rotationParameters, priority, secondary, strengthScale);
         if (isFiringUpdateEvent) {
             tempEffects.add(effect);
         }
@@ -1809,6 +1877,17 @@ public class GravityCapabilityImpl implements IGravityCapability {
         return new Quaternionf(prevVisualRotation).slerp(visualRotation, partialTick).normalize();
     }
 
+    /**
+     * Allocation-free variant of {@link #getRenderRotation(float)} for render
+     * hot paths: writes into {@code dest} and returns it. Render thread only.
+     */
+    public Quaternionf getRenderRotation(float partialTick, Quaternionf dest) {
+        if (prevVisualRotation.equals(visualRotation)) {
+            return dest.set(visualRotation);
+        }
+        return dest.set(prevVisualRotation).slerp(visualRotation, partialTick).normalize();
+    }
+
     /** Fast-path check: PHYSICS gravity is exactly vanilla. */
     public boolean isDefault() {
         return currGravityDirection == Direction.DOWN;
@@ -1912,9 +1991,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
         needsSync = true;
     }
 
-    public RotationAnimation getRotationAnimation() {
-        return animation;
-    }
 
     /**
      * Snap the applied state without animation.
@@ -1933,7 +2009,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
         @NotNull Vec3 direction,
         @Nullable RotationParameters rotationParameters,
         double priority,
-        boolean secondary
+        boolean secondary,
+        double strengthScale
     ) {
     }
 }

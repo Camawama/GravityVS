@@ -6,11 +6,15 @@ import net.cama.gravityapivs.util.RotationUtil;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Constant;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyConstant;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
@@ -31,31 +35,47 @@ public abstract class AbstractArrowMixin extends Entity {
         , ordinal = 0
     )
     public Vec3 tick(Vec3 modify) {
-        modify = new Vec3(modify.x, modify.y + 0.05, modify.z);
-        modify = RotationUtil.vecWorldToPlayer(modify, GravityChangerAPI.getGravityDirection(this));
-        modify = new Vec3(modify.x, modify.y - 0.05, modify.z);
-        modify = RotationUtil.vecPlayerToWorld(modify, GravityChangerAPI.getGravityDirection(this));
-        return modify;
-    }
-    
-    
-    /*@WrapOperation(
-        method = "<init>(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/level/Level;)V",
-        at = @At(
-            value = "INVOKE",
-            target = "Lnet/minecraft/world/entity/projectile/AbstractArrow;<init>(Lnet/minecraft/world/entity/EntityType;DDDLnet/minecraft/world/level/Level;)V"
-        )
-    )
-    private static AbstractArrow modifyargs_init_init_0(AbstractArrow instance, EntityType<? extends AbstractArrow> type, double x, double y, double z, Level world, Operation<AbstractArrow> original, @Local LivingEntity owner
-                                                        ) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(owner);
-        if(gravityDirection != Direction.DOWN) {
-            Vec3 pos = owner.getEyePosition().subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.10000000149011612D, 0.0D, gravityDirection));
-            return original.call(instance, type, pos.x, pos.y, pos.z, world);
+        // Vanilla only applies gravity when the arrow has physics and gravity enabled
+        // (returning Loyalty tridents are noPhysics) - skip the compensation otherwise.
+        if (this.isNoGravity() || ((AbstractArrow) (Object) this).isNoPhysics()) {
+            return modify;
         }
 
-        return original.call(instance, type, x, y, z, world);
-    }*/
+        Direction gravityDirection = GravityChangerAPI.getGravityDirection(this);
+        if (gravityDirection == Direction.DOWN) {
+            return modify;
+        }
+
+        // Vanilla later subtracts 0.05 * gravityStrength from world y (the ModifyConstant
+        // below scales the vanilla constant). Pre-cancel that world-down pull and re-apply
+        // the same magnitude along the arrow's local down axis.
+        double g = 0.05000000074505806D * GravityChangerAPI.getGravityStrength(this);
+        modify = new Vec3(modify.x, modify.y + g, modify.z);
+        modify = RotationUtil.vecWorldToPlayer(modify, gravityDirection);
+        modify = new Vec3(modify.x, modify.y - g, modify.z);
+        modify = RotationUtil.vecPlayerToWorld(modify, gravityDirection);
+        return modify;
+    }
+
+
+    // Vanilla's (EntityType, LivingEntity, Level) constructor spawns at
+    // (ownerX, ownerEyeY - 0.1, ownerZ), which assumes world-down gravity.
+    // Recreate the eye-relative offset in the owner's aim frame (same pattern as
+    // CrossbowItemMixin's eye-based spawn correction).
+    @Inject(
+        method = "<init>(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/level/Level;)V",
+        at = @At("TAIL")
+    )
+    private void inject_init_repositionForRotatedOwner(EntityType<? extends AbstractArrow> type, LivingEntity owner, Level level, CallbackInfo ci) {
+        if (GravityChangerAPI.isAimDefault(owner)) {
+            return;
+        }
+
+        Vec3 pos = owner.getEyePosition().subtract(
+            RotationUtil.vecPlayerToWorld(0.0D, 0.10000000149011612D, 0.0D, GravityChangerAPI.getAimRotation(owner))
+        );
+        this.setPos(pos.x, pos.y, pos.z);
+    }
     
     @ModifyConstant(method = "Lnet/minecraft/world/entity/projectile/AbstractArrow;tick()V", constant = @Constant(doubleValue = 0.05000000074505806))
     private double multiplyGravity(double constant) {

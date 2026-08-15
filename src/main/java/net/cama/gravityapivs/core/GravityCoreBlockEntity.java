@@ -47,6 +47,21 @@ public class GravityCoreBlockEntity extends BlockEntity {
     private boolean attracting = true;
     // glow-ink-sac toggle: render the field as radially flowing particles
     private boolean showParticles = false;
+    // echo-shard toggle — falloff mode: FULL (false) pulls equally hard
+    // everywhere in the sphere; GRADUAL (true) weakens the pull linearly with
+    // distance from the core. Force only — orientation is never scaled.
+    private boolean gradualFalloff = false;
+
+    // A client block entity that never received authoritative data (a break
+    // prediction the server rejected rolls the block back with a FRESH BE)
+    // must stay inert: resurrecting with config-default range and
+    // attract=true created an invisible phantom field client-side.
+    // Mirrors GravityPlatingBlockEntity.dataInitialized.
+    private boolean dataInitialized = false;
+
+    // entity-query staggering, same scheme as GravityPlatingBlockEntity
+    private @Nullable List<Entity> cachedEntities = null;
+    private long entitiesCacheExpiry = Long.MIN_VALUE;
 
     public GravityCoreBlockEntity(BlockPos pos, BlockState state) {
         super(GravityBlocks.GRAVITY_CORE_BLOCK_ENTITY.get(), pos, state);
@@ -56,6 +71,7 @@ public class GravityCoreBlockEntity extends BlockEntity {
     @Override
     public void load(CompoundTag tag) {
         super.load(tag);
+        dataInitialized = true;
         if (tag.contains("range")) {
             range = Mth.clamp(tag.getInt("range"), 1, GravityConfig.gravityCoreMaxRange.get());
         }
@@ -63,6 +79,7 @@ public class GravityCoreBlockEntity extends BlockEntity {
             attracting = tag.getBoolean("attracting");
         }
         showParticles = tag.getBoolean("showParticles");
+        gradualFalloff = tag.getBoolean("gradualFalloff");
     }
 
     @Override
@@ -71,6 +88,7 @@ public class GravityCoreBlockEntity extends BlockEntity {
         tag.putInt("range", range);
         tag.putBoolean("attracting", attracting);
         tag.putBoolean("showParticles", showParticles);
+        tag.putBoolean("gradualFalloff", gradualFalloff);
     }
 
     @Nullable
@@ -87,6 +105,11 @@ public class GravityCoreBlockEntity extends BlockEntity {
     }
 
     public static void tick(Level world, BlockPos blockPos, BlockState blockState, GravityCoreBlockEntity be) {
+        // client BEs apply fields/visuals only once server data has arrived
+        if (world.isClientSide() && !be.dataInitialized) {
+            return;
+        }
+
         Ship ownShip = VSGameUtilsKt.getShipManagingPos(world, blockPos);
 
         // core center in world space (ship transform aware)
@@ -120,13 +143,22 @@ public class GravityCoreBlockEntity extends BlockEntity {
     }
 
     private void applyToEntities(Level world, Vec3 center, double range, AABB searchBox) {
-        List<Entity> entities = world.getEntitiesOfClass(
-            Entity.class, searchBox, EntityTags::canChangeGravity
-        );
+        List<Entity> entities = cachedEntities;
+        long gameTime = world.getGameTime();
+        if (entities == null || gameTime >= entitiesCacheExpiry) {
+            entities = world.getEntitiesOfClass(
+                Entity.class, searchBox, EntityTags::canChangeGravity
+            );
+            cachedEntities = entities;
+            entitiesCacheExpiry = gameTime + (Math.floorMod(gameTime + worldPosition.hashCode(), 2L) == 0 ? 2 : 1);
+        }
 
         double rangeSq = range * range;
 
         for (Entity entity : entities) {
+            if (entity.isRemoved()) {
+                continue;
+            }
             if (world.isClientSide() && !entity.isControlledByLocalInstance() && !GCUtil.isClientPlayer(entity)) {
                 continue;
             }
@@ -148,8 +180,16 @@ public class GravityCoreBlockEntity extends BlockEntity {
                 ? toCenter.scale(1.0 / distance)
                 : toCenter.scale(-1.0 / distance);
 
+            // GRADUAL falloff weakens the pull toward zero at the sphere's
+            // edge; orientation (the direction effect itself) is untouched,
+            // so a distant entity is still oriented by the core, just pulled
+            // gently — and only resets once fully outside the field
+            double strengthScale = gradualFalloff
+                ? Mth.clamp(1.0 - distance / range, 0.0, 1.0)
+                : 1.0;
+
             comp.applyGravityDirectionEffect(
-                direction, CORE_ROTATION_PARAMS, CORE_BASE_PRIORITY - distance
+                direction, CORE_ROTATION_PARAMS, CORE_BASE_PRIORITY - distance, false, strengthScale
             );
         }
     }
@@ -174,6 +214,10 @@ public class GravityCoreBlockEntity extends BlockEntity {
 
             double mass = serverShip.getInertiaData().getMass();
             double acceleration = 10.0 * GravityConfig.gravityCoreShipForceMultiplier.get(); // ~1g in m/s^2
+            if (gradualFalloff) {
+                // ships obey the same falloff rule as entities
+                acceleration *= Mth.clamp(1.0 - distance / range, 0.0, 1.0);
+            }
             Vector3d force = toCenter.normalize(new Vector3d()).mul(mass * acceleration);
             if (!attracting) {
                 force.negate();
@@ -191,13 +235,27 @@ public class GravityCoreBlockEntity extends BlockEntity {
                 if (range > 1) {
                     range -= 1;
                     if (!player.isCreative()) {
-                        player.getInventory().add(new ItemStack(Items.AMETHYST_CLUSTER));
+                        net.cama.gravityapivs.plating.GravityPlatingBlockEntity.gravityapivs$refund(
+                            player, new ItemStack(Items.AMETHYST_CLUSTER)
+                        );
                     }
                 }
             }
             else {
                 attracting = !attracting;
             }
+        }
+        else if (handItem.getItem() == Items.ECHO_SHARD) {
+            // falloff mode selector: FULL <-> GRADUAL (force-only falloff)
+            gradualFalloff = !gradualFalloff;
+            sync();
+            player.displayClientMessage(
+                Component.translatable(gradualFalloff
+                    ? "gravity_changer.falloff.gradual"
+                    : "gravity_changer.falloff.full"),
+                true
+            );
+            return InteractionResult.SUCCESS;
         }
         else if (handItem.getItem() == Items.AMETHYST_CLUSTER) {
             if (range >= GravityConfig.gravityCoreMaxRange.get()) {

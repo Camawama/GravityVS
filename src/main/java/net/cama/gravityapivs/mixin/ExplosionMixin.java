@@ -77,12 +77,13 @@ public abstract class ExplosionMixin {
         )
     )
     private Vec3 wrapOperation_collectBlocksAndDamageEntities_getVelocity_0(Entity entity, Operation<Vec3> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        // Use the movement frame (players: visual quaternion, mobs: cardinal) for the
+        // local->world knockback round-trip.
+        if (GravityChangerAPI.isAimDefault(entity)) {
             return original.call(entity);
         }
-        
-        return RotationUtil.vecPlayerToWorld(original.call(entity), gravityDirection);
+
+        return RotationUtil.vecPlayerToWorld(original.call(entity), GravityChangerAPI.getMovementRotation(entity));
     }
     
     @WrapOperation(
@@ -94,12 +95,12 @@ public abstract class ExplosionMixin {
         )
     )
     private void wrapOperation_collectBlocksAndDamageEntities_setVelocity_0(Entity entity, Vec3 vec3d, Operation<Void> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        // World knockback -> local velocity via the movement frame (matches the wrap above).
+        if (GravityChangerAPI.isAimDefault(entity)) {
             original.call(entity, vec3d);
             return;
         }
-        
-        original.call(entity, RotationUtil.vecWorldToPlayer(vec3d, gravityDirection));
+
+        original.call(entity, RotationUtil.vecWorldToPlayer(vec3d, GravityChangerAPI.getMovementRotation(entity)));
     }
 }

@@ -65,6 +65,11 @@ public abstract class PlayerMixin extends LivingEntity {
     }
 
 
+    // Swim-surface probe: vanilla samples the block at feet + 0.9 WORLD-up to
+    // decide whether the surface-swim boost applies. Re-express the 0.9
+    // offset along the player's LOCAL up. (x, y, z) arrives as
+    // (getX(), getY() + 0.9, getZ()), so remove the world-up 0.9 and add the
+    // rotated offset instead.
     @WrapOperation(
         method = "travel",
         at = @At(
@@ -73,10 +78,13 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private BlockPos modify_move_multiply_0(double x, double y, double z, Operation<BlockPos> original) {
+        if (GravityChangerAPI.isAimDefault(this)) {
+            return original.call(x, y, z);
+        }
         Vec3 rotate = RotationUtil.vecPlayerToWorld(
-            new Vec3(0.0D, 1.0D - 0.1D, 0.0D), GravityChangerAPI.getGravityRotation(this)
+            new Vec3(0.0D, 1.0D - 0.1D, 0.0D), GravityChangerAPI.getMovementRotation(this)
         );
-        return original.call((double) x - rotate.x, (double) y - rotate.y + (1.0D - 0.1D), (double) z - rotate.z);
+        return original.call(x + rotate.x, y - (1.0D - 0.1D) + rotate.y, z + rotate.z);
     }
     
     @Redirect(
@@ -90,12 +98,12 @@ public abstract class PlayerMixin extends LivingEntity {
     private ItemEntity redirect_dropItem_new_0(
         Level world, double x, double y, double z, ItemStack stack
     ) {
-        if (GravityChangerAPI.isGravityDefault(this)) {
+        if (GravityChangerAPI.isAimDefault(this)) {
             return new ItemEntity(world, x, y, z, stack);
         }
 
         Vec3 vec3d = this.getEyePosition()
-            .subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.3D, 0.0D, GravityChangerAPI.getGravityRotation(this)));
+            .subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.3D, 0.0D, GravityChangerAPI.getAimRotation(this)));
         
         ItemEntity itemEntity = new ItemEntity(world, vec3d.x, vec3d.y, vec3d.z, stack);
         
@@ -118,12 +126,15 @@ public abstract class PlayerMixin extends LivingEntity {
         )
     )
     private void wrapOperation_dropItem_setVelocity(ItemEntity itemEntity, double x, double y, double z, Operation<Void> original) {
-        if (GravityChangerAPI.isGravityDefault(this)) {
+        if (GravityChangerAPI.isAimDefault(this)) {
             original.call(itemEntity, x, y, z);
             return;
         }
 
-        Vec3 world = RotationUtil.vecPlayerToWorld(x, y, z, GravityChangerAPI.getGravityRotation(this));
+        // the throw direction was built from local yaw/pitch — visual-frame
+        // quantities — so the conversion must use the aim frame, not the
+        // snapped cardinal (tilted-ship drops flew off by the tilt angle)
+        Vec3 world = RotationUtil.vecPlayerToWorld(x, y, z, GravityChangerAPI.getAimRotation(this));
         GravityChangerAPI.setWorldVelocity(itemEntity, world);
     }
     
@@ -134,70 +145,18 @@ public abstract class PlayerMixin extends LivingEntity {
     )
     private void inject_adjustMovementForSneaking(Vec3 movement, MoverType type, CallbackInfoReturnable<Vec3> cir) {
         Entity this_ = (Entity) (Object) this;
-        if (GravityChangerAPI.isGravityDefault(this_)) return;
-        // capsule players: the box-based sneak edge-backoff does not apply
+        // Capsule players (ANY non-default visual frame, including tilted
+        // frames whose cardinal is still DOWN): the box-based sneak
+        // edge-backoff tests the loose world-aligned envelope along world
+        // axes — meaningless against the rotated capsule, and its arbitrary
+        // clamps were felt as movement hitches while sneaking on rotated
+        // surfaces. The capsule handles its own ground support.
+        net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
+            GravityChangerAPI.getGravityComponentOrNull(this_);
+        if (comp == null || comp.isVisuallyDefault()) {
+            return;
+        }
         cir.setReturnValue(movement);
-        if (true) return;
-        org.joml.Quaternionf gravityRotation = GravityChangerAPI.getGravityRotation(this_);
-
-        Vec3 playerMovement = RotationUtil.vecWorldToPlayer(movement, gravityRotation);
-
-        if (!this.abilities.flying && (type == MoverType.SELF || type == MoverType.PLAYER) && this.isStayingOnGroundSurface() && this.isAboveGround()) {
-            double d = playerMovement.x;
-            double e = playerMovement.z;
-            double var7 = 0.05D;
-
-            while (d != 0.0D && this_.level().noCollision(this, this.getBoundingBox().move(RotationUtil.vecPlayerToWorld(d, (double) (-this.maxUpStep()), 0.0D, gravityRotation)))) {
-                if (d < 0.05D && d >= -0.05D) {
-                    d = 0.0D;
-                }
-                else if (d > 0.0D) {
-                    d -= 0.05D;
-                }
-                else {
-                    d += 0.05D;
-                }
-            }
-            
-            while (e != 0.0D && this_.level().noCollision(this, this.getBoundingBox().move(RotationUtil.vecPlayerToWorld(0.0D, (double) (-this.maxUpStep()), e, gravityRotation)))) {
-                if (e < 0.05D && e >= -0.05D) {
-                    e = 0.0D;
-                }
-                else if (e > 0.0D) {
-                    e -= 0.05D;
-                }
-                else {
-                    e += 0.05D;
-                }
-            }
-            
-            while (d != 0.0D && e != 0.0D && this_.level().noCollision(this, this.getBoundingBox().move(RotationUtil.vecPlayerToWorld(d, (double) (-this.maxUpStep()), e, gravityRotation)))) {
-                if (d < 0.05D && d >= -0.05D) {
-                    d = 0.0D;
-                }
-                else if (d > 0.0D) {
-                    d -= 0.05D;
-                }
-                else {
-                    d += 0.05D;
-                }
-                
-                if (e < 0.05D && e >= -0.05D) {
-                    e = 0.0D;
-                }
-                else if (e > 0.0D) {
-                    e -= 0.05D;
-                }
-                else {
-                    e += 0.05D;
-                }
-            }
-            
-            cir.setReturnValue(RotationUtil.vecPlayerToWorld(d, playerMovement.y, e, gravityRotation));
-        }
-        else {
-            cir.setReturnValue(movement);
-        }
     }
     
     @WrapOperation(

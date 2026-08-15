@@ -2,40 +2,26 @@ package net.cama.gravityapivs.mixin.client;
 
 
 import net.cama.gravityapivs.api.GravityChangerAPI;
-import net.cama.gravityapivs.util.RotationUtil;
+import net.cama.gravityapivs.capabilities.GravityCapabilityImpl;
 import org.joml.Quaternionf;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 
 import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.entity.EntityRenderer;
-import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
 
 @Mixin(EntityRenderer.class)
 public abstract class EntityRenderMixin {
-    //@Redirect(
-    //        method = "renderLabelIfPresent",
-    //        at = @At(
-    //                value = "INVOKE",
-    //                target = "Lnet/minecraft/client/render/entity/EntityRenderDispatcher;getRotation()Lnet/minecraft/util/math/Quaternion;",
-    //                ordinal = 0
-    //        )
-    //)
-    //private Quaternionf redirect_renderLabelIfPresent_getRotation_0(EntityRenderDispatcher entityRenderDispatcher, Entity entity, Text text, MatrixStack matrices, VertexConsumerProvider vertexConsumers, int light) {
-    //    Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-    //    if(gravityDirection == Direction.DOWN) {
-    //        return entityRenderDispatcher.getRotation();
-    //    }
-////
-    //    Quaternionf Quaternionf = RotationUtil.getCameraRotationQuaternion(gravityDirection).copy();
-    //    quaternion.conjugate();
-    //    quaternion.hamiltonProduct(entityRenderDispatcher.getRotation().copy());
-    //    return quaternion;
-    //}
-    
-    
+    // The nametag renders inside the pose that EntityRenderDispatcherMixin
+    // rotated by conj(renderRotation) — so to stay camera-facing the
+    // billboard orientation must be renderRotation * cameraOrientation, using
+    // the SAME smooth interpolated frame as the model. The old version used
+    // the snapped cardinal frame (and skipped entirely when the cardinal was
+    // DOWN), which tilted nametags on tilted ships and made them wobble
+    // through every smooth transition.
     @ModifyExpressionValue(
         method = "renderNameTag",
         at = @At(
@@ -45,13 +31,11 @@ public abstract class EntityRenderMixin {
         )
     )
     private Quaternionf modifyExpressionValue_renderLabelIfPresent_getRotation_0(Quaternionf originalRotation, Entity entity) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(entity);
+        if (comp == null || comp.isVisuallyDefault()) {
             return originalRotation;
         }
-        Quaternionf quaternion = new Quaternionf(RotationUtil.getCameraRotationQuaternion(gravityDirection));
-        quaternion.conjugate();
-        quaternion.mul(originalRotation);
-        return quaternion;
+        float partialTick = Minecraft.getInstance().getPartialTick();
+        return new Quaternionf(comp.getRenderRotation(partialTick)).mul(originalRotation);
     }
 }

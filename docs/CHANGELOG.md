@@ -1,6 +1,170 @@
 # GravityVS Changelog
 
-## Unreleased (2.0.0-dev) — 2026-07-18 (eleventh pass)
+## Unreleased (2.0.0-dev) — 2026-08-14 (twelfth pass: full-codebase audit + roadmap features)
+
+A full-spectrum audit of the codebase (three parallel review passes over the
+physics core, the client/render layer, the field blocks/network layer, and
+every small entity mixin) followed by a fix pass for everything found, plus
+the first roadmap feature drop.
+
+### Added (roadmap)
+
+- **Falloff modes for gravity fields (Full / Gradual).** Every plating side
+  and every gravity core now has a falloff selector, toggled by
+  right-clicking with an **echo shard**: *Full Field* (default, unchanged
+  behavior) applies the same force everywhere in the field; *Gradual Field*
+  weakens the force linearly with distance from the source, reaching zero at
+  the field edge. Falloff affects FORCE only — orientation is never scaled,
+  so a player at the edge of a gradual field is still fully oriented by it
+  and only reverts once they actually leave the field (exactly the roadmap's
+  "Gradual Field Behavior"). Internally this is a per-effect strength scale
+  blended with the same priority weights as the direction, so overlapping
+  gradual/full fields compose sensibly; gradual cores also scale the force
+  they apply to Valkyrien Skies ships.
+
+- **Gravity Normalizer block.** Defines what "down" means inside a cubic
+  zone (default half-extent 8, upgradeable with amethyst clusters to a
+  configurable max). The chosen down direction is GRID-local: on a Valkyrien
+  Skies ship the zone and its gravity rotate with the ship, so crews
+  experience natural ship-relative gravity through any maneuver. Empty hand
+  cycles the local down through all six directions; sneak + empty hand
+  shrinks the zone (amethyst refunded); glow ink sac toggles the field
+  visualization. Its field is uniform and sits above plating/core priority
+  inside the zone, so a normalized room stays normalized even where exterior
+  plating fields bleed in.
+
+- **Gravity Block Framework — API foundation.** New
+  `api/GravityBlockHelper` (local↔world grid-direction mapping,
+  gravity-correct placement down and horizontal facing for other mods'
+  placement code) plus `docs/GravityBlockFramework_Design.md` capturing the
+  full sticky-block wrapper architecture (the 24-orientation wrapper BE
+  system) as the next major milestone. The wrapper system itself is design
+  only for now — deliberately not stubbed.
+
+### Fixed — transition smoothness / physics core
+
+- **Ship motion no longer contaminates the surface probes.** The per-tick
+  movement delta that drives the convex-wrap and concave-adoption probes
+  included the ship CARRYING the player (Valkyrien Skies repositions dragged
+  entities every tick). Standing still on a moving deck therefore read as
+  fast tangential movement — firing the edge probes spuriously (random face
+  adoptions from deck clutter) — and a descending ship read as "falling away
+  from the held face", releasing the surface hold mid-ride. The ship's own
+  carry at the player's position (current vs previous-tick ship transform)
+  is now subtracted before any probe logic runs, kept alive through jumps
+  via the last-stood-on ship.
+
+- **Slow (crawl-speed) convex edge traversal wraps correctly** — the wrap
+  probe's speed gate is lowered 0.02 → 0.01 now that the ship-carry noise it
+  partly guarded against is gone.
+
+- **Transition pull matches slow falling.** The transition-pull correction
+  (which redirects gravity toward the target frame during rotation) assumed
+  the full 0.08 gravity; with slow falling active it now uses the real 0.01,
+  so slow-falling players in fields are no longer yanked sideways harder
+  than gravity actually pulls.
+
+- **Water/lava currents push in the right direction.** Vanilla accumulates
+  the fluid flow push in world space and adds it straight onto the local
+  velocity vector; under rotated gravity the push landed on the wrong axes
+  entirely. The push is now re-expressed through the entity's movement frame.
+  Note: Forge's fluid-API patch moves the real push logic out of the
+  vanilla-named method into a per-fluid-type lambda of its
+  `updateFluidHeightAndDoFluidPushing(Predicate)` overload — the wrap targets
+  that lambda (verified against 1.20.1-47.4.16 bytecode) with `require = 0`,
+  so a future Forge build that renumbers lambdas falls back to vanilla
+  behavior instead of crashing at launch.
+
+- **Fire/cobweb/berry-bush/portal contact matches the real capsule.** In
+  capsule mode the stored AABB is a loose world-aligned envelope (up to a
+  block larger than the body when tilted); the inside-block check iterated
+  it, so tilted players burned in fire or stuck in cobwebs they were nowhere
+  near. The check now only visits cells the capsule's spheres actually
+  overlap.
+
+- **Vanilla sneak edge-backoff disabled for ALL capsule players.** It was
+  only disabled for non-DOWN cardinals, so tilted-frame players whose
+  cardinal was still DOWN ran the box-based backoff against the capsule —
+  arbitrary movement clamps felt as hitches while sneaking on rotated
+  surfaces.
+
+- **Gravity-direction potions/effects work again.** The effect lookup map
+  was filled with six unregistered orphan instances; `getEffect()` is keyed
+  by instance, so every lookup missed and the potions silently did nothing.
+  The registered instances now self-register into the map.
+
+- **Invert-gravity effect no longer oscillates.** It inverted the CURRENT
+  direction each tick — after the flip committed it inverted the inverted
+  result, a permanent flip-flop. It now inverts the base direction.
+
+- **Config moved to SERVER type (was COMMON).** Field strength/range and
+  artificial-gravity settings feed gravity computation on both sides (the
+  local player computes its own gravity from fields client-side); COMMON
+  configs are never synced, so any client/server mismatch was a genuine
+  physics desync. SERVER configs sync on login. Note: the config file moves
+  to the per-world serverconfig folder.
+
+### Fixed — client/render layer
+
+- **Surface swimming works under non-default gravity** — the swim-surface
+  probe offset was fully sign-inverted (only correct for DOWN gravity), so
+  the surface-swim boost never fired for rotated players.
+- **Suffocation overlay renders again under rotated gravity** — the overlay
+  scan overwrote every hit with null instead of returning on the first
+  view-blocking block.
+- **Nametags billboard correctly** on tilted ships and through transitions
+  (they now use the same smooth interpolated frame as the model, instead of
+  the snapped cardinal — and no longer skip compensation when the cardinal
+  is DOWN but the frame tilted).
+- **Explosion knockback (client), melee/shield knockback, item drops,
+  elytra model roll, and the fishing line** all converted through the
+  snapped cardinal frame while the quantity they feed lives in the smooth
+  visual frame — each was wrong by the tilt angle on tilted ships and
+  mid-transition. All now use the movement/aim/render frame with the
+  matching gates.
+- **Entity render pose stack is reentrancy-safe** (nested dispatcher renders
+  from other mods could desync the push/pop pairing and corrupt the frame),
+  and the per-entity-per-frame quaternion allocations in the render hot path
+  are gone (new allocation-free `getRenderRotation(partialTick, dest)`).
+- **Dead code removed:** the legacy `RotationAnimation` snap-animation
+  system (unused since the continuous-frame architecture), the empty
+  `RemotePlayerEntityMixin`, and the disabled bodies in the push-out /
+  sneak-backoff handlers.
+
+### Fixed — field blocks / performance
+
+- **Gravity cores ignore stale client rollbacks** — the same
+  `dataInitialized` latch plating already had: a client BE resurrected by a
+  rejected break prediction no longer applies a phantom default field.
+- **Corner auto-jump computes in one frame on ships** — it dotted a
+  ship-local offset against a world-frame gravity vector and double-rotated
+  the gravity component of the kick; everything is now composed ship-local
+  and rotated to world once (also the orthogonality test).
+- **Amethyst refunds can't be destroyed by a full inventory** (plating
+  level-down, core/normalizer range-down) — overflow drops at the player.
+- **Entity queries halved:** plating, cores and normalizers reuse their
+  entity query result for one extra tick (phase-staggered by position), with
+  per-tick position tests unchanged — field ENTRY can lag at most one tick,
+  which the field-grace machinery already absorbs. This was the dominant
+  per-tick cost of large plated builds.
+
+### Fixed — entity/projectile mixins (audit findings)
+
+- See the audit reports: wither skull aim (copy-paste returning X for Y/Z —
+  broken for ALL targets, even vanilla-gravity ones), villager item throws
+  (velocity applied to the villager instead of the item), unregistered
+  BoatMixin/ItemEntityMixin, scaffolding/powder-snow isAbove math, mob melee
+  knockback frame, projectile inherited shooter momentum, arrow gravity
+  strength mismatch, mob ranged-attack arc compensation gated on the wrong
+  entity, XP-orb attraction frame, projectile spawn position for rotated
+  shooters, move-packet clamps + movement-frame conversion (the rising-flag
+  baseline was verified vanilla-correct and left as-is), area-effect-cloud
+  particle drift + per-particle overhead, llama spit gravity direction, pathfinding
+  floor-level/step-clearance math, GravityBlockPos tables contradicting
+  RotationUtil, sync-packet entity lookup cost, `noAnimation` latch after
+  respawn sync, death-clone dropping base gravity strength, field-visual
+  ghosts across world changes, multi-core force races, and the unused
+  broadcast-to-all network path.
 
 ### Fixed
 

@@ -27,9 +27,16 @@ import net.minecraft.world.phys.Vec3;
 
 @Mixin(EntityRenderDispatcher.class)
 public abstract class EntityRenderDispatcherMixin {
-    // whether inject_render_0 pushed a pose, so the pop stays balanced
+    // per-invocation pushed-pose flags: a STACK, not a boolean field — nested
+    // dispatcher.render calls (some modded renderers re-enter) would reset a
+    // single flag and leave the outer pushed pose unpopped, corrupting the
+    // PoseStack for the rest of the frame (render thread only, so no
+    // synchronization needed)
     @org.spongepowered.asm.mixin.Unique
-    private boolean gravityapivs$pushedPose = false;
+    private final java.util.ArrayDeque<Boolean> gravityapivs$pushedPose = new java.util.ArrayDeque<>();
+    // render-thread scratch to avoid per-entity-per-frame allocations
+    @org.spongepowered.asm.mixin.Unique
+    private final Quaternionf gravityapivs$scratchRotation = new Quaternionf();
 
     @Inject(
         method = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;render(Lnet/minecraft/world/entity/Entity;DDDFFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V",
@@ -41,21 +48,20 @@ public abstract class EntityRenderDispatcherMixin {
         )
     )
     private void inject_render_0(Entity entity, double x, double y, double z, float yaw, float tickDelta, PoseStack matrices, MultiBufferSource vertexConsumers, int light, CallbackInfo ci) {
-        gravityapivs$pushedPose = false;
+        boolean pushed = false;
         if (!(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
             net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
                 GravityChangerAPI.getGravityComponentOrNull(entity);
-            if (comp == null || comp.isVisuallyDefault()) {
-                return;
+            if (comp != null && !comp.isVisuallyDefault()) {
+                // the model follows the smooth visual frame
+                matrices.pushPose();
+                pushed = true;
+                matrices.mulPose(comp.getRenderRotation(tickDelta, gravityapivs$scratchRotation).conjugate());
             }
-
-            // the model follows the smooth visual frame
-            matrices.pushPose();
-            gravityapivs$pushedPose = true;
-            matrices.mulPose(new Quaternionf(comp.getRenderRotation(tickDelta)).conjugate());
         }
+        gravityapivs$pushedPose.push(pushed);
     }
-    
+
     @Inject(
         method = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;render(Lnet/minecraft/world/entity/Entity;DDDFFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V",
         at = @At(
@@ -65,8 +71,7 @@ public abstract class EntityRenderDispatcherMixin {
         )
     )
     private void inject_render_1(Entity entity, double x, double y, double z, float yaw, float tickDelta, PoseStack matrices, MultiBufferSource vertexConsumers, int light, CallbackInfo ci) {
-        if (gravityapivs$pushedPose) {
-            gravityapivs$pushedPose = false;
+        if (!gravityapivs$pushedPose.isEmpty() && gravityapivs$pushedPose.pop()) {
             matrices.popPose();
         }
     }
@@ -120,7 +125,9 @@ public abstract class EntityRenderDispatcherMixin {
 
         matrices.pushPose();
         // cancel the conjugated physics rotation applied by inject_render_2
-        matrices.mulPose(new Quaternionf(comp.getCurrentRotation()));
+        // (mulPose only reads the quaternion, so the shared canonical
+        // instance is safe to pass directly)
+        matrices.mulPose(comp.getCurrentRotation());
         original.call(matrices, vertexConsumers, entity, opacity, tickDelta, world, radius);
         matrices.popPose();
     }

@@ -41,10 +41,14 @@ public abstract class ScreenEffectRendererMixin {
             mutable.set(d, e, f);
             BlockState blockState = player.level().getBlockState(mutable);
             if (blockState.getRenderShape() != RenderShape.INVISIBLE && blockState.isViewBlocking(player.level(), mutable)) {
+                // first view-blocking sample wins, exactly like vanilla's early
+                // return — falling through overwrote the hit with null below,
+                // so the suffocation overlay never rendered under rotated gravity
                 cir.setReturnValue(Pair.of(blockState, mutable.immutable()));
+                return;
             }
         }
-        
+
         cir.setReturnValue(null);
     }
 }

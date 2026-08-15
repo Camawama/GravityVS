@@ -1,6 +1,5 @@
 package net.cama.gravityapivs.mixin.client;
 
-import net.cama.gravityapivs.RotationAnimation;
 import net.cama.gravityapivs.api.GravityChangerAPI;
 import net.cama.gravityapivs.capabilities.GravityCapabilityImpl;
 import org.joml.Quaternionf;

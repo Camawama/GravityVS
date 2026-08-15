@@ -10,7 +10,6 @@ import org.spongepowered.asm.mixin.injection.At;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 
-import net.minecraft.core.Direction;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.behavior.RamTarget;
 import net.minecraft.world.phys.Vec3;
@@ -29,13 +28,14 @@ public abstract class RamTargetMixin {
         )
     )
     private void wrapOperation_keepRunning_takeKnockback_0(LivingEntity target, double strength, double x, double z, Operation<Void> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(target);
-        if (gravityDirection == Direction.DOWN) {
+        // Ram knockback direction: world -> the target's local movement frame
+        // (players: visual quaternion, mobs: cardinal).
+        if (GravityChangerAPI.isAimDefault(target)) {
             original.call(target, strength, x, z);
             return;
         }
-        
-        Vec3 direction = RotationUtil.vecWorldToPlayer(this.ramDirection, gravityDirection);
+
+        Vec3 direction = RotationUtil.vecWorldToPlayer(this.ramDirection, GravityChangerAPI.getMovementRotation(target));
         original.call(target, strength, direction.x, direction.z);
     }
 }

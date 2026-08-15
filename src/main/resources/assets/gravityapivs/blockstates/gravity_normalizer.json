@@ -1,0 +1,5 @@
+{
+  "variants": {
+    "": { "model": "gravityapivs:block/gravity_normalizer" }
+  }
+}

@@ -34,6 +34,10 @@ public class GravityConfig
 	public static ForgeConfigSpec.BooleanValue gravityCoreAffectsShips;
 	public static ForgeConfigSpec.DoubleValue gravityCoreShipForceMultiplier;
 
+	// gravity normalizer
+	public static ForgeConfigSpec.IntValue normalizerDefaultRange;
+	public static ForgeConfigSpec.IntValue normalizerMaxRange;
+
     static
     {
     	Pair<GravityConfig, ForgeConfigSpec> pair = new ForgeConfigSpec.Builder().configure(GravityConfig::new);
@@ -78,6 +82,11 @@ public class GravityConfig
         GravityConfig.gravityCoreMaxRange = config.comment("maximum radius (blocks) a gravity core can be upgraded to").defineInRange("gravityCoreMaxRange", 32, 1, 128);
         GravityConfig.gravityCoreAffectsShips = config.comment("whether gravity cores pull/push Valkyrien Skies ships").define("gravityCoreAffectsShips", true);
         GravityConfig.gravityCoreShipForceMultiplier = config.comment("multiplier for the force gravity cores apply to ships (1.0 = 1g)").defineInRange("gravityCoreShipForceMultiplier", 1.0, 0.0, 10.0);
+        config.pop();
+
+        config.push("Gravity Normalizer");
+        GravityConfig.normalizerDefaultRange = config.comment("default half-extent (blocks) of a freshly placed gravity normalizer's zone").defineInRange("normalizerDefaultRange", 8, 1, 128);
+        GravityConfig.normalizerMaxRange = config.comment("maximum half-extent (blocks) a gravity normalizer can be upgraded to").defineInRange("normalizerMaxRange", 32, 1, 128);
         config.pop();
     }
 }

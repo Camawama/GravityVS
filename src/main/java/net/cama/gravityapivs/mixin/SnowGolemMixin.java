@@ -7,9 +7,12 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
+import com.llamalad7.mixinextras.sugar.Local;
+
 import net.minecraft.core.Direction;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.animal.SnowGolem;
+import net.minecraft.world.phys.Vec3;
 
 @Mixin(SnowGolem.class)
 public abstract class SnowGolemMixin {
@@ -71,12 +74,17 @@ public abstract class SnowGolemMixin {
             target = "Ljava/lang/Math;sqrt(D)D"
         )
     )
-    private double redirect_attack_sqrt_0(double value, LivingEntity target, float pullProgress) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(target);
-        if (gravityDirection == Direction.DOWN) {
+    private double redirect_attack_sqrt_0(double value, LivingEntity target, float pullProgress,
+                                          @Local(ordinal = 1) double dx, @Local(ordinal = 2) double dy, @Local(ordinal = 3) double dz) {
+        // SnowGolem locals: d0 = aim eye Y (ordinal 0), d1 = dx, d2 = dy, d3 = dz.
+        // The drop-compensation distance must follow the SHOOTER's gravity, not the target's.
+        Direction shooterGravity = GravityChangerAPI.getGravityDirection((SnowGolem) (Object) this);
+        if (shooterGravity == Direction.DOWN) {
             return Math.sqrt(value);
         }
-        
-        return Math.sqrt(Math.sqrt(value));
+
+        // Distance in the plane perpendicular to the shooter's gravity axis.
+        Vec3 local = RotationUtil.vecWorldToPlayer(new Vec3(dx, dy, dz), shooterGravity);
+        return Math.sqrt(local.x * local.x + local.z * local.z);
     }
 }

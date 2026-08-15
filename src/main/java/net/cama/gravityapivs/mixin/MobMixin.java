@@ -4,6 +4,7 @@ package net.cama.gravityapivs.mixin;
 import net.cama.gravityapivs.api.GravityChangerAPI;
 import net.cama.gravityapivs.api.GravityPathNavigation;
 import net.cama.gravityapivs.util.RotationUtil;
+import org.joml.Quaternionf;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -21,6 +22,7 @@ import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.phys.Vec3;
 
 @Mixin(Mob.class)
 public abstract class MobMixin {
@@ -62,12 +64,19 @@ public abstract class MobMixin {
         )
     )
     private float wrapOperation_tryAttack_getYaw_0(Mob attacker, Operation<Float> original, Entity target) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(target);
-        if (gravityDirection == Direction.DOWN) {
-            return original.call(attacker);
+        Quaternionf targetRotation = GravityChangerAPI.getAimRotation(target);
+        Quaternionf attackerRotation = GravityChangerAPI.getAimRotation(attacker);
+        float localYaw = original.call(attacker);
+        if (targetRotation.equals(attackerRotation)) {
+            return localYaw;
         }
-        
-        return RotationUtil.rotWorldToPlayer(original.call(attacker), attacker.getXRot(), gravityDirection).x;
+
+        // The mob's yaw is in its own LOCAL frame; the knockback direction must be expressed
+        // in the TARGET's frame: local rot -> look vector -> world -> target frame -> rot.
+        Vec3 worldLook = RotationUtil.vecPlayerToWorld(
+            RotationUtil.rotToVec(localYaw, attacker.getXRot()), attackerRotation
+        );
+        return RotationUtil.vecToRot(RotationUtil.vecWorldToPlayer(worldLook, targetRotation)).x;
     }
     
     @Redirect(

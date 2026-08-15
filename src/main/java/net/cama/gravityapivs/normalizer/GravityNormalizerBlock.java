@@ -1,4 +1,4 @@
-package net.cama.gravityapivs.core;
+package net.cama.gravityapivs.normalizer;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -21,15 +21,21 @@ import net.minecraft.world.level.material.MapColor;
 import net.minecraft.world.phys.BlockHitResult;
 
 /**
- * Generates a spherical gravity field around itself: entities (and, on the
- * server, VS ships) inside the field are pulled toward — or pushed away from —
- * the core. Hide one in the middle of a stone sphere and you have a small planet.
+ * Gravity Normalizer — defines what "down" means inside a zone of a Valkyrien
+ * Skies ship (or a static structure). The chosen direction is GRID-local:
+ * as the ship rotates or maneuvers, gravity inside the zone rotates with it,
+ * so crews experience completely natural ship-relative gravity regardless of
+ * the ship's orientation in the world.
+ *
+ * Interactions: empty hand cycles the local "down" direction; sneak + empty
+ * hand shrinks the zone (amethyst refunded); amethyst cluster grows the zone;
+ * glow ink sac toggles the field visualization.
  */
-public class GravityCoreBlock extends BaseEntityBlock {
+public class GravityNormalizerBlock extends BaseEntityBlock {
 
-    public GravityCoreBlock() {
+    public GravityNormalizerBlock() {
         super(BlockBehaviour.Properties.of()
-            .mapColor(MapColor.COLOR_PURPLE)
+            .mapColor(MapColor.COLOR_CYAN)
             .strength(3.0f, 12.0f)
             .sound(SoundType.AMETHYST)
         );
@@ -38,7 +44,7 @@ public class GravityCoreBlock extends BaseEntityBlock {
     @Nullable
     @Override
     public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
-        return new GravityCoreBlockEntity(pos, state);
+        return new GravityNormalizerBlockEntity(pos, state);
     }
 
     @Override
@@ -48,9 +54,9 @@ public class GravityCoreBlock extends BaseEntityBlock {
 
     @Override
     public <T extends BlockEntity> BlockEntityTicker<T> getTicker(Level world, BlockState state, BlockEntityType<T> type) {
-        // ticks on both sides: the server is authoritative for non-player entities
-        // and ships, the client computes the locally controlled player's gravity
-        return createTickerHelper(type, GravityBlocks.GRAVITY_CORE_BLOCK_ENTITY.get(), GravityCoreBlockEntity::tick);
+        // ticks on both sides: the server is authoritative for non-player
+        // entities, the client computes the locally controlled player's gravity
+        return createTickerHelper(type, GravityBlocks.GRAVITY_NORMALIZER_BLOCK_ENTITY.get(), GravityNormalizerBlockEntity::tick);
     }
 
     @Override
@@ -58,14 +64,10 @@ public class GravityCoreBlock extends BaseEntityBlock {
         BlockState state, Level level, BlockPos pos, Player player,
         InteractionHand hand, BlockHitResult hit
     ) {
-        // only empty hand, amethyst cluster, glow ink sac and echo shard
-        // interact with the core; anything else passes through to normal
-        // item behavior, no message
         net.minecraft.world.item.ItemStack handItem = player.getItemInHand(hand);
         if (!handItem.isEmpty()
             && !handItem.is(net.minecraft.world.item.Items.AMETHYST_CLUSTER)
             && !handItem.is(net.minecraft.world.item.Items.GLOW_INK_SAC)
-            && !handItem.is(net.minecraft.world.item.Items.ECHO_SHARD)
         ) {
             return InteractionResult.PASS;
         }
@@ -75,7 +77,7 @@ public class GravityCoreBlock extends BaseEntityBlock {
         }
 
         BlockEntity blockEntity = level.getBlockEntity(pos);
-        if (!(blockEntity instanceof GravityCoreBlockEntity be)) {
+        if (!(blockEntity instanceof GravityNormalizerBlockEntity be)) {
             return InteractionResult.FAIL;
         }
 

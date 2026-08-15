@@ -39,7 +39,12 @@ public class GravityAPI
 
 		GravityNetwork.registerMessages();
 		MinecraftForge.EVENT_BUS.addGenericListener(Entity.class, GravityCapabilities::attachEntityCapability);
-		ctx.registerConfig(Type.COMMON, GravityConfig.CONFIG_SPEC, "gravity-apivs.toml");
+		// SERVER type, not COMMON: these values feed gravity computation that
+		// runs on BOTH sides (the local player computes its own gravity from
+		// fields client-side) — COMMON configs are never synced, so any
+		// client/server mismatch was a genuine physics desync. SERVER configs
+		// are synced to clients on login.
+		ctx.registerConfig(Type.SERVER, GravityConfig.CONFIG_SPEC, "gravity-apivs.toml");
 
 		// keep RotationParameters' defaults in sync with the config
 		bus.addListener((ModConfigEvent.Loading e) -> RotationParameters.updateDefault());

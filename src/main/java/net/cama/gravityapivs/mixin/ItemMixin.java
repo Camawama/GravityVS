@@ -8,7 +8,6 @@ import org.spongepowered.asm.mixin.injection.At;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 
-import net.minecraft.core.Direction;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 
@@ -23,9 +22,9 @@ public class ItemMixin {
         )
     )
     private static float wrapOperation_raycast_getYaw(Player player, Operation<Float> original) {
-        Direction direction = GravityChangerAPI.getGravityDirection(player);
-        if (direction == Direction.DOWN) return original.call(player);
-        return RotationUtil.rotPlayerToWorld(original.call(player), player.getXRot(), direction).x;
+        // Player aim angles live in the visual aim frame, not the snapped cardinal frame.
+        if (GravityChangerAPI.isAimDefault(player)) return original.call(player);
+        return RotationUtil.rotPlayerToWorld(original.call(player), player.getXRot(), GravityChangerAPI.getAimRotation(player)).x;
     }
     
     @WrapOperation(
@@ -37,8 +36,8 @@ public class ItemMixin {
         )
     )
     private static float wrapOperation_raycast_getPitch(Player player, Operation<Float> original) {
-        Direction direction = GravityChangerAPI.getGravityDirection(player);
-        if (direction == Direction.DOWN) return original.call(player);
-        return RotationUtil.rotPlayerToWorld(player.getYRot(), original.call(player), direction).y;
+        // Player aim angles live in the visual aim frame, not the snapped cardinal frame.
+        if (GravityChangerAPI.isAimDefault(player)) return original.call(player);
+        return RotationUtil.rotPlayerToWorld(player.getYRot(), original.call(player), GravityChangerAPI.getAimRotation(player)).y;
     }
 }

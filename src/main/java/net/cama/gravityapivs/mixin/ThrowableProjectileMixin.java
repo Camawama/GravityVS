@@ -6,12 +6,17 @@ import net.cama.gravityapivs.util.RotationUtil;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import com.llamalad7.mixinextras.injector.ModifyReturnValue;
 
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.projectile.ThrowableProjectile;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 
 @Mixin(ThrowableProjectile.class)
@@ -42,21 +47,24 @@ public abstract class ThrowableProjectileMixin {
         return modify;
     }
     
-    /*@WrapOperation(
-        method = "Lnet/minecraft/world/entity/projectile/ThrowableProjectile;<init>(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/level/Level;)V",
-        at = @At(
-            value = "INVOKE",
-            target = "Lnet/minecraft/world/entity/projectile/ThrowableProjectile;<init>(Lnet/minecraft/world/entity/EntityType;DDDLnet/minecraft/world/level/Level;)V",
-            ordinal = 0
-        )
+    // Vanilla's (EntityType, LivingEntity, Level) constructor spawns at
+    // (ownerX, ownerEyeY - 0.1, ownerZ), which assumes world-down gravity.
+    // Recreate the eye-relative offset in the owner's aim frame (same pattern as
+    // CrossbowItemMixin's eye-based spawn correction).
+    @Inject(
+        method = "<init>(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/level/Level;)V",
+        at = @At("TAIL")
     )
-    private static ThrowableProjectile modifyargs_init_init_0(ThrowableProjectile instance, EntityType<? extends ThrowableProjectile> type, double x, double y, double z, Level world, Operation<ThrowableProjectile> original, @Local LivingEntity owner) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(owner);
-        if (gravityDirection == Direction.DOWN) return original.call(instance, type, x, y, z, world);
-        
-        Vec3 pos = owner.getEyePosition().subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.10000000149011612D, 0.0D, gravityDirection));
-        return original.call(instance, type, pos.x, pos.y, pos.z, world);
-    }*/
+    private void inject_init_repositionForRotatedOwner(EntityType<? extends ThrowableProjectile> type, LivingEntity owner, Level level, CallbackInfo ci) {
+        if (GravityChangerAPI.isAimDefault(owner)) {
+            return;
+        }
+
+        Vec3 pos = owner.getEyePosition().subtract(
+            RotationUtil.vecPlayerToWorld(0.0D, 0.10000000149011612D, 0.0D, GravityChangerAPI.getAimRotation(owner))
+        );
+        ((ThrowableProjectile) (Object) this).setPos(pos.x, pos.y, pos.z);
+    }
     
     @ModifyReturnValue(method = "getGravity", at = @At("RETURN"))
     private float multiplyGravity(float original) {

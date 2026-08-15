@@ -9,7 +9,6 @@ import org.spongepowered.asm.mixin.injection.At;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 
-import net.minecraft.core.Direction;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
@@ -26,12 +25,13 @@ public abstract class ShulkerBoxBlockEntityMixin {
         )
     )
     private void wrapOperation_pushEntities_move_0(Entity entity, MoverType movementType, Vec3 vec3d, Operation<Void> original) {
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(entity);
-        if (gravityDirection == Direction.DOWN) {
+        // World push vector -> the pushed entity's local movement frame
+        // (players: visual quaternion, mobs: cardinal).
+        if (GravityChangerAPI.isAimDefault(entity)) {
             original.call(entity, movementType, vec3d);
             return;
         }
-        
-        original.call(entity, movementType, RotationUtil.vecWorldToPlayer(vec3d, gravityDirection));
+
+        original.call(entity, movementType, RotationUtil.vecWorldToPlayer(vec3d, GravityChangerAPI.getMovementRotation(entity)));
     }
 }

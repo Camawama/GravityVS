@@ -59,10 +59,17 @@ public abstract class FishingHookEntityRendererMixin extends EntityRenderer<Fish
     public void inject_render(FishingHook fishingBobberEntity, float yaw, float tickDelta, PoseStack matrixStack, MultiBufferSource vertexConsumerProvider, int light, CallbackInfo ci) {
         Player playerEntity = fishingBobberEntity.getPlayerOwner();
         if (playerEntity == null) return;
-        
-        Direction gravityDirection = GravityChangerAPI.getGravityDirection(playerEntity);
-        if (gravityDirection == Direction.DOWN) return;
-        
+
+        // the player model renders in the smooth interpolated visual frame,
+        // so the rod-tip/line offsets must use the SAME frame — the snapped
+        // cardinal made the line detach from the rod during transitions and
+        // on tilted ships (and the old DOWN gate skipped tilted frames whose
+        // cardinal was still DOWN)
+        net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
+            GravityChangerAPI.getGravityComponentOrNull(playerEntity);
+        if (comp == null || comp.isVisuallyDefault()) return;
+        org.joml.Quaternionf renderRotation = comp.getRenderRotation(tickDelta);
+
         ci.cancel();
         
         matrixStack.pushPose();
@@ -93,7 +100,7 @@ public abstract class FishingHookEntityRendererMixin extends EntityRenderer<Fish
         double scaledArmOffset = (double) armOffset * 0.35D;
         Vec3 lineStart;
         if ((this.entityRenderDispatcher.options == null || this.entityRenderDispatcher.options.getCameraType().isFirstPerson()) && playerEntity == Minecraft.getInstance().player) {
-            Vec3 lineOffset = RotationUtil.vecWorldToPlayer(this.entityRenderDispatcher.camera.getNearPlane().getPointOnPlane((float) armOffset * 0.525F, -0.1F), gravityDirection);
+            Vec3 lineOffset = RotationUtil.vecWorldToPlayer(this.entityRenderDispatcher.camera.getNearPlane().getPointOnPlane((float) armOffset * 0.525F, -0.1F), renderRotation);
             lineOffset = lineOffset.scale(960.0D / this.entityRenderDispatcher.options.fov().get());
             lineOffset = lineOffset.yRot(sinHandSwingProgress * 0.5F);
             lineOffset = lineOffset.xRot(-sinHandSwingProgress * 0.7F);
@@ -101,7 +108,7 @@ public abstract class FishingHookEntityRendererMixin extends EntityRenderer<Fish
                 Mth.lerp(tickDelta, playerEntity.xo, playerEntity.getX()),
                 Mth.lerp(tickDelta, playerEntity.yo, playerEntity.getY()),
                 Mth.lerp(tickDelta, playerEntity.zo, playerEntity.getZ())
-            ).add(RotationUtil.vecPlayerToWorld(lineOffset.add(0.0D, playerEntity.getEyeHeight(), 0.0D), gravityDirection));
+            ).add(RotationUtil.vecPlayerToWorld(lineOffset.add(0.0D, playerEntity.getEyeHeight(), 0.0D), renderRotation));
         }
         else {
             lineStart = new Vec3(
@@ -112,7 +119,7 @@ public abstract class FishingHookEntityRendererMixin extends EntityRenderer<Fish
                 -cosBodyYaw * scaledArmOffset - sinBodyYaw * 0.8D,
                 playerEntity.getEyeHeight() + (playerEntity.isCrouching() ? -0.1875D : 0.0D) - 0.45D,
                 -sinBodyYaw * scaledArmOffset + cosBodyYaw * 0.8D,
-                gravityDirection
+                renderRotation
             ));
         }
         
