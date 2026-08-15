@@ -716,9 +716,16 @@ public class GravityPlatingBlockEntity extends BlockEntity {
     }
 
     /**
-     * Extra grip when standing on a moving/rotating ship: damp the entity's
-     * velocity *relative to the ship surface* tangentially to the plate. Never
-     * zeroes momentum outright and never fights the ship's own motion.
+     * Extra grip when standing on a ship: damp the entity's OWN tangential
+     * velocity. Never zeroes momentum outright (keeps knockback/jumps alive).
+     *
+     * The entity is carried with the ship by Valkyrien Skies' POSITIONAL drag
+     * (registered every tick below), so its own velocity is already its
+     * ship-relative motion. The old version pushed the velocity toward the
+     * ship's SURFACE velocity — correct only for undragged entities; combined
+     * with the drag it carried the mob TWICE (the drag moved it with the ship
+     * and the velocity moved it at ship speed on top), so mobs shot straight
+     * off any moving or rotating plated ship.
      */
     private static void gravityapivs$applyShipFriction(
             @Nullable Ship ship, GravityPlatingBlockEntity be, Direction plateDir, Entity entity
@@ -738,28 +745,21 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             return;
         }
 
-        // velocity of the ship surface at the entity's position
-        Vector3d shipVelocity = new Vector3d(ship.getVelocity());
-        Vector3d omega = new Vector3d(ship.getOmega());
-        Vector3d r = new Vector3d(entity.getX(), entity.getY(), entity.getZ())
-                .sub(ship.getTransform().getPositionInWorld());
-        Vector3d surfaceVel = omega.cross(r, new Vector3d()).add(shipVelocity);
-
         Vec3 worldVel = GravityChangerAPI.getWorldVelocity(entity);
-        Vector3d relVel = new Vector3d(worldVel.x, worldVel.y, worldVel.z).sub(surfaceVel);
+        Vector3d vel = new Vector3d(worldVel.x, worldVel.y, worldVel.z);
 
         // plate normal in world space
         Vector3d normal = new Vector3d(plateDir.getStepX(), plateDir.getStepY(), plateDir.getStepZ());
         ship.getTransform().getShipToWorldMatrix().transformDirection(normal);
         normal.normalize();
 
-        double normalComponent = relVel.dot(normal);
-        Vector3d tangential = new Vector3d(relVel).sub(new Vector3d(normal).mul(normalComponent));
+        double normalComponent = vel.dot(normal);
+        Vector3d tangential = new Vector3d(vel).sub(new Vector3d(normal).mul(normalComponent));
 
-        // damp tangential slip instead of zeroing it (keeps knockback/jumps alive)
+        // damp tangential slip instead of zeroing it
         tangential.mul(0.5);
 
-        Vector3d newVel = new Vector3d(normal).mul(normalComponent).add(tangential).add(surfaceVel);
+        Vector3d newVel = new Vector3d(normal).mul(normalComponent).add(tangential);
         GravityChangerAPI.setWorldVelocity(entity, new Vec3(newVel.x, newVel.y, newVel.z));
     }
 

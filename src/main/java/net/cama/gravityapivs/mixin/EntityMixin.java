@@ -102,6 +102,9 @@ public abstract class EntityMixin {
     @Shadow
     public abstract Vec3 position();
 
+    @Shadow
+    protected abstract BlockPos getBlockPosBelowThatAffectsMyMovement();
+
 
     @Shadow
     public abstract boolean isPassengerOfSameVehicle(Entity entity);
@@ -189,10 +192,18 @@ public abstract class EntityMixin {
         // controlled side only: on the server the replayed client movement has
         // no input state (xxa/zza are always zero there), so the pin would
         // wrongly eat genuine walking movements during the replay
+        // Pin gates (all three matter):
+        // - never during a surface transition: the input frame is half-rotated
+        //   and the "creep" the pin removes is the genuine transition momentum
+        //   — this was the stuck/honey feel at concave corners and cube edges;
+        // - never on slippery ground: vanilla lets you glide on ice, the pin
+        //   killed sliding entirely in capsule mode.
         if (comp.capsuleGrounded && comp.capsuleGroundNormal != null
             && self.level().isClientSide() && self.isControlledByLocalInstance()
             && self instanceof net.minecraft.world.entity.LivingEntity living
             && movement.dot(up) <= 0.01
+            && !comp.isSurfaceTransitioning()
+            && !gravityapivs$onSlipperyGround(self)
         ) {
             Vec3 normal = comp.capsuleGroundNormal;
             Vec3 tangential = movement.subtract(normal.scale(movement.dot(normal)));
@@ -222,10 +233,16 @@ public abstract class EntityMixin {
                 Vec3 inputTangent = inputWorld.subtract(normal.scale(inputWorld.dot(normal)));
                 if (inputTangent.lengthSqr() > 1.0E-6) {
                     Vec3 inputDir = inputTangent.normalize();
-                    Vec3 keep = inputDir.scale(Math.max(tangential.dot(inputDir), 0.0));
-                    Vec3 residue = tangential.subtract(keep);
-                    if (residue.lengthSqr() < 0.15 * 0.15) {
-                        movement = normal.scale(movement.dot(normal)).add(keep);
+                    double along = tangential.dot(inputDir);
+                    // reversing direction keeps its momentum: vanilla
+                    // decelerates through friction — pinning here erased the
+                    // opposing momentum in one tick, an abrupt "catch"
+                    if (along >= 0.0) {
+                        Vec3 keep = inputDir.scale(along);
+                        Vec3 residue = tangential.subtract(keep);
+                        if (residue.lengthSqr() < 0.15 * 0.15) {
+                            movement = normal.scale(movement.dot(normal)).add(keep);
+                        }
                     }
                 }
             }
@@ -463,19 +480,42 @@ public abstract class EntityMixin {
             return vec3d;
         }
 
-        if (!((Entity) (Object) this instanceof Player)) {
-            // legacy non-player path (exact switch math at settled cardinals)
-            return RotationUtil.vecWorldToPlayer(vec3d, comp.getVisualRotation());
-        }
-
+        // ALL entities restore the stashed local vector BIT-EXACTLY (vanilla
+        // decides the collision flags with exact float comparisons). The old
+        // legacy conversion for non-players re-rotated through the frame,
+        // whose noise (and Valkyrien Skies' ship adjustments) registered as
+        // collisions every tick — phantom onGround, per-tick velocity
+        // zeroing: mobs sliding/bouncing on plated ships.
         if (!vec3d.equals(gravityapivs$moveWorldArg)) {
             // vanilla modified the movement between HEAD and here (e.g. cobweb
             // stuck-multiplier); refresh the stash from the modified vector
             gravityapivs$moveWorldArg = vec3d;
-            gravityapivs$moveLocalArg = RotationUtil.vecWorldToPlayer(vec3d, comp.getVisualRotation());
+            gravityapivs$moveLocalArg = gravityapivs$worldToLocal(vec3d, comp);
         }
 
         return gravityapivs$moveLocalArg;
+    }
+
+    // the block the entity stands on (frame-following) is slippery — the
+    // static pins must not fight ice/slime physics
+    @org.spongepowered.asm.mixin.Unique
+    private boolean gravityapivs$onSlipperyGround(Entity self) {
+        BlockPos below = this.getBlockPosBelowThatAffectsMyMovement();
+        return self.level().getBlockState(below).getFriction(self.level(), below, self) > 0.7f;
+    }
+
+    // world->local through the SAME convention the HEAD conversion used:
+    // settled non-players move in the ENTITY convention (differs from the
+    // player convention for UP gravity), everyone else in the visual frame
+    @org.spongepowered.asm.mixin.Unique
+    private Vec3 gravityapivs$worldToLocal(Vec3 world, GravityCapabilityImpl comp) {
+        if (!((Entity) (Object) this instanceof Player)) {
+            Direction settled = comp.getSettledCardinal();
+            if (settled != null) {
+                return RotationUtil.vecWorldToEntity(world, settled);
+            }
+        }
+        return RotationUtil.vecWorldToPlayer(world, comp.getVisualRotation());
     }
 
     // Transform the local variable (result from collide()) to local coordinate.
@@ -507,17 +547,16 @@ public abstract class EntityMixin {
             return vec3d;
         }
 
-        if (!((Entity) (Object) this instanceof Player)) {
-            // legacy non-player path (exact switch math at settled cardinals)
-            return RotationUtil.vecWorldToPlayer(vec3d, comp.getVisualRotation());
-        }
-
+        // the collide result must come back bit-identical on untouched axes
+        // and semantically per-axis on touched ones — for ALL entities (the
+        // legacy full re-conversion for mobs registered Valkyrien Skies' ship
+        // adjustments and round-trip noise as collisions every tick)
         if (vec3d.equals(gravityapivs$moveWorldArg)) {
             return gravityapivs$moveLocalArg;
         }
 
         Vec3 deltaWorld = vec3d.subtract(gravityapivs$moveWorldArg);
-        Vec3 deltaLocal = RotationUtil.vecWorldToPlayer(deltaWorld, comp.getVisualRotation());
+        Vec3 deltaLocal = gravityapivs$worldToLocal(deltaWorld, comp);
         Vec3 local = gravityapivs$moveLocalArg;
         return new Vec3(
             gravityapivs$resolveAxis(local.x, deltaLocal.x),
@@ -541,6 +580,17 @@ public abstract class EntityMixin {
             return intended;
         }
         if (delta * intended >= 0.0) {
+            return intended;
+        }
+        // A GLANCING clamp is not a collision. With the frame tilted a few
+        // degrees off a flat surface (field blends near plate edges, ships,
+        // any mid-transition frame), every walking tick has sin(tilt)*speed
+        // legitimately shaved off an axis by the ground plane — reporting
+        // that as a collision made vanilla zero the axis velocity every
+        // tick: "catching on nothing" on flat ground, getting stuck on
+        // convex edges until backing out, killed ice sliding. A real
+        // obstacle eats a large fraction of the intended motion.
+        if (Math.abs(delta) < 0.1 * Math.abs(intended)) {
             return intended;
         }
         return intended + delta;

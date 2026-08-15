@@ -224,6 +224,27 @@ public abstract class RotationUtil {
     public static Vec3 vecEntityToWorld(Vec3 vec3d, Direction gravityDirection) {
         return vecEntityToWorld(vec3d.x, vec3d.y, vec3d.z, gravityDirection);
     }
+
+    /**
+     * Exact inverse of {@link #vecEntityToWorld(double, double, double, Direction)}.
+     * NOTE: the entity convention differs from the player convention for UP
+     * gravity (x is not negated) — use this, not vecWorldToPlayer, to invert
+     * an entity-convention transform.
+     */
+    public static Vec3 vecWorldToEntity(double x, double y, double z, Direction gravityDirection) {
+        return switch (gravityDirection) {
+            case DOWN -> new Vec3(x, y, z);
+            case UP -> new Vec3(x, -y, z);
+            case NORTH -> new Vec3(x, z, -y);
+            case SOUTH -> new Vec3(-x, -z, -y);
+            case WEST -> new Vec3(-z, x, -y);
+            case EAST -> new Vec3(z, -x, -y);
+        };
+    }
+
+    public static Vec3 vecWorldToEntity(Vec3 vec3d, Direction gravityDirection) {
+        return vecWorldToEntity(vec3d.x, vec3d.y, vec3d.z, gravityDirection);
+    }
     
     public static Vec3 vecPlayerToWorld(double x, double y, double z, Direction gravityDirection) {
         return switch (gravityDirection) {

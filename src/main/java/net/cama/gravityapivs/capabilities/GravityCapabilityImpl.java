@@ -520,13 +520,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
         double tangentSpeed = tangent.length();
         Vec3 tangentDir = tangentSpeed > 1.0E-6 ? tangent.scale(1.0 / tangentSpeed) : Vec3.ZERO;
 
-        // Pressed against an obstacle, the ACTUAL movement is blocked to ~zero
-        // — but the INPUT still says where the player is trying to go. Without
-        // this, walking on a plated floor into a plated wall never fired the
-        // concave adoption below (the wall itself zeroed the movement that was
-        // supposed to drive the probe): the player just bumped into the wall
-        // forever instead of walking up it.
-        if (held && tangentSpeed <= 0.02
+        // The tangential direction of the player's INPUT (vanilla
+        // getInputVector formula) — where they are TRYING to go. The actual
+        // movement is useless exactly where the edge probes matter most:
+        // pressed against a wall it is blocked to ~zero, and approaching a
+        // wall at a slight angle it SLIDES along the face, aiming the tangent
+        // parallel to the wall so the concave probe could never hit it.
+        Vec3 inputTangentDir = null;
+        if (held
             && entity instanceof LivingEntity living
             && (Math.abs(living.xxa) > 0.01 || Math.abs(living.zza) > 0.01)
             && entity.level().isClientSide() && entity.isControlledByLocalInstance()
@@ -543,9 +544,15 @@ public class GravityCapabilityImpl implements IGravityCapability {
             Vec3 inputWorld = RotationUtil.vecPlayerToWorld(inputLocal, visualRotation);
             Vec3 inputTangent = inputWorld.subtract(heldNormal.scale(inputWorld.dot(heldNormal)));
             if (inputTangent.lengthSqr() > 1.0E-6) {
-                tangentDir = inputTangent.normalize();
-                tangentSpeed = 0.1;
+                inputTangentDir = inputTangent.normalize();
             }
+        }
+
+        // standing still with input held (e.g. walking in place against a
+        // convex edge): let the input drive the wrap probe too
+        if (inputTangentDir != null && tangentSpeed <= 0.02) {
+            tangentDir = inputTangentDir;
+            tangentSpeed = 0.1;
         }
 
         Vec3 normal = probeSurfaceNormal(feet.subtract(probeDown.scale(0.2)), probeDown, 0.2 + GROUND_PROBE_DEPTH);
@@ -556,15 +563,31 @@ public class GravityCapabilityImpl implements IGravityCapability {
             // up a plated wall into a plated ceiling): the held normal keeps
             // the frame on the current face forever, so a wall whose field
             // wants to be our new floor must be adopted explicitly — cast a
-            // short ray along the movement; a blocking face that the FIELD
-            // accepts as up (an unplated wall never passes this gate, because
-            // the blend has no component toward it) becomes the new surface.
-            if (held && tangentSpeed > 0.02) {
-                Vec3 wall = probeSurfaceNormal(feet.add(heldNormal.scale(0.2)), tangentDir, 0.5);
+            // short ray along where the player is going; a blocking face that
+            // the FIELD accepts as up (an unplated wall never passes this
+            // gate, because the blend has no component toward it at all)
+            // becomes the new surface.
+            //
+            // INPUT direction is preferred over actual movement whenever the
+            // player is steering: blocked or wall-sliding movement tangents
+            // aim parallel to the wall and never hit it — which left the
+            // player pressed into the corner under old-face gravity, creeping
+            // ("walking through honey") until movement happened to die down
+            // enough for a fallback to fire.
+            if (held) {
+                Vec3 probeDir = inputTangentDir != null ? inputTangentDir
+                    : (tangentSpeed > 0.02 ? tangentDir : null);
+                Vec3 wall = probeDir == null ? null
+                    : probeSurfaceNormal(feet.add(heldNormal.scale(0.2)), probeDir, 0.5);
+                // field gate 0.2, not 0.35: near the BOTTOM of a plated wall a
+                // large plated floor dominates the blend (many more floor
+                // plates inside the blend window), tilting fieldUp mostly
+                // floor-ward — 0.35 rejected legitimate wall adoptions there.
+                // Unplated walls still contribute nothing and never pass.
                 if (wall != null
-                    && wall.dot(fieldUp) > 0.35
+                    && wall.dot(fieldUp) > 0.2
                     && wall.dot(heldNormal) < 0.7
-                    && wall.dot(tangentDir) < -0.5
+                    && wall.dot(probeDir) < -0.5
                 ) {
                     adoptGroundNormal(wall);
                 }
@@ -864,6 +887,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
 
         if (Math.abs(living.xxa) > 0.01 || Math.abs(living.zza) > 0.01) {
+            return;
+        }
+
+        // mid-transition the brake would eat genuine transition momentum
+        if (isSurfaceTransitioning()) {
+            return;
+        }
+
+        // slippery ground (ice, slime): vanilla lets entities glide — the
+        // brake killed all sliding in capsule mode
+        net.minecraft.core.BlockPos below = net.minecraft.core.BlockPos.containing(
+            entity.position().add(RotationUtil.vecPlayerToWorld(0.0, -0.5000001, 0.0, visualRotation))
+        );
+        if (entity.level().getBlockState(below).getFriction(entity.level(), below, entity) > 0.7f) {
             return;
         }
 
@@ -1231,8 +1268,25 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 break;
             }
         }
-        if (!anyPrimary) {
-            tempEffects.clear();
+        if (!anyPrimary && !tempEffects.isEmpty()) {
+            // ...EXCEPT while surface-walking. The quarter-round pocket just
+            // past a cube edge lies outside BOTH faces' primary columns and is
+            // covered only by their bleeds — whose diagonal blend is exactly
+            // what carries the player around the edge. Treating it as "no
+            // field" let the field grace expire mid-transition (slow walking,
+            // pausing on the edge), which reset every surface hold and snapped
+            // gravity back to world-down: "sometimes gravity changes too early
+            // and I fall off the first face before reaching the second". A
+            // held surface / fresh release / committed change means the player
+            // was inside a primary field moments ago — sustain the bleed blend
+            // until the next face's primary takes over. Standing on plain
+            // ground beside a plate has none of these and still gets no field.
+            boolean surfaceWalking = lastGroundNormal != null
+                || recentReleasedTicks > 0
+                || surfaceChangeCooldown > 0;
+            if (!surfaceWalking) {
+                tempEffects.clear();
+            }
         }
 
         boolean hadFieldEffects = !tempEffects.isEmpty();
@@ -1782,6 +1836,17 @@ public class GravityCapabilityImpl implements IGravityCapability {
      */
     public boolean useCapsuleCollision() {
         return entity instanceof Player && !isVisuallyDefault();
+    }
+
+    /**
+     * True while a committed face change is in flight or the frame is still
+     * visibly chasing its target. Anti-creep pins and brakes must stand down
+     * here: their input frame is half-rotated and the "creep" they remove is
+     * the genuine transition momentum.
+     */
+    public boolean isSurfaceTransitioning() {
+        return surfaceChangeCooldown > 0
+            || angleBetween(visualRotation, visualTarget) > (float) Math.toRadians(3);
     }
 
     /** World-space up direction of the entity's visual frame (unit vector). */
