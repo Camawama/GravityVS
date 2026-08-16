@@ -48,9 +48,11 @@ import net.minecraft.world.phys.Vec3;
  */
 public class GravityPlatingBlockEntity extends BlockEntity {
 
-    // rotateVelocity=true, rotateView=true; rotation time only applies to
-    // discrete flips (small drift is handled smoothly by the frame transport)
-    private static final RotationParameters PLATING_ROTATION_PARAMS = new RotationParameters(true, true, 300);
+    // rotateVelocity=false: entering/crossing a field must CONSERVE world
+    // momentum (a projectile thrown into the field keeps flying and curves,
+    // instead of having its velocity rotated in one sharp turn); gravity only
+    // redirects future acceleration. rotation time applies to discrete flips.
+    private static final RotationParameters PLATING_ROTATION_PARAMS = new RotationParameters(false, true, 300);
 
     public GravityPlatingBlockEntity(BlockPos pos, BlockState state) {
         super(GravityBlocks.GRAVITY_PLATING_BLOCK_ENTITY.get(), pos, state);
@@ -70,6 +72,13 @@ public class GravityPlatingBlockEntity extends BlockEntity {
         // force linearly with distance from the plate. Falloff affects FORCE
         // only, never orientation (see roadmap "Gradual Field Behavior").
         public boolean gradualFalloff = false;
+        // gravity acceleration (blocks/tick^2) this plate applies at full
+        // force; 0.08 = vanilla gravity. Applied through the capability's
+        // strength (living entities via the forge:entity_gravity attribute).
+        public double gravityAccel = GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
+        // whether entities under this plate's field may planet-walk-snap to
+        // the surfaces they stand on (GUI toggle)
+        public boolean surfaceSnap = true;
 
         public @Nullable AABB effectBoxCache = null;
 
@@ -101,6 +110,10 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             SideData data = new SideData(isAttracting_, level_);
             data.showParticles = tag.getBoolean("showParticles");
             data.gradualFalloff = tag.getBoolean("gradualFalloff");
+            data.gravityAccel = tag.contains("gravityAccel")
+                ? Mth.clamp(tag.getDouble("gravityAccel"), 0.0, 1.0)
+                : GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
+            data.surfaceSnap = !tag.contains("surfaceSnap") || tag.getBoolean("surfaceSnap");
             return data;
         }
 
@@ -110,6 +123,8 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             tag.putInt("level", level);
             tag.putBoolean("showParticles", showParticles);
             tag.putBoolean("gradualFalloff", gradualFalloff);
+            tag.putDouble("gravityAccel", gravityAccel);
+            tag.putBoolean("surfaceSnap", surfaceSnap);
             return tag;
         }
 
@@ -480,13 +495,14 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 // includes the 1-block "adjustment" behind the face, so
                 // subtract it to measure from the surface. Orientation is
                 // never scaled — the direction effect stays fully weighted.
-                double strengthScale = 1.0;
+                double strengthScale = sideDatum.gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
                 if (sideDatum.gradualFalloff) {
                     double surfaceDistance = Math.max(0.0, distanceToPlate - adjustment);
-                    strengthScale = Mth.clamp(1.0 - surfaceDistance / sideDatum.getEffectRange(), 0.0, 1.0);
+                    strengthScale *= Mth.clamp(1.0 - surfaceDistance / sideDatum.getEffectRange(), 0.0, 1.0);
                 }
                 comp.applyGravityDirectionEffect(
-                        worldEffectDir, PLATING_ROTATION_PARAMS, priority, secondary, strengthScale
+                        worldEffectDir, PLATING_ROTATION_PARAMS, priority, secondary, strengthScale,
+                        sideDatum.surfaceSnap
                 );
                 applies = true;
                 primaryApplies = primaryApplies || !secondary;
@@ -907,19 +923,10 @@ public class GravityPlatingBlockEntity extends BlockEntity {
             return InteractionResult.FAIL;
         }
 
+        // NOTE: the empty-hand interaction opens the settings GUI instead (see
+        // GravityPlatingBlock.use); interact() only handles the item shortcuts
         ItemStack handItem = player.getItemInHand(hand);
-        if (handItem.getItem() == Items.AIR) {
-            if (sideDatum.level != 1) {
-                sideDatum.level -= 1;
-                if (!player.isCreative()) {
-                    gravityapivs$refund(player, new ItemStack(Items.AMETHYST_CLUSTER));
-                }
-            }
-            else {
-                sideDatum.isAttracting = !sideDatum.isAttracting;
-            }
-        }
-        else if (handItem.getItem() == Items.ECHO_SHARD) {
+        if (handItem.getItem() == Items.ECHO_SHARD) {
             // falloff mode selector: FULL <-> GRADUAL (force-only falloff)
             sideDatum.gradualFalloff = !sideDatum.gradualFalloff;
             invalidateBoxCaches();
@@ -1014,6 +1021,107 @@ public class GravityPlatingBlockEntity extends BlockEntity {
         this.sideData[side.ordinal()] = sideData;
         invalidateBoxCaches();
         sync();
+    }
+
+    /** Cap on how many plates one "apply to connected" flood-fill may touch. */
+    private static final int CONNECTED_APPLY_CAP = 256;
+
+    /**
+     * Server-side entry point for the settings GUI (arrives via
+     * {@code network.UpdateGravityBlockSettingsPacket}). Every value is
+     * clamped to its legal range — client input is never trusted.
+     *
+     * With {@code applyToConnected} the same settings are flood-filled over
+     * the in-plane group of adjacent plates with the same facing (the same
+     * adjacency rule as the visual grouping in computeVisualGroup /
+     * isSameVisualGroup), capped at {@link #CONNECTED_APPLY_CAP} plates.
+     */
+    public void applySettingsFromGui(
+        Direction side, int newLevel, boolean isAttracting, boolean gradualFalloff,
+        double gravityAccel, boolean surfaceSnap, boolean showParticles, boolean applyToConnected
+    ) {
+        Level world = getLevel();
+        if (world == null || world.isClientSide()) {
+            return;
+        }
+
+        refreshCache();
+        SideData own = getSideData(side);
+        if (own == null) {
+            return;
+        }
+
+        int clampedLevel = Mth.clamp(newLevel, 1, maxLevel());
+        double clampedAccel = Mth.clamp(gravityAccel, 0.0, 1.0);
+
+        if (!applyToConnected) {
+            writeSideSettings(own, clampedLevel, isAttracting, gradualFalloff, clampedAccel, surfaceSnap, showParticles);
+            invalidateBoxCaches();
+            sync();
+            return;
+        }
+
+        // flood-fill the in-plane group of adjacent plates with the same facing
+        Direction.Axis axis = side.getAxis();
+        java.util.HashSet<BlockPos> visited = new java.util.HashSet<>();
+        java.util.ArrayDeque<BlockPos> queue = new java.util.ArrayDeque<>();
+        List<GravityPlatingBlockEntity> members = new ArrayList<>();
+
+        BlockPos origin = getBlockPos();
+        visited.add(origin);
+        queue.add(origin);
+        members.add(this);
+
+        while (!queue.isEmpty() && members.size() < CONNECTED_APPLY_CAP) {
+            BlockPos cur = queue.poll();
+            for (Direction tangent : Direction.values()) {
+                if (tangent.getAxis() == axis) {
+                    continue;
+                }
+                BlockPos next = cur.relative(tangent);
+                if (!visited.add(next.immutable())) {
+                    continue;
+                }
+                BlockState state = world.getBlockState(next);
+                if (!(state.getBlock() instanceof GravityPlatingBlock)
+                    || !GravityPlatingBlock.hasDir(state, side)
+                ) {
+                    continue;
+                }
+                if (!(world.getBlockEntity(next) instanceof GravityPlatingBlockEntity nbe)
+                    || nbe.getSideData(side) == null
+                ) {
+                    continue;
+                }
+                members.add(nbe);
+                if (members.size() >= CONNECTED_APPLY_CAP) {
+                    break;
+                }
+                queue.add(next.immutable());
+            }
+        }
+
+        for (GravityPlatingBlockEntity member : members) {
+            SideData memberSide = member.getSideData(side);
+            if (memberSide == null) {
+                continue;
+            }
+            writeSideSettings(memberSide, clampedLevel, isAttracting, gradualFalloff, clampedAccel, surfaceSnap, showParticles);
+            member.invalidateBoxCaches();
+            member.sync();
+        }
+    }
+
+    private static void writeSideSettings(
+        SideData side, int level, boolean isAttracting, boolean gradualFalloff,
+        double gravityAccel, boolean surfaceSnap, boolean showParticles
+    ) {
+        side.level = level;
+        side.isAttracting = isAttracting;
+        side.gradualFalloff = gradualFalloff;
+        side.gravityAccel = gravityAccel;
+        side.surfaceSnap = surfaceSnap;
+        side.showParticles = showParticles;
     }
 
     public List<ItemStack> getDrops() {

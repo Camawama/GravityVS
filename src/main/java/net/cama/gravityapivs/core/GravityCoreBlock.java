@@ -58,12 +58,23 @@ public class GravityCoreBlock extends BaseEntityBlock {
         BlockState state, Level level, BlockPos pos, Player player,
         InteractionHand hand, BlockHitResult hit
     ) {
-        // only empty hand, amethyst cluster, glow ink sac and echo shard
-        // interact with the core; anything else passes through to normal
-        // item behavior, no message
         net.minecraft.world.item.ItemStack handItem = player.getItemInHand(hand);
-        if (!handItem.isEmpty()
-            && !handItem.is(net.minecraft.world.item.Items.AMETHYST_CLUSTER)
+
+        // empty hand opens the settings GUI (client side only); the settings
+        // change travels back via UpdateGravityBlockSettingsPacket. The
+        // opener class is client-only and is never touched on the server —
+        // level.isClientSide() is always false on a dedicated server.
+        if (handItem.isEmpty()) {
+            if (level.isClientSide() && net.minecraftforge.fml.loading.FMLEnvironment.dist.isClient()) {
+                net.cama.gravityapivs.client.gui.GravityBlockSettingsScreenOpener.openCore(pos);
+            }
+            return InteractionResult.SUCCESS;
+        }
+
+        // only amethyst cluster, glow ink sac and echo shard interact with
+        // the core; anything else passes through to normal item behavior,
+        // no message
+        if (!handItem.is(net.minecraft.world.item.Items.AMETHYST_CLUSTER)
             && !handItem.is(net.minecraft.world.item.Items.GLOW_INK_SAC)
             && !handItem.is(net.minecraft.world.item.Items.ECHO_SHARD)
         ) {

@@ -29,6 +29,8 @@ public class GravityItems
     public static final RegistryObject<Item> GRAVITY_CORE = ITEMS.register("gravity_core", () -> new net.minecraft.world.item.BlockItem(GravityBlocks.GRAVITY_CORE.get(), new Properties()));
 
     public static final RegistryObject<Item> GRAVITY_NORMALIZER = ITEMS.register("gravity_normalizer", () -> new net.minecraft.world.item.BlockItem(GravityBlocks.GRAVITY_NORMALIZER.get(), new Properties()));
+
+    public static final RegistryObject<Item> STICKY_CHEST = ITEMS.register("sticky_chest", () -> new net.minecraft.world.item.BlockItem(GravityBlocks.STICKY_CHEST.get(), new Properties()));
 	
     public static final RegistryObject<Item> GRAVITY_CHANGER_DOWN_AOE = ITEMS.register("gravity_changer_down_aoe", () -> new GravityChangerItemAOE(new Properties().stacksTo(1), Direction.DOWN));
     public static final RegistryObject<Item> GRAVITY_CHANGER_UP_AOE = ITEMS.register("gravity_changer_up_aoe", () -> new GravityChangerItemAOE(new Properties().stacksTo(1), Direction.UP));

@@ -58,6 +58,7 @@ public class GravityCreativeTabs
 
                 output.accept(new ItemStack(GravityItems.GRAVITY_CORE.get()));
                 output.accept(new ItemStack(GravityItems.GRAVITY_NORMALIZER.get()));
+                output.accept(new ItemStack(GravityItems.STICKY_CHEST.get()));
 
 
                 output.accept(new ItemStack(GravityItems.GRAVITY_ANCHOR_UP.get()));

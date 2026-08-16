@@ -1,9 +1,16 @@
 # Gravity Block Framework — Design
 
-Status: **design + API foundation** (August 2026). The placement-orientation
-API (`api/GravityBlockHelper`) ships now; the sticky-block wrapper system
-described below is the next major work item and is deliberately NOT stubbed
-out in code — a half-implemented block wrapper is worse than none.
+Status: **design + API foundation + first working example** (August 2026).
+The placement-orientation API (`api/GravityBlockHelper`) ships, and the
+STICKY CHEST (`net.cama.gravityapivs.sticky`) is the first full reference
+implementation: `Rotation24` (the 24-orientation utility described below,
+now real code), a chest block placeable in any grid orientation that
+orients to the placer's gravity, with vanilla model/lid animation rendered
+through the orientation quaternion and a full 27-slot container. The
+GENERIC wrapper system for arbitrary vanilla blocks remains the next major
+milestone; the sticky chest demonstrates every technique it needs
+(orientation state, rotated shapes, rotated BE rendering, interaction
+forwarding).
 
 ## Goal (from the roadmap)
 

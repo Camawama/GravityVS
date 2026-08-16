@@ -39,7 +39,9 @@ import net.minecraft.world.phys.Vec3;
 
 public class GravityCoreBlockEntity extends BlockEntity {
 
-    private static final RotationParameters CORE_ROTATION_PARAMS = new RotationParameters(true, true, 300);
+    // rotateVelocity=false: world momentum is conserved on field entry (see
+    // GravityPlatingBlockEntity.PLATING_ROTATION_PARAMS)
+    private static final RotationParameters CORE_ROTATION_PARAMS = new RotationParameters(false, true, 300);
     // cores sit slightly below plating priority so plates win when both apply
     private static final double CORE_BASE_PRIORITY = 990;
 
@@ -51,6 +53,10 @@ public class GravityCoreBlockEntity extends BlockEntity {
     // everywhere in the sphere; GRADUAL (true) weakens the pull linearly with
     // distance from the core. Force only — orientation is never scaled.
     private boolean gradualFalloff = false;
+    // gravity acceleration (blocks/tick^2) at full force; 0.08 = vanilla
+    private double gravityAccel = GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
+    // whether entities in this field may planet-walk-snap onto surfaces
+    private boolean surfaceSnap = true;
 
     // A client block entity that never received authoritative data (a break
     // prediction the server rejected rolls the block back with a FRESH BE)
@@ -80,6 +86,10 @@ public class GravityCoreBlockEntity extends BlockEntity {
         }
         showParticles = tag.getBoolean("showParticles");
         gradualFalloff = tag.getBoolean("gradualFalloff");
+        gravityAccel = tag.contains("gravityAccel")
+            ? Mth.clamp(tag.getDouble("gravityAccel"), 0.0, 1.0)
+            : GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
+        surfaceSnap = !tag.contains("surfaceSnap") || tag.getBoolean("surfaceSnap");
     }
 
     @Override
@@ -89,6 +99,8 @@ public class GravityCoreBlockEntity extends BlockEntity {
         tag.putBoolean("attracting", attracting);
         tag.putBoolean("showParticles", showParticles);
         tag.putBoolean("gradualFalloff", gradualFalloff);
+        tag.putDouble("gravityAccel", gravityAccel);
+        tag.putBoolean("surfaceSnap", surfaceSnap);
     }
 
     @Nullable
@@ -184,12 +196,14 @@ public class GravityCoreBlockEntity extends BlockEntity {
             // edge; orientation (the direction effect itself) is untouched,
             // so a distant entity is still oriented by the core, just pulled
             // gently — and only resets once fully outside the field
-            double strengthScale = gradualFalloff
-                ? Mth.clamp(1.0 - distance / range, 0.0, 1.0)
-                : 1.0;
+            double strengthScale = gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
+            if (gradualFalloff) {
+                strengthScale *= Mth.clamp(1.0 - distance / range, 0.0, 1.0);
+            }
 
             comp.applyGravityDirectionEffect(
-                direction, CORE_ROTATION_PARAMS, CORE_BASE_PRIORITY - distance, false, strengthScale
+                direction, CORE_ROTATION_PARAMS, CORE_BASE_PRIORITY - distance, false, strengthScale,
+                surfaceSnap
             );
         }
     }
@@ -228,24 +242,11 @@ public class GravityCoreBlockEntity extends BlockEntity {
     }
 
     public InteractionResult interact(Player player, InteractionHand hand) {
+        // NOTE: the empty-hand interaction opens the settings GUI instead (see
+        // GravityCoreBlock.use); interact() only handles the item shortcuts
         ItemStack handItem = player.getItemInHand(hand);
 
-        if (handItem.getItem() == Items.AIR) {
-            if (player.isShiftKeyDown()) {
-                if (range > 1) {
-                    range -= 1;
-                    if (!player.isCreative()) {
-                        net.cama.gravityapivs.plating.GravityPlatingBlockEntity.gravityapivs$refund(
-                            player, new ItemStack(Items.AMETHYST_CLUSTER)
-                        );
-                    }
-                }
-            }
-            else {
-                attracting = !attracting;
-            }
-        }
-        else if (handItem.getItem() == Items.ECHO_SHARD) {
+        if (handItem.getItem() == Items.ECHO_SHARD) {
             // falloff mode selector: FULL <-> GRADUAL (force-only falloff)
             gradualFalloff = !gradualFalloff;
             sync();
@@ -311,5 +312,53 @@ public class GravityCoreBlockEntity extends BlockEntity {
         }
         setChanged();
         ((ServerChunkCache) world.getChunkSource()).blockChanged(this.getBlockPos());
+    }
+
+    // read access for the client settings screen (the client BE carries
+    // authoritative data via the update tag)
+    public int getRange() {
+        return range;
+    }
+
+    public boolean isAttracting() {
+        return attracting;
+    }
+
+    public boolean isGradualFalloff() {
+        return gradualFalloff;
+    }
+
+    public double getGravityAccel() {
+        return gravityAccel;
+    }
+
+    public boolean isSurfaceSnap() {
+        return surfaceSnap;
+    }
+
+    public boolean isShowParticles() {
+        return showParticles;
+    }
+
+    /**
+     * Server-side entry point for the settings GUI (arrives via
+     * {@code network.UpdateGravityBlockSettingsPacket}). Every value is
+     * clamped to its legal range — client input is never trusted.
+     */
+    public void applySettingsFromGui(
+        int newRange, boolean attracting, boolean gradualFalloff,
+        double gravityAccel, boolean surfaceSnap, boolean showParticles
+    ) {
+        Level world = getLevel();
+        if (world == null || world.isClientSide()) {
+            return;
+        }
+        this.range = Mth.clamp(newRange, 1, GravityConfig.gravityCoreMaxRange.get());
+        this.attracting = attracting;
+        this.gradualFalloff = gradualFalloff;
+        this.gravityAccel = Mth.clamp(gravityAccel, 0.0, 1.0);
+        this.surfaceSnap = surfaceSnap;
+        this.showParticles = showParticles;
+        sync();
     }
 }

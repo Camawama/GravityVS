@@ -49,7 +49,8 @@ public abstract class EntityRenderDispatcherMixin {
     )
     private void inject_render_0(Entity entity, double x, double y, double z, float yaw, float tickDelta, PoseStack matrices, MultiBufferSource vertexConsumers, int light, CallbackInfo ci) {
         boolean pushed = false;
-        if (!(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
+        if (!net.cama.gravityapivs.client.GuiRenderState.renderingGuiEntity
+            && !(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
             net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
                 GravityChangerAPI.getGravityComponentOrNull(entity);
             if (comp != null && !comp.isVisuallyDefault()) {
@@ -86,7 +87,8 @@ public abstract class EntityRenderDispatcherMixin {
         )
     )
     private void inject_render_2(Entity entity, double x, double y, double z, float yaw, float tickDelta, PoseStack matrices, MultiBufferSource vertexConsumers, int light, CallbackInfo ci) {
-        if (!(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
+        if (!net.cama.gravityapivs.client.GuiRenderState.renderingGuiEntity
+            && !(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
             net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp =
                 GravityChangerAPI.getGravityComponentOrNull(entity);
             if (comp == null || comp.isDefault()) return;

@@ -65,8 +65,19 @@ public class GravityNormalizerBlock extends BaseEntityBlock {
         InteractionHand hand, BlockHitResult hit
     ) {
         net.minecraft.world.item.ItemStack handItem = player.getItemInHand(hand);
-        if (!handItem.isEmpty()
-            && !handItem.is(net.minecraft.world.item.Items.AMETHYST_CLUSTER)
+
+        // empty hand opens the settings GUI (client side only); the settings
+        // change travels back via UpdateGravityBlockSettingsPacket. The
+        // opener class is client-only and is never touched on the server —
+        // level.isClientSide() is always false on a dedicated server.
+        if (handItem.isEmpty()) {
+            if (level.isClientSide() && net.minecraftforge.fml.loading.FMLEnvironment.dist.isClient()) {
+                net.cama.gravityapivs.client.gui.GravityBlockSettingsScreenOpener.openNormalizer(pos);
+            }
+            return InteractionResult.SUCCESS;
+        }
+
+        if (!handItem.is(net.minecraft.world.item.Items.AMETHYST_CLUSTER)
             && !handItem.is(net.minecraft.world.item.Items.GLOW_INK_SAC)
         ) {
             return InteractionResult.PASS;

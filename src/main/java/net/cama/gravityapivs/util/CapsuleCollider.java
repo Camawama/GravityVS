@@ -165,6 +165,49 @@ public final class CapsuleCollider {
         return new Result(collided, state.grounded, state.groundShip, state.groundNormal);
     }
 
+    /**
+     * Whether a capsule with the given dimensions, feet at {@code feetPos}
+     * and aligned to {@code up}, fits without penetrating world or ship
+     * geometry. This is the capsule-mode replacement for vanilla's box-based
+     * pose-fit checks ({@code canEnterPose},
+     * {@code canPlayerFitWithinBlocksAndEntitiesWhen}): those test either
+     * the raw unrotated vanilla box or the loose world-aligned envelope,
+     * both of which falsely collide the moment the frame tilts — felt as
+     * crouching being forcibly cancelled near block edges under gravity
+     * fields.
+     */
+    public static boolean fits(Entity entity, Vec3 feetPos, Vec3 up, double width, double height) {
+        double radius = Math.max(0.1, width / 2.0 - 0.02);
+        double effectiveHeight = Math.max(height, radius * 2.0 + 0.02);
+        double[] offsets = sphereOffsets(effectiveHeight, radius);
+        List<Obstacle> obstacles = gatherObstacles(entity.level(), feetPos, Vec3.ZERO, up, radius, effectiveHeight);
+
+        // small tolerance mirrors vanilla's deflate — resting contact
+        // (separated by the collision SKIN) must not count as penetration
+        double r = radius - 1.0E-3;
+        double r2 = r * r;
+
+        for (double offset : offsets) {
+            Vec3 center = feetPos.add(up.scale(offset));
+            for (Obstacle obstacle : obstacles) {
+                Vec3 c = center;
+                if (obstacle.ship() != null) {
+                    Vector3d local = new Vector3d(center.x, center.y, center.z);
+                    obstacle.ship().getTransform().getWorldToShipMatrix().transformPosition(local);
+                    c = new Vec3(local.x, local.y, local.z);
+                }
+                AABB box = obstacle.box();
+                double dx = c.x - Mth.clamp(c.x, box.minX, box.maxX);
+                double dy = c.y - Mth.clamp(c.y, box.minY, box.maxY);
+                double dz = c.z - Mth.clamp(c.z, box.minZ, box.maxZ);
+                if (dx * dx + dy * dy + dz * dz < r2) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     /** Radius of the capsule's spheres for this entity. */
     public static double capsuleRadius(Entity entity) {
         return Math.max(0.1, entity.getBbWidth() / 2.0 - 0.02);

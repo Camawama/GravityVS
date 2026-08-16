@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import com.mojang.authlib.GameProfile;
 
@@ -65,4 +66,7 @@ public abstract class LocalPlayerEntityMixin extends AbstractClientPlayer {
         // box-based push-out fights it and causes jitter
         ci.cancel();
     }
+
+    // (the crouch/pose fit fix lives in EntityMixin.gravityapivs$capsuleCanEnterPose —
+    // 1.20.1's LocalPlayer crouch logic goes through Entity.canEnterPose)
 }

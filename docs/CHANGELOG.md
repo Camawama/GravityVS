@@ -1,5 +1,95 @@
 # GravityVS Changelog
 
+## Unreleased (2.0.0-dev) — 2026-08-15 (thirteenth pass: twelfth-pass test feedback)
+
+All items from the first in-game test of the twelfth pass.
+
+### Fixed
+
+- **Crouching is no longer forcibly cancelled near block edges.** Vanilla's
+  pose-fit check (`canEnterPose`) tests the stored bounding box — in capsule
+  mode that is the loose world-aligned ENVELOPE, which pokes into the very
+  floor the player stands on the moment the frame tilts (field blends near
+  edges tilt it a few degrees). Vanilla concluded no pose fits and cleared
+  the crouch state. Pose fits are now tested against the actual capsule.
+
+- **Projectiles no longer rubber-band under rotated gravity** (arrows,
+  tridents, eggs, ender pearls, xp bottles). Two causes, both fixed:
+  (1) server motion packets carry WORLD-space velocity, but deltaMovement is
+  interpreted in the entity's LOCAL frame — the raw write made the client
+  dead-reckon flight along the wrong axes between position packets, and each
+  position packet yanked the projectile back (the violent back-and-forth);
+  `lerpMotion` now converts into the entity's frame, and the instant
+  frame-adoption on first sync re-expresses the spawn velocity so world
+  momentum is preserved. (2) entering a field used to ROTATE existing
+  velocity with the gravity change (one sharp turn — the "pearl stops all
+  its momentum" feel); field sources now conserve world momentum and only
+  redirect future acceleration.
+
+- **Gravity strength actually works now — through Forge's gravity
+  attribute.** Forge's patched `LivingEntity.travel` reads its gravity from
+  the `forge:entity_gravity` ATTRIBUTE; the 0.08 constant the old
+  ModifyConstant hook scaled is loaded and immediately overwritten, so
+  strength (and the gradual-falloff feel) never changed the real pull for
+  living entities. The capability now maintains a transient MULTIPLY_TOTAL
+  modifier on that attribute from its computed strength — gradual cores are
+  genuinely orbit-able: the pull fades with distance. The transition pull
+  reads the same attribute (so slow falling and strength compose exactly).
+
+- **Spawned entities adopt field gravity instantly.** Spawn-egg mobs,
+  fireworks and thrown items used to spawn upright and rotate a few moments
+  later (effect latency + snap hysteresis + the 3-tick opposite-flip
+  stability). Freshly spawned non-player entities now bypass the hysteresis
+  and snap their frame to the field on their first influenced tick — a
+  firework placed on the relative ground under inverted gravity fires along
+  the local up immediately instead of phasing into the block above.
+
+- **Tall-thin-tower edge standing inside core fields.** The support hold
+  released only under active repulsion (dot &lt; -0.1), so a face the field is
+  nearly PERPENDICULAR to — the side of a 1x1 tower along the field's pull —
+  still counted as standable ground. Support now requires the field to
+  endorse the face at least slightly (dot &gt; 0.15): 45-degree planet faces
+  and edge blends keep working, tower sides release.
+
+### Added
+
+- **Per-block gravity acceleration.** Plating sides, cores and normalizers
+  now carry a configurable gravity acceleration (default 0.08 = vanilla),
+  applied through the strength pipeline (living entities via the Forge
+  attribute, projectiles via their scaled gravity constants). Full Field
+  applies it uniformly; Gradual Field fades it with distance.
+
+- **Per-block surface-snap toggle** (plating and cores): disables
+  planet-walk surface snapping for entities under that field — gravity then
+  follows the raw field vector only. The normalizer is uniform by design and
+  has no snap toggle.
+
+- **Settings GUI.** Right-clicking a plating side, core or normalizer with
+  an empty hand opens a settings screen (polarity, range, falloff, surface
+  snap, gravity acceleration, field visualization — plus local down for the
+  normalizer), applied via a validated server packet. Plating has an "apply
+  to connected plates" option that copies the settings to every in-plane
+  connected plate with the same facing. The amethyst/glow-ink/echo-shard
+  item shortcuts still work.
+
+- **Gravity Normalizer: ship containment.** On a Valkyrien Skies ship the
+  normalizer's zone is clamped to the ship's actual block extent (plus a
+  1-block skin so crews on hull surfaces stay inside): a range larger than
+  the ship cuts off at the hull, the field can never leak into the non-ship
+  world, and building onto the ship dynamically extends the field (the
+  ship's block AABB grows as blocks are placed). World-placed normalizers
+  are unchanged; cores and plating are unchanged.
+
+- **Sticky Chest — first full Gravity Block Framework example.** A chest
+  placeable in any of the 24 grid orientations (it orients to the placer's
+  gravity: upside down, sideways on walls, any spin) that opens, animates
+  and stores 27 slots like a vanilla chest — the working demonstration of
+  the framework's `Rotation24` + placement-orientation design.
+
+- **Inventory paper doll stays upright and centered.** GUI entity rendering
+  (the inventory player model) no longer applies the gravity model rotation,
+  so the doll cannot stick out of its portrait box over other GUI elements.
+
 ## Unreleased (2.0.0-dev) — 2026-08-14 (twelfth pass: full-codebase audit + roadmap features)
 
 A full-spectrum audit of the codebase (three parallel review passes over the

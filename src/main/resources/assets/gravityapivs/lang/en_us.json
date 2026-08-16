@@ -71,7 +71,7 @@
   "block.gravityapivs.plating_dense": "Dense Gravity Plating",
   "gravity_changer.plating.item_name": "Gravity Plating (Range: %s, Force: %s)",
   "gravity_changer.plating.tooltip.0": "Generates Gravity Field",
-  "gravity_changer.plating.tooltip.1": "Interact with bare hand to decrease range or reverse force",
+  "gravity_changer.plating.tooltip.1": "Interact with bare hand to open the settings screen",
   "gravity_changer.plating.tooltip.2": "Interact with Amethyst Cluster to increase range",
   "gravity_changer.plating.tooltip.3": "Interact with Echo Shard to toggle Full/Gradual falloff",
   "itemGroup.gravityapivs": "GravityVS",
@@ -101,5 +101,18 @@
   "gravity_changer.falloff.gradual": "Falloff mode: Gradual Field (force weakens with distance)",
   "block.gravityapivs.gravity_normalizer": "Gravity Normalizer",
   "gravity_changer.normalizer.status": "Local Down: %s  Zone Size: %s",
-  "gravity_changer.normalizer.max_range": "This normalizer is already at its maximum zone size"
+  "gravity_changer.normalizer.max_range": "This normalizer is already at its maximum zone size",
+  "block.gravityapivs.sticky_chest": "Sticky Chest",
+  "gravity_changer.gui.force": "Force",
+  "gravity_changer.gui.level": "Field Range: %s",
+  "gravity_changer.gui.range": "Field Radius: %s",
+  "gravity_changer.gui.zone_size": "Zone Size: %s",
+  "gravity_changer.gui.falloff": "Falloff",
+  "gravity_changer.gui.falloff.full": "Full Field",
+  "gravity_changer.gui.falloff.gradual": "Gradual Field",
+  "gravity_changer.gui.surface_snap": "Surface Snapping",
+  "gravity_changer.gui.gravity_accel": "Gravity Acceleration",
+  "gravity_changer.gui.field_visual": "Field Visualization",
+  "gravity_changer.gui.apply_connected": "Apply to Connected Plates",
+  "gravity_changer.gui.local_down": "Local Down"
 }

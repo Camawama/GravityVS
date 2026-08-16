@@ -485,11 +485,13 @@ public abstract class LivingEntityMixin extends Entity {
         return RotationUtil.vecWorldToPlayer(vec3d, GravityChangerAPI.getGravityRotation(this));
     }
     
-    @ModifyConstant(method = "Lnet/minecraft/world/entity/LivingEntity;travel(Lnet/minecraft/world/phys/Vec3;)V", constant = @Constant(doubleValue = 0.08))
-    private double multiplyGravity(double constant) {
-        return constant * GravityChangerAPI.getGravityStrength(this);
-    }
-    
+    // (gravity strength for living entities is applied through Forge's
+    // forge:entity_gravity ATTRIBUTE — see
+    // GravityCapabilityImpl.applyGravityStrengthAttribute. The old
+    // ModifyConstant on travel's 0.08 was dead: Forge's patched travel loads
+    // that constant and immediately overwrites it with the attribute value.)
+
+
     @ModifyVariable(method = "Lnet/minecraft/world/entity/LivingEntity;calculateFallDamage(FF)I", at = @At("HEAD"), ordinal = 0, argsOnly = true)
     private float diminishFallDamage(float value) {
         return value * (float) Math.sqrt(GravityChangerAPI.getGravityStrength(this));

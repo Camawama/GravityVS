@@ -332,6 +332,25 @@ public abstract class EntityMixin {
         return RotationUtil.boxPlayerToWorld(box, comp.getCurrGravityDirection()).move(pos);
     }
 
+    // Pose-fit checks (can I stand up / crouch here?) test the loose
+    // world-aligned envelope in capsule mode, which pokes into the very
+    // floor the player stands on the moment the frame tilts — vanilla then
+    // decided NO pose fits and forcibly cancelled crouching (worst near
+    // block edges, where field blends tilt the frame). Test the actual
+    // capsule instead.
+    @Inject(method = "canEnterPose", at = @At("HEAD"), cancellable = true)
+    private void gravityapivs$capsuleCanEnterPose(Pose pose, CallbackInfoReturnable<Boolean> cir) {
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull((Entity) (Object) this);
+        if (comp == null || !comp.useCapsuleCollision()) {
+            return;
+        }
+        Entity self = (Entity) (Object) this;
+        EntityDimensions dim = self.getDimensions(pose);
+        cir.setReturnValue(net.cama.gravityapivs.util.CapsuleCollider.fits(
+            self, this.position(), comp.getUpVector(), dim.width, dim.height
+        ));
+    }
+
     @Inject(method = "getBoundingBoxForPose", at = @At("RETURN"), cancellable = true)
     private void getBoundingBoxForPose(Pose pose, CallbackInfoReturnable<AABB> cir)
     {
@@ -1005,6 +1024,25 @@ public abstract class EntityMixin {
         Vec3 localDm = this.getDeltaMovement();
         Vec3 worldFlow = newDm.subtract(localDm);
         original.call(self, localDm.add(gravityapivs$worldToLocal(worldFlow, comp)));
+    }
+
+    // Server motion packets (ClientboundSetEntityMotion, spawn velocities
+    // applied through lerpMotion) carry WORLD-space velocity — but this mod
+    // interprets deltaMovement in the entity's LOCAL frame. Writing the
+    // packet values in raw made every remote projectile under rotated
+    // gravity dead-reckon its flight along the wrong axes between position
+    // updates, so arrows/eggs/pearls/tridents visibly rubber-banded back and
+    // forth as each position packet yanked them back to the server's truth.
+    @Inject(method = "lerpMotion", at = @At("HEAD"), cancellable = true)
+    private void gravityapivs$lerpMotionToLocal(double x, double y, double z, CallbackInfo ci) {
+        GravityCapabilityImpl comp = gravityapivs$comp();
+        if (comp == null) {
+            return;
+        }
+        ci.cancel();
+        ((Entity) (Object) this).setDeltaMovement(
+            gravityapivs$worldToLocal(new Vec3(x, y, z), comp)
+        );
     }
 
     @Shadow

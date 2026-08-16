@@ -69,6 +69,7 @@
       "client.EntityRenderMixin",
       "client.FishingHookEntityRendererMixin",
       "client.GameRendererMixin",
+      "client.InventoryScreenMixin",
       "client.ItemPickupParticleMixin",
       "client.LocalPlayerEntityMixin",
       "client.PlayerRendererMixin",

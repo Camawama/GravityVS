@@ -49,7 +49,9 @@ import net.minecraft.world.phys.Vec3;
  */
 public class GravityNormalizerBlockEntity extends BlockEntity {
 
-    private static final RotationParameters NORMALIZER_ROTATION_PARAMS = new RotationParameters(true, true, 300);
+    // rotateVelocity=false: world momentum is conserved on zone entry (see
+    // GravityPlatingBlockEntity.PLATING_ROTATION_PARAMS)
+    private static final RotationParameters NORMALIZER_ROTATION_PARAMS = new RotationParameters(false, true, 300);
     // above plating (1000 - distance) and cores (990 - distance) by more than
     // the capability's BLEND_RANGE (5), so inside the zone the normalizer
     // alone defines down — no blending with exterior fields
@@ -60,6 +62,8 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
     // cubic zone half-extent, in blocks
     private int range;
     private boolean showParticles = false;
+    // gravity acceleration (blocks/tick^2) inside the zone; 0.08 = vanilla
+    private double gravityAccel = GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
 
     // client BEs stay inert until authoritative data arrives (same rollback
     // protection as plating/core — see GravityPlatingBlockEntity)
@@ -88,6 +92,9 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
             }
         }
         showParticles = tag.getBoolean("showParticles");
+        gravityAccel = tag.contains("gravityAccel")
+            ? Mth.clamp(tag.getDouble("gravityAccel"), 0.0, 1.0)
+            : GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
     }
 
     @Override
@@ -96,6 +103,7 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
         tag.putInt("range", range);
         tag.putString("localDown", localDown.getName());
         tag.putBoolean("showParticles", showParticles);
+        tag.putDouble("gravityAccel", gravityAccel);
     }
 
     @Nullable
@@ -120,6 +128,11 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
         );
     }
 
+    // how far past the ship's outermost blocks the zone may reach — enough
+    // that crews standing ON hull surfaces are still inside, while the field
+    // never leaks meaningfully into the surrounding world
+    private static final double SHIP_CONTAIN_MARGIN = 1.0;
+
     public static void tick(Level world, BlockPos blockPos, BlockState blockState, GravityNormalizerBlockEntity be) {
         if (world.isClientSide() && !be.dataInitialized) {
             return;
@@ -128,6 +141,28 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
         Ship ship = VSGameUtilsKt.getShipManagingPos(world, blockPos);
 
         AABB zone = be.getZoneBox();
+
+        // On a ship the field is CONTAINED INSIDE THE SHIP: the zone is
+        // clamped to the ship's actual block extent (Valkyrien Skies keeps
+        // getShipAABB() up to date as blocks are placed/broken, so building
+        // onto the ship dynamically extends the field). A range larger than
+        // the ship simply cuts off at the hull — the normalizer's gravity
+        // never leaks into the non-ship world.
+        if (ship != null) {
+            org.joml.primitives.AABBic voxels = ship.getShipAABB();
+            if (voxels == null) {
+                return;
+            }
+            AABB shipBlocks = new AABB(
+                voxels.minX(), voxels.minY(), voxels.minZ(),
+                voxels.maxX(), voxels.maxY(), voxels.maxZ()
+            ).inflate(SHIP_CONTAIN_MARGIN);
+            if (!zone.intersects(shipBlocks)) {
+                return;
+            }
+            zone = zone.intersect(shipBlocks);
+        }
+
         AABB searchBox = zone;
         if (ship != null) {
             searchBox = gravityapivs$shipToWorldBox(ship, zone);
@@ -190,7 +225,8 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
             }
 
             comp.applyGravityDirectionEffect(
-                worldDown, NORMALIZER_ROTATION_PARAMS, NORMALIZER_PRIORITY
+                worldDown, NORMALIZER_ROTATION_PARAMS, NORMALIZER_PRIORITY, false,
+                be.gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL, true
             );
         }
     }
@@ -213,25 +249,11 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
     }
 
     public InteractionResult interact(Player player, InteractionHand hand) {
+        // NOTE: the empty-hand interaction opens the settings GUI instead (see
+        // GravityNormalizerBlock.use); interact() only handles item shortcuts
         ItemStack handItem = player.getItemInHand(hand);
 
-        if (handItem.getItem() == Items.AIR) {
-            if (player.isShiftKeyDown()) {
-                if (range > 1) {
-                    range -= 1;
-                    if (!player.isCreative()) {
-                        net.cama.gravityapivs.plating.GravityPlatingBlockEntity.gravityapivs$refund(
-                            player, new ItemStack(Items.AMETHYST_CLUSTER)
-                        );
-                    }
-                }
-            }
-            else {
-                // cycle the grid-local down direction through all six
-                localDown = Direction.from3DDataValue((localDown.get3DDataValue() + 1) % 6);
-            }
-        }
-        else if (handItem.getItem() == Items.AMETHYST_CLUSTER) {
+        if (handItem.getItem() == Items.AMETHYST_CLUSTER) {
             if (range >= GravityConfig.normalizerMaxRange.get()) {
                 player.displayClientMessage(
                     Component.translatable("gravity_changer.normalizer.max_range"), true
@@ -285,5 +307,42 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
         }
         setChanged();
         ((ServerChunkCache) world.getChunkSource()).blockChanged(this.getBlockPos());
+    }
+
+    // read access for the client settings screen (the client BE carries
+    // authoritative data via the update tag)
+    public Direction getLocalDown() {
+        return localDown;
+    }
+
+    public int getRange() {
+        return range;
+    }
+
+    public double getGravityAccel() {
+        return gravityAccel;
+    }
+
+    public boolean isShowParticles() {
+        return showParticles;
+    }
+
+    /**
+     * Server-side entry point for the settings GUI (arrives via
+     * {@code network.UpdateGravityBlockSettingsPacket}). Every value is
+     * clamped to its legal range — client input is never trusted.
+     */
+    public void applySettingsFromGui(
+        Direction newLocalDown, int newRange, double gravityAccel, boolean showParticles
+    ) {
+        Level world = getLevel();
+        if (world == null || world.isClientSide()) {
+            return;
+        }
+        this.localDown = newLocalDown;
+        this.range = Mth.clamp(newRange, 1, GravityConfig.normalizerMaxRange.get());
+        this.gravityAccel = Mth.clamp(gravityAccel, 0.0, 1.0);
+        this.showParticles = showParticles;
+        sync();
     }
 }

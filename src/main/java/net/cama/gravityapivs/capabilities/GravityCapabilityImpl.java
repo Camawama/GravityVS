@@ -59,6 +59,19 @@ import net.minecraftforge.network.PacketDistributor;
 public class GravityCapabilityImpl implements IGravityCapability {
     public static final Vec3 DOWN = new Vec3(0, -1, 0);
 
+    // Baseline gravity acceleration (blocks/tick^2) that a strength of 1.0
+    // corresponds to — vanilla's living-entity gravity, and the base value of
+    // Forge's forge:entity_gravity attribute.
+    public static final double BASE_GRAVITY_ACCEL = 0.08;
+
+    // Fixed id for the transient forge:entity_gravity modifier that applies
+    // this capability's gravity strength. Forge's patched travel() reads its
+    // gravity from that ATTRIBUTE (the 0.08 constant it loads is immediately
+    // overwritten by the attribute value), so scaling the constant — the old
+    // approach — never did anything for living entities.
+    private static final java.util.UUID GRAVITY_STRENGTH_MODIFIER_ID =
+        java.util.UUID.fromString("7e5be1cf-3b12-4790-8b71-d9ab3b884a2e");
+
     // hysteresis: a new cardinal must be this much better aligned (dot product)
     // with the field vector before the collision box snaps to it
     private static final double SNAP_HYSTERESIS_DOT = 0.10;
@@ -116,6 +129,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
     public @Nullable org.valkyrienskies.core.api.ships.Ship capsuleGroundShip = null;
     // world-space normal of the surface being stood on
     public @Nullable Vec3 capsuleGroundNormal = null;
+    // Whether the dominant field source allows planet-walk surface snapping
+    // (per-block "snap" toggle on plating/cores). Resolved per tick in
+    // resolveGravityTarget; true under base gravity / no field.
+    private boolean surfaceAlignAllowed = true;
+
+    // A held/probed surface only counts as support while the field endorses
+    // it at least this much (dot of face normal with field up). 0.15 keeps
+    // 45-degree blend faces and every legitimate planet face, but releases
+    // faces the field is near-PERPENDICULAR to — standing on the side of a
+    // tall thin tower inside a core field, gravity points along the tower,
+    // and the old -0.1 gate (kept anything short of active repulsion) let
+    // players stand there anyway.
+    private static final double SUPPORT_KEEP_DOT = 0.15;
+
     // the block face under the feet found by the ground probe; this — never a
     // per-tick contact normal — is what the frame aligns to
     private @Nullable Vec3 lastGroundNormal = null;
@@ -293,6 +320,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
         applyShipIdleAnchor();
         updateGravityStatus();
         applyGravityChange();
+        applyGravityStrengthAttribute();
+        maybeSnapFreshSpawn();
         updateSurfaceProbe();
         advanceVisualRotation();
         applyTransitionPull();
@@ -328,7 +357,78 @@ public class GravityCapabilityImpl implements IGravityCapability {
         currGravityStrength = 1.0;
         currGravityDirection = Direction.DOWN;
         applyGravityChange();
+        applyGravityStrengthAttribute();
         advanceVisualRotation();
+    }
+
+    /**
+     * Applies {@link #currGravityStrength} to the entity through Forge's
+     * {@code forge:entity_gravity} ATTRIBUTE. Forge's patched
+     * {@code LivingEntity.travel} takes its gravity acceleration from that
+     * attribute — the 0.08 constant it loads is immediately overwritten by
+     * the attribute read — so the old ModifyConstant-based scaling silently
+     * did nothing for living entities: gravity strength (and with it the
+     * gradual-falloff feel) never actually changed the pull. Run on the side
+     * that computes this entity's gravity; travel() only applies gravity on
+     * the controlled side, which is the same side.
+     */
+    private void applyGravityStrengthAttribute() {
+        if (!(entity instanceof LivingEntity living) || shouldAcceptServerSync()) {
+            return;
+        }
+        net.minecraft.world.entity.ai.attributes.AttributeInstance attr =
+            living.getAttribute(net.minecraftforge.common.ForgeMod.ENTITY_GRAVITY.get());
+        if (attr == null) {
+            return;
+        }
+
+        double amount = currGravityStrength - 1.0;
+        net.minecraft.world.entity.ai.attributes.AttributeModifier existing =
+            attr.getModifier(GRAVITY_STRENGTH_MODIFIER_ID);
+
+        if (Math.abs(amount) < 1.0E-4) {
+            if (existing != null) {
+                attr.removeModifier(GRAVITY_STRENGTH_MODIFIER_ID);
+            }
+            return;
+        }
+        if (existing != null) {
+            if (Math.abs(existing.getAmount() - amount) < 1.0E-4) {
+                return;
+            }
+            attr.removeModifier(GRAVITY_STRENGTH_MODIFIER_ID);
+        }
+        attr.addTransientModifier(new net.minecraft.world.entity.ai.attributes.AttributeModifier(
+            GRAVITY_STRENGTH_MODIFIER_ID, "GravityVS field strength", amount,
+            net.minecraft.world.entity.ai.attributes.AttributeModifier.Operation.MULTIPLY_TOTAL
+        ));
+    }
+
+    /**
+     * Freshly spawned non-player entities (spawn eggs, fireworks, thrown
+     * items) inside a gravity field snap to the field INSTANTLY instead of
+     * spawning upright and rotating a few ticks later: the first tick where
+     * field effects reach a just-created entity skips the smooth chase (and
+     * {@link #snapPhysicsDirection} skips its hysteresis for them, see the
+     * freshSpawn bypass there).
+     */
+    private void maybeSnapFreshSpawn() {
+        if (entity instanceof Player || entity.tickCount > 3 || shouldAcceptServerSync()) {
+            return;
+        }
+        if (fieldGraceTicks <= 0) {
+            return;
+        }
+        Quaternionf target = new Quaternionf();
+        computeVisualTarget(target);
+        if (angleBetween(visualRotation, target) < (float) Math.toRadians(1)) {
+            return;
+        }
+        visualRotation.set(target);
+        prevVisualRotation.set(target);
+        visualTarget.set(target);
+        noAnimation = true;
+        needsSync = true;
     }
 
     /**
@@ -486,6 +586,18 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return;
         }
 
+        // per-block snap toggle: the dominant source forbids planet-walk
+        // surface alignment — drop any held surface and let the frame follow
+        // the raw field vector only
+        if (!surfaceAlignAllowed) {
+            lastGroundNormal = null;
+            groundNormalGraceTicks = 0;
+            surfaceChangeCooldown = 0;
+            recentReleasedNormal = null;
+            recentReleasedTicks = 0;
+            return;
+        }
+
         if (surfaceChangeCooldown > 0) {
             surfaceChangeCooldown--;
         }
@@ -500,7 +612,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
         // support-first: a held surface is only released when the field
         // actively opposes it (repulsion), not when merely perpendicular
-        boolean held = lastGroundNormal != null && lastGroundNormal.dot(fieldUp) > -0.1;
+        boolean held = lastGroundNormal != null && lastGroundNormal.dot(fieldUp) > SUPPORT_KEEP_DOT;
         Vec3 heldNormal = held ? lastGroundNormal : null;
 
         // Probe along the HELD surface alignment while one exists, not the raw
@@ -585,7 +697,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
 
         Vec3 normal = probeSurfaceNormal(feet.subtract(probeDown.scale(0.2)), probeDown, 0.2 + GROUND_PROBE_DEPTH);
-        if (normal != null && normal.dot(fieldUp) > -0.1) {
+        if (normal != null && normal.dot(fieldUp) > SUPPORT_KEEP_DOT) {
             adoptGroundNormal(normal);
 
             // CONCAVE corner (walking on a plated floor into a plated wall, or
@@ -636,7 +748,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             Vec3 frameUp = getUpVector();
             Vec3 frameDown = frameUp.scale(-1);
             Vec3 support = probeSurfaceNormal(feet.subtract(frameDown.scale(0.2)), frameDown, 0.2 + GROUND_PROBE_DEPTH);
-            if (support != null && support.dot(frameUp) > 0.35 && support.dot(fieldUp) > -0.1) {
+            if (support != null && support.dot(frameUp) > 0.35 && support.dot(fieldUp) > SUPPORT_KEEP_DOT) {
                 adoptGroundNormal(support);
                 return;
             }
@@ -825,7 +937,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
      */
     private Vec3 effectiveTargetUp(Vec3 fieldVector) {
         Vec3 targetUp = fieldVector.scale(-1);
-        if (lastGroundNormal != null && lastGroundNormal.dot(targetUp) > -0.1) {
+        if (lastGroundNormal != null && lastGroundNormal.dot(targetUp) > SUPPORT_KEEP_DOT) {
             return lastGroundNormal;
         }
         return targetUp;
@@ -877,17 +989,18 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return; // aligned (within ~1 degree): correction is zero
         }
 
-        // match the gravity travel() actually applies this tick: 0.08
-        // normally, 0.01 while descending with slow falling — the correction
-        // redirects the pull, so its magnitude must equal the real pull or a
-        // slow-falling player in a field gets yanked harder sideways than down
-        double gravityAccel = 0.08;
-        if (living.hasEffect(net.minecraft.world.effect.MobEffects.SLOW_FALLING)
-            && entity.getDeltaMovement().y <= 0.0
-        ) {
-            gravityAccel = 0.01;
+        // match the gravity travel() actually applies: Forge's travel reads
+        // the forge:entity_gravity ATTRIBUTE (which already includes our
+        // field-strength modifier and the slow-falling modifier), so read the
+        // same value — the correction redirects the pull, so its magnitude
+        // must equal the real pull
+        double gravityAccel = BASE_GRAVITY_ACCEL * currGravityStrength;
+        net.minecraft.world.entity.ai.attributes.AttributeInstance gravityAttr =
+            living.getAttribute(net.minecraftforge.common.ForgeMod.ENTITY_GRAVITY.get());
+        if (gravityAttr != null) {
+            gravityAccel = gravityAttr.getValue();
         }
-        Vec3 correction = targetDown.subtract(frameDown).scale(gravityAccel * currGravityStrength);
+        Vec3 correction = targetDown.subtract(frameDown).scale(gravityAccel);
         entity.setDeltaMovement(entity.getDeltaMovement().add(
             RotationUtil.vecWorldToPlayer(correction, visualRotation)
         ));
@@ -1358,6 +1471,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private void resolveGravityTarget() {
         if (tempEffects.isEmpty()) {
             currentRotationParameters = RotationParameters.getDefault();
+            surfaceAlignAllowed = true;
             return;
         }
 
@@ -1375,6 +1489,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         double accumulatedStrengthScale = 0;
         RotationParameters bestParams = null;
         double bestParamPriority = -Double.MAX_VALUE;
+        boolean bestAllowSurfaceAlign = true;
 
         for (GravityDirEffect effect : tempEffects) {
             if (effect.priority >= maxPriority - BLEND_RANGE) {
@@ -1387,12 +1502,16 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
                 if (effect.priority > bestParamPriority) {
                     bestParamPriority = effect.priority;
+                    bestAllowSurfaceAlign = effect.allowSurfaceAlign();
                     if (effect.rotationParameters != null) {
                         bestParams = effect.rotationParameters;
                     }
                 }
             }
         }
+        // the dominant (closest/strongest) source decides whether planet-walk
+        // surface snapping is allowed under this field
+        surfaceAlignAllowed = bestAllowSurfaceAlign;
 
         double magnitude = accumulatedGravity.length();
         if (totalWeight > 0.0001 && magnitude > 0.02) {
@@ -1406,10 +1525,12 @@ public class GravityCapabilityImpl implements IGravityCapability {
             double cancellation = Mth.clamp(magnitude / totalWeight, 0.0, 1.0);
             targetGravityStrength *= cancellation * cancellation;
 
-            // gradual-falloff fields: the weighted-average per-effect force
-            // scale weakens the PULL with distance from the source while the
-            // orientation (the blended direction above) is untouched
-            targetGravityStrength *= Mth.clamp(accumulatedStrengthScale / totalWeight, 0.0, 1.0);
+            // per-effect force scale: gradual falloff weakens the pull with
+            // distance, and per-block gravity acceleration settings scale it
+            // up or down — while the orientation (the blended direction
+            // above) is untouched. No upper clamp: sources may be configured
+            // stronger than baseline gravity.
+            targetGravityStrength *= Math.max(0.0, accumulatedStrengthScale / totalWeight);
         }
 
         currentRotationParameters = bestParams != null ? bestParams : RotationParameters.getDefault();
@@ -1442,13 +1563,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return;
         }
 
+        // freshly spawned entities adopt the field's cardinal immediately —
+        // the hysteresis and opposite-flip stability exist to filter noise on
+        // entities that already HAVE a meaningful direction; a spawn-egg mob
+        // in an UP field waiting 3 ticks to flip was visible as spawning
+        // upright and rotating moments later
+        boolean freshSpawn = entity != null && entity.tickCount <= 3 && !(entity instanceof Player);
+
         double candidateDot = target.dot(Vec3.atLowerCornerOf(candidate.getNormal()));
         double currentDot = target.dot(Vec3.atLowerCornerOf(currGravityDirection.getNormal()));
-        if (candidateDot < currentDot + SNAP_HYSTERESIS_DOT) {
+        if (candidateDot < currentDot + SNAP_HYSTERESIS_DOT && !freshSpawn) {
             return;
         }
 
-        if (candidate == currGravityDirection.getOpposite()) {
+        if (candidate == currGravityDirection.getOpposite() && !freshSpawn) {
             // opposing fields can produce brief flips; require stability
             oppositeStableTicks++;
             if (oppositeStableTicks < OPPOSITE_FLIP_STABLE_TICKS) {
@@ -1575,12 +1703,24 @@ public class GravityCapabilityImpl implements IGravityCapability {
         this.syncedVisualTarget.set(rotation).normalize();
 
         if (noAnimation || !initialized) {
+            // preserve WORLD velocity across the instant frame adoption: the
+            // stored deltaMovement was expressed in the OLD frame (identity
+            // for a freshly spawned entity whose spawn-packet velocity was
+            // world-space); reinterpreting it in the new frame unconverted
+            // sent remote projectiles flying the wrong way
+            Quaternionf oldFrame = new Quaternionf(this.visualRotation);
+
             this.prevGravityDirection = serverDirection;
             this.prevGravityStrength = currentGravityStrength;
             this.initialized = true;
             this.visualRotation.set(this.syncedVisualTarget);
             this.prevVisualRotation.set(this.syncedVisualTarget);
             this.visualTarget.set(this.syncedVisualTarget);
+
+            if (entity != null && !oldFrame.equals(this.visualRotation)) {
+                Vec3 world = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), oldFrame);
+                entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(world, this.visualRotation));
+            }
             updateBoundingBox();
         }
     }
@@ -1594,7 +1734,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         @Nullable RotationParameters rotationParameters,
         double priority
     ) {
-        applyGravityDirectionEffect(direction, rotationParameters, priority, false, 1.0);
+        applyGravityDirectionEffect(direction, rotationParameters, priority, false, 1.0, true);
     }
 
     public void applyGravityDirectionEffect(
@@ -1603,7 +1743,17 @@ public class GravityCapabilityImpl implements IGravityCapability {
         double priority,
         boolean secondary
     ) {
-        applyGravityDirectionEffect(direction, rotationParameters, priority, secondary, 1.0);
+        applyGravityDirectionEffect(direction, rotationParameters, priority, secondary, 1.0, true);
+    }
+
+    public void applyGravityDirectionEffect(
+        @NotNull Vec3 direction,
+        @Nullable RotationParameters rotationParameters,
+        double priority,
+        boolean secondary,
+        double strengthScale
+    ) {
+        applyGravityDirectionEffect(direction, rotationParameters, priority, secondary, strengthScale, true);
     }
 
     /**
@@ -1613,21 +1763,31 @@ public class GravityCapabilityImpl implements IGravityCapability {
      *                      tick with only secondary effects counts as no field at
      *                      all — standing on plain ground one block beside a plate
      *                      must not change gravity.
-     * @param strengthScale per-effect FORCE multiplier in [0,1] (gradual-falloff
-     *                      fields weaken with distance from the source). Scales
-     *                      only the pull strength — never the orientation: an
-     *                      entity at the far edge of a gradual field is still
-     *                      fully oriented by it, just pulled weakly. Blended
-     *                      with the same weights as the direction.
+     * @param strengthScale per-effect FORCE multiplier (gradual-falloff
+     *                      fields weaken with distance from the source, and a
+     *                      source's configured gravity acceleration scales it
+     *                      up or down). Scales only the pull strength — never
+     *                      the orientation: an entity at the far edge of a
+     *                      gradual field is still fully oriented by it, just
+     *                      pulled weakly. Blended with the same weights as
+     *                      the direction.
+     * @param allowSurfaceAlign whether entities under this field may adopt
+     *                      the surface they stand on as their "up"
+     *                      (planet-walk snapping). When the dominant field
+     *                      disallows it, gravity follows the raw field
+     *                      vector only.
      */
     public void applyGravityDirectionEffect(
         @NotNull Vec3 direction,
         @Nullable RotationParameters rotationParameters,
         double priority,
         boolean secondary,
-        double strengthScale
+        double strengthScale,
+        boolean allowSurfaceAlign
     ) {
-        GravityDirEffect effect = new GravityDirEffect(direction, rotationParameters, priority, secondary, strengthScale);
+        GravityDirEffect effect = new GravityDirEffect(
+            direction, rotationParameters, priority, secondary, strengthScale, allowSurfaceAlign
+        );
         if (isFiringUpdateEvent) {
             tempEffects.add(effect);
         }
@@ -2010,7 +2170,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
         @Nullable RotationParameters rotationParameters,
         double priority,
         boolean secondary,
-        double strengthScale
+        double strengthScale,
+        boolean allowSurfaceAlign
     ) {
     }
 }
