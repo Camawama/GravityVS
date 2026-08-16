@@ -53,6 +53,23 @@ public class GravityCoreBlock extends BaseEntityBlock {
         return createTickerHelper(type, GravityBlocks.GRAVITY_CORE_BLOCK_ENTITY.get(), GravityCoreBlockEntity::tick);
     }
 
+
+    @Override
+    public void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
+        // breaking the field source: drop it from the fluid-gravity registry
+        // IMMEDIATELY (the tick-expiry is too slow — re-settling fluids must
+        // see the field gone) and wake all fluids it was holding so they
+        // flow back under normal gravity instead of freezing in place
+        if (!state.is(newState.getBlock()) && !level.isClientSide()) {
+            int radius = level.getBlockEntity(pos)
+                instanceof net.cama.gravityapivs.util.GravityFieldLookup.Source source
+                ? source.sourceMaxRange() : 8;
+            net.cama.gravityapivs.util.GravityFieldLookup.unregister(level, pos);
+            net.cama.gravityapivs.util.GravityFieldLookup.resettleFluidsAround(level, pos, radius);
+        }
+        super.onRemove(state, level, pos, newState, isMoving);
+    }
+
     @Override
     public InteractionResult use(
         BlockState state, Level level, BlockPos pos, Player player,

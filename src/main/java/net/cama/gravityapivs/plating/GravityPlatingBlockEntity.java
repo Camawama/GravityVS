@@ -46,7 +46,8 @@ import net.minecraft.world.phys.Vec3;
 /**
  * Based on code from AmethystGravity (by CyborgCabbage)
  */
-public class GravityPlatingBlockEntity extends BlockEntity {
+public class GravityPlatingBlockEntity extends BlockEntity
+    implements net.cama.gravityapivs.util.GravityFieldLookup.Source {
 
     // rotateVelocity=false: entering/crossing a field must CONSERVE world
     // momentum (a projectile thrown into the field keeps flying and curves,
@@ -375,6 +376,7 @@ public class GravityPlatingBlockEntity extends BlockEntity {
         }
 
         be.refreshCache(blockState);
+        net.cama.gravityapivs.util.GravityFieldLookup.register(world, blockPos, be);
 
         AABB roughBox = be.getRoughEffectBox();
         AABB searchBox = roughBox;
@@ -908,6 +910,52 @@ public class GravityPlatingBlockEntity extends BlockEntity {
                 }
             }
         }
+    }
+
+    // ---- GravityFieldLookup.Source (fluid gravity queries) ----
+    // fluids follow a plate's PRIMARY column only (never the hidden sideways
+    // bleed): the effect direction inside the plate's own footprint + range
+
+    @Override
+    public @Nullable Direction fluidDownAt(BlockPos pos) {
+        if (sideData == null) {
+            return null;
+        }
+        Vec3 center = Vec3.atCenterOf(pos);
+        for (Direction plateDir : Direction.values()) {
+            SideData sideDatum = sideData[plateDir.ordinal()];
+            if (sideDatum == null) {
+                continue;
+            }
+            if (sideDatum.getPrimaryBox(worldPosition, plateDir).contains(center)) {
+                return sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public int sourceMaxRange() {
+        if (sideData == null) {
+            return 2;
+        }
+        int max = 1;
+        for (SideData sideDatum : sideData) {
+            if (sideDatum != null) {
+                max = Math.max(max, sideDatum.level);
+            }
+        }
+        return max + 2;
+    }
+
+    @Override
+    public BlockPos sourcePos() {
+        return worldPosition;
+    }
+
+    @Override
+    public int sourcePriority() {
+        return 2;
     }
 
     public InteractionResult interact(Level level, BlockPos pos, Direction plateDir, Player player, InteractionHand hand) {

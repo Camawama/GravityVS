@@ -1,5 +1,67 @@
 # GravityVS Changelog
 
+## Unreleased (2.0.0-dev) — 2026-08-16 (gravity fluids: test feedback round)
+
+- **Gravity plating is waterloggable.** Plates are thin panels sharing
+  their cell with fluid; a water source no longer destroys them (placement
+  into water waterlogs the new plate, buckets work on placed plates).
+
+- **Rotated fields can no longer manufacture permanent water sources.**
+  The vanilla infinite-water rule (two source neighbors over solid ground
+  form a new source) ran in the rotated frame and its products are
+  PERMANENT blocks — removing the gravity source left walls studded with
+  water sources. Source conversion is now disabled entirely inside rotated
+  fields: fields move water, they never create it.
+
+- **Fluids flow back to normal when a field is removed or changed.**
+  Settled fluid has no pending ticks, so a wall-pinned puddle used to
+  freeze in its impossible shape when its field disappeared. Breaking a
+  plating/core/normalizer (or removing a plate side) now drops the source
+  from the fluid-gravity registry immediately and wakes every fluid block
+  in its former range so it re-settles under current rules; changing
+  settings through the GUI does the same (covering polarity/direction/range
+  changes, including apply-to-connected). Item-shortcut tweaks (amethyst /
+  echo shard) don't trigger the wake — use the GUI for live re-settling, or
+  poke the water with a block update.
+
+- **Rotated fluid rendering.** The liquid renderer now draws
+  gravity-affected fluid cells in the field's frame: the surface sits
+  perpendicular to the field's down, side faces and corner heights follow
+  the rotated column, and the flowing-texture direction tracks the actual
+  (gravity-aware) flow vector — a stream toward a core now looks like it
+  flows toward the core.
+
+## Unreleased (2.0.0-dev) — 2026-08-16 (gravity-aware fluids)
+
+- **Liquids flow along gravity fields.** A water or lava source inside a
+  gravity field now falls along the field's (cardinal) down, spreads across
+  the plane perpendicular to it, forms falling columns along it, converts
+  to new sources in the rotated frame, and pushes entities along the
+  rotated current. Works for water, lava and any modded fluid extending
+  `FlowingFluid`.
+  - Implementation: every direction-sensitive site in the vanilla fluid
+    engine (`Direction.DOWN`/`UP`, `below()`/`above()`,
+    `Plane.HORIZONTAL` — verified exhaustively against the Forge
+    1.20.1-47.4.16 bytecode, including the slope-search lambda) is rewired
+    through a new block-position gravity query; `getFlow` is replaced
+    wholesale under rotated gravity because its vanilla accumulator only
+    tracks X/Z steps and would silently drop the Y components of a
+    sideways spread plane. Outside fields every hook calls the vanilla
+    original verbatim — behavior there is bit-identical.
+  - New `util/GravityFieldLookup`: plating sides (primary column only,
+    never the hidden bleed), cores (radial, snapped to cardinals) and
+    normalizers (zone, ship-clamped) re-register every tick into a
+    self-expiring per-level registry; the dominant source by priority
+    (normalizer &gt; plating &gt; core), then proximity, answers each query.
+    SAME-GRID only: ship fields bend ship fluids (in shipyard space, where
+    ship fluids simulate anyway); cross-grid influence is out of scope.
+  - Config: `gravityAffectsFluids` (server-synced, default true).
+  - Known visual limitation: falling streams render correctly (falling
+    fluid draws full cells), but thin spread layers on walls/ceilings
+    still render their surface world-oriented — the fluid RENDERER is
+    untouched; a rotated liquid renderer is its own future project. The
+    simulation underneath is correct.
+
 ## Unreleased (2.0.0-dev) — 2026-08-16 (sticky chest fixes, second round)
 
 - **Sticky chest yaw on rotated ships — real root cause found and fixed.**

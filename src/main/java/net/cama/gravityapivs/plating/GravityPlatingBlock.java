@@ -48,7 +48,7 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 /**
  * Based on code from AmethystGravity (by CyborgCabbage)
  */
-public class GravityPlatingBlock extends BaseEntityBlock {
+public class GravityPlatingBlock extends BaseEntityBlock implements net.minecraft.world.level.block.SimpleWaterloggedBlock {
     // in a corner, multiple faces of plates can occupy the same block
     
     public static final BooleanProperty NORTH = BlockStateProperties.NORTH;
@@ -57,6 +57,10 @@ public class GravityPlatingBlock extends BaseEntityBlock {
     public static final BooleanProperty WEST = BlockStateProperties.WEST;
     public static final BooleanProperty UP = BlockStateProperties.UP;
     public static final BooleanProperty DOWN = BlockStateProperties.DOWN;
+    // plates are thin panels sharing their cell with fluid: waterloggable so
+    // a water source does not destroy them (gravity fields routinely put
+    // water into plate cells now that fluids follow fields)
+    public static final BooleanProperty WATERLOGGED = BlockStateProperties.WATERLOGGED;
     
     protected static final VoxelShape DOWN_SHAPE = Block.box(0.0, 0.0, 0.0, 16.0, 1.0, 16.0);
     protected static final VoxelShape UP_SHAPE = Block.box(0.0, 15.0, 0.0, 16.0, 16.0, 16.0);
@@ -75,6 +79,7 @@ public class GravityPlatingBlock extends BaseEntityBlock {
             .setValue(WEST, false)
             .setValue(UP, false)
             .setValue(DOWN, false)
+            .setValue(WATERLOGGED, false)
         );
         this.shapesByState =
             ImmutableMap.copyOf(
@@ -118,11 +123,22 @@ public class GravityPlatingBlock extends BaseEntityBlock {
     
     @Override
     protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> stateManager) {
-        stateManager.add(UP, DOWN, NORTH, SOUTH, EAST, WEST);
+        stateManager.add(UP, DOWN, NORTH, SOUTH, EAST, WEST, WATERLOGGED);
     }
     
     @Override
+    public net.minecraft.world.level.material.FluidState getFluidState(BlockState state) {
+        return state.getValue(WATERLOGGED)
+            ? net.minecraft.world.level.material.Fluids.WATER.getSource(false)
+            : super.getFluidState(state);
+    }
+
+    @Override
     public BlockState updateShape(BlockState state, Direction direction, BlockState neighborState, LevelAccessor world, BlockPos pos, BlockPos neighborPos) {
+        if (state.getValue(WATERLOGGED)) {
+            world.scheduleTick(pos, net.minecraft.world.level.material.Fluids.WATER,
+                net.minecraft.world.level.material.Fluids.WATER.getTickDelay(world));
+        }
         if (hasDir(state, direction) && !canPlaceOn(world, pos.relative(direction), direction.getOpposite())) {
             state = state.setValue(directionToProperty(direction), false);
             if (getDirections(state).size() == 0) {
@@ -199,7 +215,11 @@ public class GravityPlatingBlock extends BaseEntityBlock {
         if (blockState.is(this)) {
             return blockState.setValue(directionToProperty(ctx.getClickedFace().getOpposite()), true);
         }
-        return defaultBlockState().setValue(directionToProperty(ctx.getClickedFace().getOpposite()), true);
+        boolean water = ctx.getLevel().getFluidState(ctx.getClickedPos()).getType()
+            == net.minecraft.world.level.material.Fluids.WATER;
+        return defaultBlockState()
+            .setValue(directionToProperty(ctx.getClickedFace().getOpposite()), true)
+            .setValue(WATERLOGGED, water);
     }
     
     private boolean canPlaceOn(BlockGetter world, BlockPos pos, Direction side) {
@@ -262,6 +282,27 @@ public class GravityPlatingBlock extends BaseEntityBlock {
         return list;
     }
     
+
+    @Override
+    public void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
+        if (!level.isClientSide()) {
+            boolean fullyRemoved = !state.is(newState.getBlock());
+            // a side was removed while the block remains (multi-side plates)
+            boolean sidesChanged = !fullyRemoved
+                && !getDirections(state).equals(getDirections(newState));
+            if (fullyRemoved || sidesChanged) {
+                int radius = level.getBlockEntity(pos)
+                    instanceof net.cama.gravityapivs.util.GravityFieldLookup.Source source
+                    ? source.sourceMaxRange() : 8;
+                if (fullyRemoved) {
+                    net.cama.gravityapivs.util.GravityFieldLookup.unregister(level, pos);
+                }
+                net.cama.gravityapivs.util.GravityFieldLookup.resettleFluidsAround(level, pos, radius);
+            }
+        }
+        super.onRemove(state, level, pos, newState, isMoving);
+    }
+
     @Override
     public InteractionResult use(
         BlockState state, Level level, BlockPos pos, Player player,

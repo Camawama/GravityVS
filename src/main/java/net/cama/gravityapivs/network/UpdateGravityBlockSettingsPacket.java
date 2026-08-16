@@ -109,6 +109,7 @@ public class UpdateGravityBlockSettingsPacket
 							Direction side = Direction.byName(tag.getString("side"));
 							if (side != null)
 							{
+								int oldRange = be.sourceMaxRange();
 								be.applySettingsFromGui(
 									side,
 									tag.getInt("level"),
@@ -119,6 +120,11 @@ public class UpdateGravityBlockSettingsPacket
 									tag.getBoolean("showParticles"),
 									tag.getBoolean("applyToConnected")
 								);
+								// wake fluids so they re-settle under the new field state;
+								// applyToConnected may have changed distant plates too
+								net.cama.gravityapivs.util.GravityFieldLookup.resettleFluidsAround(
+									level, pos, Math.max(oldRange, be.sourceMaxRange())
+										+ (tag.getBoolean("applyToConnected") ? 20 : 0));
 							}
 						}
 					}
@@ -126,6 +132,7 @@ public class UpdateGravityBlockSettingsPacket
 					{
 						if (level.getBlockEntity(pos) instanceof GravityCoreBlockEntity be)
 						{
+							int oldRange = be.sourceMaxRange();
 							be.applySettingsFromGui(
 								tag.getInt("range"),
 								tag.getBoolean("attracting"),
@@ -134,6 +141,8 @@ public class UpdateGravityBlockSettingsPacket
 								tag.getBoolean("surfaceSnap"),
 								tag.getBoolean("showParticles")
 							);
+							net.cama.gravityapivs.util.GravityFieldLookup.resettleFluidsAround(
+								level, pos, Math.max(oldRange, be.sourceMaxRange()));
 						}
 					}
 					case NORMALIZER ->
@@ -143,12 +152,15 @@ public class UpdateGravityBlockSettingsPacket
 							Direction localDown = Direction.byName(tag.getString("localDown"));
 							if (localDown != null)
 							{
+								int oldRange = be.sourceMaxRange();
 								be.applySettingsFromGui(
 									localDown,
 									tag.getInt("range"),
 									tag.getDouble("gravityAccel"),
 									tag.getBoolean("showParticles")
 								);
+								net.cama.gravityapivs.util.GravityFieldLookup.resettleFluidsAround(
+									level, pos, Math.max(oldRange, be.sourceMaxRange()));
 							}
 						}
 					}

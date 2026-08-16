@@ -37,7 +37,8 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
-public class GravityCoreBlockEntity extends BlockEntity {
+public class GravityCoreBlockEntity extends BlockEntity
+    implements net.cama.gravityapivs.util.GravityFieldLookup.Source {
 
     // rotateVelocity=false: world momentum is conserved on field entry (see
     // GravityPlatingBlockEntity.PLATING_ROTATION_PARAMS)
@@ -131,6 +132,8 @@ public class GravityCoreBlockEntity extends BlockEntity {
             ownShip.getTransform().getShipToWorldMatrix().transformPosition(c);
             center = new Vec3(c.x, c.y, c.z);
         }
+
+        net.cama.gravityapivs.util.GravityFieldLookup.register(world, blockPos, be);
 
         double range = be.range;
         AABB searchBox = new AABB(
@@ -316,6 +319,37 @@ public class GravityCoreBlockEntity extends BlockEntity {
 
     // read access for the client settings screen (the client BE carries
     // authoritative data via the update tag)
+    // ---- GravityFieldLookup.Source (fluid gravity queries) ----
+    // SAME-GRID semantics: the radial direction is computed in the core's
+    // own block grid (a ship core bends ship fluids in shipyard space)
+
+    @Override
+    public @Nullable net.minecraft.core.Direction fluidDownAt(net.minecraft.core.BlockPos pos) {
+        Vec3 delta = Vec3.atCenterOf(pos).subtract(Vec3.atCenterOf(worldPosition));
+        double distance = delta.length();
+        if (distance > range || distance < 1.0) {
+            return null;
+        }
+        // attract: down points toward the core; repulse: away from it
+        Vec3 down = attracting ? delta.scale(-1) : delta;
+        return net.minecraft.core.Direction.getNearest(down.x, down.y, down.z);
+    }
+
+    @Override
+    public int sourceMaxRange() {
+        return range + 2;
+    }
+
+    @Override
+    public net.minecraft.core.BlockPos sourcePos() {
+        return worldPosition;
+    }
+
+    @Override
+    public int sourcePriority() {
+        return 1;
+    }
+
     public int getRange() {
         return range;
     }

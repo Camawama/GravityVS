@@ -47,7 +47,8 @@ import net.minecraft.world.phys.Vec3;
  * normalized room stays normalized even when exterior plating fields bleed
  * into it.
  */
-public class GravityNormalizerBlockEntity extends BlockEntity {
+public class GravityNormalizerBlockEntity extends BlockEntity
+    implements net.cama.gravityapivs.util.GravityFieldLookup.Source {
 
     // rotateVelocity=false: world momentum is conserved on zone entry (see
     // GravityPlatingBlockEntity.PLATING_ROTATION_PARAMS)
@@ -72,6 +73,10 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
     // entity-query staggering, same scheme as GravityPlatingBlockEntity
     private @Nullable List<Entity> cachedEntities = null;
     private long entitiesCacheExpiry = Long.MIN_VALUE;
+
+    // the ship-clamped zone computed by the last tick, for fluid queries
+    // (grid space; null while the block is not actively ticking)
+    private @Nullable AABB fluidZoneCache = null;
 
     public GravityNormalizerBlockEntity(BlockPos pos, BlockState state) {
         super(GravityBlocks.GRAVITY_NORMALIZER_BLOCK_ENTITY.get(), pos, state);
@@ -141,6 +146,7 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
         Ship ship = VSGameUtilsKt.getShipManagingPos(world, blockPos);
 
         AABB zone = be.getZoneBox();
+        be.fluidZoneCache = null;
 
         // On a ship the field is CONTAINED INSIDE THE SHIP: the zone is
         // clamped to the ship's actual block extent (Valkyrien Skies keeps
@@ -162,6 +168,9 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
             }
             zone = zone.intersect(shipBlocks);
         }
+
+        be.fluidZoneCache = zone;
+        net.cama.gravityapivs.util.GravityFieldLookup.register(world, blockPos, be);
 
         AABB searchBox = zone;
         if (ship != null) {
@@ -311,6 +320,29 @@ public class GravityNormalizerBlockEntity extends BlockEntity {
 
     // read access for the client settings screen (the client BE carries
     // authoritative data via the update tag)
+    // ---- GravityFieldLookup.Source (fluid gravity queries) ----
+
+    @Override
+    public @Nullable Direction fluidDownAt(net.minecraft.core.BlockPos pos) {
+        AABB zone = fluidZoneCache;
+        return zone != null && zone.contains(Vec3.atCenterOf(pos)) ? localDown : null;
+    }
+
+    @Override
+    public int sourceMaxRange() {
+        return range + 2;
+    }
+
+    @Override
+    public net.minecraft.core.BlockPos sourcePos() {
+        return worldPosition;
+    }
+
+    @Override
+    public int sourcePriority() {
+        return 3;
+    }
+
     public Direction getLocalDown() {
         return localDown;
     }
