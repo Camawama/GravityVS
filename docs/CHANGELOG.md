@@ -1,5 +1,36 @@
 # GravityVS Changelog
 
+## Unreleased (2.0.0-dev) — 2026-08-16 (fluid wrap-around v2 + seamless boundary rendering)
+
+- **Liquid wraps over every edge of a plated/core cube.** The first
+  tie-break fix only covered horizontal-vs-horizontal (equator) ties; the
+  top/bottom EDGE cells of a cube sit at exact vertical ties
+  (horizontal axis vs Y), where the tangential bias is perpendicular to
+  both tied axes — so `getNearest`'s Y-first enum order still won, and
+  side-face streams reaching a top edge "fell" straight back onto the face
+  they came from ("reaches the edge and just stops"). Vertical near-ties
+  now prefer the horizontal (core-ward) axis: the edge cell falls sideways
+  into the next face's cell and crosses the edge, while the reverse
+  direction still works through planar spread. Every edge crossing is a
+  falling step, which refreshes the spread budget — one source can cover
+  an entire 3x3x3 cube on every face.
+
+- **Seamless fluid rendering into gravity fields.** The cross-frame
+  isolation now uses ASYMMETRIC semantics: culling decisions still treat
+  foreign-frame fluid as empty (holes stay closed), but height-shaping
+  decisions (full-column checks, side and diagonal corner-height
+  averaging) treat present foreign-frame fluid as a FULL column — both
+  sides of a boundary ramp up to meet each other, giving the vanilla
+  higher-touches-lower connected-ramp look instead of a truncated elbow.
+  Also found by audit and fixed: the boundary routing only scanned the 6
+  face neighbors, but vanilla rendering consults an 18-cell neighborhood
+  (diagonals and the 3x3 ring above) — cells touching a rotated cell only
+  diagonally stayed on raw vanilla semantics while their neighbor used
+  isolation, producing mismatched shared corner heights (visible slits
+  along the one-cell boundary strip, part of the reported "cut off"). The
+  routing scan now covers the exact consult set, so adjacent cells can
+  never disagree about shared corners.
+
 ## Unreleased (2.0.0-dev) — 2026-08-16 (shadows, fluid seams, core wrap-around)
 
 - **Entity shadows adapt to gravity.** The circle shadow stays

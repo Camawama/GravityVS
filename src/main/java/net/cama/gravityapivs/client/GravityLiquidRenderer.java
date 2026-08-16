@@ -53,18 +53,32 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * ({@code ForgeHooksClient.getFluidSprites}, {@code IClientFluidTypeExtensions}
  * tint, {@code shouldDisplayFluidOverlay} overlay sprites) are preserved.
  *
- * CROSS-FRAME ISOLATION: neighbor fluid living in a different gravity frame
- * (per {@link GravityFieldLookup#fluidDownAt}) renders its surface on
- * different axes and can never actually cover a face it would cull here, so
- * for every fluid-derived decision — same-fluid merging/culling, the
- * "fluid above me" full-column check, the backward-up-face check, and
- * corner-height averaging (including diagonal samples) — such fluid is
- * treated as empty (see {@link #effectiveFluid}). Cells on both sides of a
- * frame boundary then each render complete closed surfaces (slight overdraw,
- * no holes; the 0.001 face inset prevents z-fighting). Solid-BLOCK occlusion
- * is frame-independent and deliberately unaffected. When every consulted
- * neighbor shares the cell's frame, output is identical to the plain port —
- * which, on the identity basis (down == DOWN), is identical to vanilla.
+ * CROSS-FRAME ISOLATION (asymmetric): neighbor fluid living in a different
+ * gravity frame (per {@link GravityFieldLookup#fluidDownAt}) renders its
+ * surface on different axes, so the two frames' geometry never stitches
+ * face-to-face. Fluid-derived decisions split into two classes:
+ *
+ * <ul>
+ *   <li>CULLING (same-fluid face culls via {@code isNeighborSameFluid} /
+ *       {@code shouldRenderFace}, and the backward-up-face ring): cross-frame
+ *       fluid counts as EMPTY — it never actually covers a face it would
+ *       cull, so culling must ignore it or boundaries open see-through
+ *       holes;</li>
+ *   <li>HEIGHT SHAPING (the "fluid above me" full-column check and the
+ *       corner-height sampling, including diagonal samples and their
+ *       above-checks): cross-frame same-type fluid, where actually present,
+ *       counts as a FULL COLUMN (height 1.0) — the surface ramps up to meet
+ *       the adjoining stream like vanilla's higher-touches-lower ramp
+ *       instead of truncating at the boundary. Taller geometry can only
+ *       overlap, never reopen holes.</li>
+ * </ul>
+ *
+ * Both sides of a boundary then render complete, visually connected
+ * surfaces (slight overdraw; the 0.001 face insets prevent z-fighting).
+ * Solid-BLOCK occlusion is frame-independent and deliberately unaffected.
+ * When every consulted cell shares the cell's frame, output is identical to
+ * the plain port — which, on the identity basis (down == DOWN), is
+ * identical to vanilla.
  *
  * Thread-safety: called from chunk-building worker threads — no mutable
  * static state; the direction table is written once in the class initializer.
@@ -129,16 +143,24 @@ public final class GravityLiquidRenderer {
         BlockState eastState = level.getBlockState(eastPos);
         FluidState eastFluid = eastState.getFluidState();
 
-        // Cross-frame isolation: the fluid each neighbor cell contributes to
-        // this cell's decisions, with fluid in a different gravity frame
-        // masked to empty. One fluidDownAt query per neighbor (skipped when
-        // the neighbor holds no fluid), cached here for the whole call.
-        FluidState downFluidEff = effectiveFluid(level, down, downPos, downFluid);
-        FluidState upFluidEff = effectiveFluid(level, down, upPos, upFluid);
-        FluidState northFluidEff = effectiveFluid(level, down, northPos, northFluid);
-        FluidState southFluidEff = effectiveFluid(level, down, southPos, southFluid);
-        FluidState westFluidEff = effectiveFluid(level, down, westPos, westFluid);
-        FluidState eastFluidEff = effectiveFluid(level, down, eastPos, eastFluid);
+        // Frame checks for the 6 face neighbors: one fluidDownAt query each
+        // (skipped when the neighbor holds no fluid — an empty cell behaves
+        // identically in either frame), cached for the whole call. Per the
+        // class doc: CULLING sees cross-frame fluid as empty (the ...Eff
+        // states below); HEIGHT SHAPING sees it as a full column (the raw
+        // states plus these flags, further down).
+        boolean downSameFrame = downFluid.isEmpty() || sameFrame(level, down, downPos);
+        boolean upSameFrame = upFluid.isEmpty() || sameFrame(level, down, upPos);
+        boolean northSameFrame = northFluid.isEmpty() || sameFrame(level, down, northPos);
+        boolean southSameFrame = southFluid.isEmpty() || sameFrame(level, down, southPos);
+        boolean westSameFrame = westFluid.isEmpty() || sameFrame(level, down, westPos);
+        boolean eastSameFrame = eastFluid.isEmpty() || sameFrame(level, down, eastPos);
+        FluidState downFluidEff = downSameFrame ? downFluid : EMPTY_FLUID;
+        FluidState upFluidEff = upSameFrame ? upFluid : EMPTY_FLUID;
+        FluidState northFluidEff = northSameFrame ? northFluid : EMPTY_FLUID;
+        FluidState southFluidEff = southSameFrame ? southFluid : EMPTY_FLUID;
+        FluidState westFluidEff = westSameFrame ? westFluid : EMPTY_FLUID;
+        FluidState eastFluidEff = eastSameFrame ? eastFluid : EMPTY_FLUID;
 
         boolean renderUp = !isNeighborSameFluid(fluidState, upFluidEff);
         boolean renderDown =
@@ -161,9 +183,11 @@ public final class GravityLiquidRenderer {
         float shadeUp = level.getShade(gUp, true);
         Fluid fluid = fluidState.getType();
         // getHeight specialized to the cell itself (the cell's fluid always
-        // matches its own type), reusing the cached up-neighbor frame:
-        // cross-frame fluid "above" does not make this cell a full column.
-        float ownHeight = fluid.isSame(upFluidEff.getType()) ? 1.0F : fluidState.getOwnHeight();
+        // matches its own type). HEIGHT SHAPING: same-type fluid "above" (in
+        // this cell's frame) makes this a full column even when cross-frame —
+        // a stream entering the field keeps its full shape through the
+        // boundary elbow instead of truncating to its own partial height.
+        float ownHeight = fluid.isSame(upFluid.getType()) ? 1.0F : fluidState.getOwnHeight();
         float hNE;
         float hNW;
         float hSE;
@@ -174,10 +198,10 @@ public final class GravityLiquidRenderer {
             hSE = 1.0F;
             hSW = 1.0F;
         } else {
-            float hN = getHeight(level, fluid, northPos, northState, northFluidEff, down);
-            float hS = getHeight(level, fluid, southPos, southState, southFluidEff, down);
-            float hE = getHeight(level, fluid, eastPos, eastState, eastFluidEff, down);
-            float hW = getHeight(level, fluid, westPos, westState, westFluidEff, down);
+            float hN = getHeight(level, fluid, northPos, northState, northFluid, down, northSameFrame);
+            float hS = getHeight(level, fluid, southPos, southState, southFluid, down, southSameFrame);
+            float hE = getHeight(level, fluid, eastPos, eastState, eastFluid, down, eastSameFrame);
+            float hW = getHeight(level, fluid, westPos, westState, westFluid, down, westSameFrame);
             hNE = calculateAverageHeight(level, fluid, ownHeight, hN, hE,
                 northPos.relative(gEast), down);
             hNW = calculateAverageHeight(level, fluid, ownHeight, hN, hW,
@@ -376,12 +400,15 @@ public final class GravityLiquidRenderer {
     }
 
     /**
-     * A neighbor's fluid as this cell is allowed to see it: fluid in a
-     * different gravity frame renders on different axes and can never stitch
-     * with this cell's surface, so it is masked to empty — it never merges,
-     * never culls our faces, and contributes no height. Same-frame (and
-     * empty) fluid passes through untouched, keeping all-same-frame output
-     * identical to the unisolated port.
+     * CULLING mask: a neighbor's fluid as this cell's cull decisions may see
+     * it. Cross-frame fluid renders on different axes and never actually
+     * covers a face it would cull here, so it is masked to empty — it never
+     * merges and never culls our faces. Same-frame (and empty) fluid passes
+     * through untouched, keeping all-same-frame output identical to the
+     * unisolated port. Used per ring cell by
+     * {@link #shouldRenderBackwardUpFace}; the six face neighbors get the
+     * same masking inline in {@code tesselate} from the cached frame flags.
+     * Height shaping deliberately does NOT use this — see the class doc.
      */
     private static FluidState effectiveFluid(
         BlockGetter level, Direction cellDown, BlockPos neighborPos, FluidState actual
@@ -451,7 +478,9 @@ public final class GravityLiquidRenderer {
     }
 
     // ------------------------------------------------------------------
-    // heights (vanilla corner averaging; "above" mapped through the basis)
+    // heights (vanilla corner averaging; "above" mapped through the basis;
+    // HEIGHT SHAPING: cross-frame same-type fluid counts as a full column
+    // — see the class doc)
     // ------------------------------------------------------------------
 
     private static float calculateAverageHeight(
@@ -490,21 +519,26 @@ public final class GravityLiquidRenderer {
 
     private static float getHeight(BlockAndTintGetter level, Fluid fluid, BlockPos pos, Direction down) {
         BlockState state = level.getBlockState(pos);
-        // diagonal corner sample: cross-frame fluid contributes no height
-        return getHeight(level, fluid, pos, state,
-            effectiveFluid(level, down, pos, state.getFluidState()), down);
+        FluidState fluidState = state.getFluidState();
+        // diagonal corner sample: query the frame here (outside the 6-cache)
+        boolean posSameFrame = fluidState.isEmpty() || sameFrame(level, down, pos);
+        return getHeight(level, fluid, pos, state, fluidState, down, posSameFrame);
     }
 
     private static float getHeight(
         BlockAndTintGetter level, Fluid fluid, BlockPos pos,
-        BlockState blockState, FluidState fluidState, Direction down
+        BlockState blockState, FluidState fluidState, Direction down, boolean posSameFrame
     ) {
         if (fluid.isSame(fluidState.getType())) {
-            BlockPos abovePos = pos.relative(down.getOpposite());
-            BlockState above = level.getBlockState(abovePos);
-            // cross-frame fluid "above" does not make this cell a full column
-            return fluid.isSame(above.getFluidState().getType()) && sameFrame(level, down, abovePos)
-                ? 1.0F : fluidState.getOwnHeight();
+            if (!posSameFrame) {
+                // cross-frame column: its level lives on another axis; count
+                // it as full so corners ramp up to meet it at the boundary
+                return 1.0F;
+            }
+            // vanilla above-check, deliberately frame-free: same-type fluid
+            // above counts as full even when cross-frame (shaping errs taller)
+            BlockState above = level.getBlockState(pos.relative(down.getOpposite()));
+            return fluid.isSame(above.getFluidState().getType()) ? 1.0F : fluidState.getOwnHeight();
         } else {
             return !blockState.isSolid() ? 0.0F : -1.0F;
         }

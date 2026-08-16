@@ -333,16 +333,27 @@ public class GravityCoreBlockEntity extends BlockEntity
         // attract: down points toward the core; repulse: away from it
         Vec3 down = (attracting ? delta.scale(-1) : delta).normalize();
 
-        // Deterministic ROTATIONAL tie-break: the integer lattice puts every
-        // corner cell around the core at an exact 45-degree tie between two
+        // Deterministic tie-breaking. The integer lattice puts every edge/
+        // corner cell around a core at an EXACT 45-degree tie between two
         // cardinals, and Direction.getNearest breaks ties by enum order
-        // (Y, then Z, then X) — a fixed axis bias. Around the equator ring
-        // half the corners need the OTHER axis to forward water onto the
-        // next face, so wrapping flow stalled after two faces. A small
-        // tangential bias (down x worldY) resolves every equatorial tie in
-        // one consistent rotational sense, letting liquid circulate around
-        // all faces; it is far too small to affect non-tied cells, and
-        // vertical (pole) ties keep the default downward preference.
+        // (Y, then Z, then X) — a fixed axis bias that stalls wrapping flow:
+        //
+        // (1) VERTICAL ties (a horizontal axis vs Y, i.e. the top/bottom
+        //     edge cells of a cube): resolving to Y makes water at a top
+        //     edge fall straight back onto the face it came from — the
+        //     "reaches the edge and just stops" stall. Prefer the
+        //     HORIZONTAL axis instead (shrink the Y component slightly):
+        //     the tie cell then "falls" sideways into the adjacent face's
+        //     cell, crossing the edge — and the reverse direction still
+        //     works through planar spread. Each crossing is a falling step,
+        //     which refreshes the fluid's spread budget, so one source can
+        //     cover a whole cube.
+        // (2) HORIZONTAL-HORIZONTAL ties (equator corners): a small
+        //     tangential bias (down x worldY) resolves them all in one
+        //     consistent rotational sense so flow circulates.
+        //
+        // Both nudges are far too small to affect any non-tied cell.
+        down = new Vec3(down.x, down.y * 0.93, down.z);
         Vec3 tangent = new Vec3(-down.z, 0.0, down.x);
         if (tangent.lengthSqr() > 1.0E-6) {
             down = down.add(tangent.scale(0.05));
