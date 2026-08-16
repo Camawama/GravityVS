@@ -126,5 +126,30 @@ public final class GravityBlockHelper {
         return Direction.getNearest(down.x, down.y, down.z);
     }
 
+    /**
+     * Re-expresses a world-space POSITION in the block grid that contains
+     * {@code pos}: shipyard coordinates when the position is managed by a
+     * Valkyrien Skies ship, unchanged otherwise.
+     *
+     * PLACEMENT-FLOW WARNING: inside {@code BlockItem.place} /
+     * {@code getStateForPlacement}, Valkyrien Skies' block_placement mixins
+     * have TEMPORARILY transformed the placing player for ship placements —
+     * their position is already shipyard coordinates and their rotation
+     * fields already ship-grid look angles ({@code PlayerUtil
+     * .transformPlayerTemporarily}). Do NOT run the placer's position or a
+     * look-derived vector through this transform there — it double-rotates.
+     * See {@code Rotation24.fromPlacement} for the correct pattern.
+     */
+    public static Vec3 worldPositionToGrid(net.minecraft.world.level.Level level, net.minecraft.core.BlockPos pos, Vec3 worldPos) {
+        org.valkyrienskies.core.api.ships.Ship ship =
+            org.valkyrienskies.mod.common.VSGameUtilsKt.getShipManagingPos(level, pos);
+        if (ship == null) {
+            return worldPos;
+        }
+        org.joml.Vector3d v = new org.joml.Vector3d(worldPos.x, worldPos.y, worldPos.z);
+        ship.getTransform().getWorldToShipMatrix().transformPosition(v);
+        return new Vec3(v.x, v.y, v.z);
+    }
+
     private GravityBlockHelper() {}
 }

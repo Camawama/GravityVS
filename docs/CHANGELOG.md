@@ -1,5 +1,30 @@
 # GravityVS Changelog
 
+## Unreleased (2.0.0-dev) — 2026-08-16 (sticky chest fixes, second round)
+
+- **Sticky chest yaw on rotated ships — real root cause found and fixed.**
+  Valkyrien Skies' own block_placement mixins wrap `BlockItem.place` in
+  `PlayerUtil.transformPlayerTemporarily`: for ship placements, while
+  `getStateForPlacement` runs, the player's rotation fields have ALREADY
+  been rewritten to ship-grid look angles (derived from the true world
+  look, which includes this mod's gravity frame) and their position to
+  shipyard coordinates. Both previous spin derivations therefore
+  double-rotated: the look-based one re-applied the gravity frame on top of
+  the already-grid-space angles, and the position-based one ran the
+  already-shipyard position through the world-to-ship transform again. The
+  spin now uses the raw rotation fields verbatim during ship placement
+  (exactly what VS prepared) and the gravity-frame-aware world look off
+  ships. The full pitched look is used — the spin candidates are
+  perpendicular to the bottom face, so the dot product inherently projects
+  out the bottom component (wall placements looking "up the wall" work).
+  The bottom face was always computed from the frame quaternion (untouched
+  by VS's temporary transform), which is why up/down was correct in every
+  round. `GravityBlockHelper.worldPositionToGrid` carries a prominent
+  warning about VS's temporary placement transform.
+
+  An earlier entry here attributed the failure to client/server frame-twist
+  divergence — that diagnosis was wrong and is superseded by the above.
+
 ## Unreleased (2.0.0-dev) — 2026-08-16 (sticky chest fixes)
 
 - **Sticky chest orients correctly on rotated Valkyrien Skies ships.**

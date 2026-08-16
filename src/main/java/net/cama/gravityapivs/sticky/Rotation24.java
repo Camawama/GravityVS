@@ -143,11 +143,28 @@ public final class Rotation24 {
     /**
      * Picks the orientation for a block being placed by {@code placer} at
      * {@code pos}: the bottom face is the placer's gravity down and the spin
-     * turns the block's front toward the placer — computed as world-space
-     * VECTORS, re-expressed in the BLOCK GRID at the placement position
-     * (shipyard space on Valkyrien Skies ships), and only then snapped to
-     * grid cardinals. Snapping in world space first — the old behavior —
-     * picked the wrong axes on any ship whose rotation was off-identity.
+     * turns the block's front toward the placer, both in the BLOCK GRID of
+     * the placement position (shipyard space on Valkyrien Skies ships).
+     *
+     * MUST be called from within the block-placement flow
+     * ({@code BlockItem.place} / {@code getStateForPlacement}). Valkyrien
+     * Skies' block_placement mixins wrap that flow in
+     * {@code PlayerUtil.transformPlayerTemporarily}: while it runs, a
+     * ship-placement player's ROTATION FIELDS have been rewritten to
+     * ship-grid look angles (derived from {@code getLookAngle()}, which
+     * already includes this mod's gravity frame) and their POSITION to
+     * shipyard coordinates. So on ships the raw yaw/pitch ARE the grid-space
+     * look and must be used verbatim — re-applying the gravity frame
+     * ({@code getLookAngle()} does) or the world-to-ship transform (a
+     * position-based derivation does) double-rotates, which is exactly what
+     * broke the two previous attempts. Off ships the VS wrap is inactive and
+     * the true world look is the grid look.
+     *
+     * The full (pitched) look is used; {@link #spinForFront}'s candidates
+     * are perpendicular to the bottom face, so dotting inherently projects
+     * out the bottom component — standing on a wall and looking "up the
+     * wall" picks the vertical-in-grid front correctly.
+     *
      * Null-safe: defaults to (DOWN, 0).
      */
     public static Orientation fromPlacement(
@@ -163,11 +180,17 @@ public final class Rotation24 {
         );
         Direction bottom = Direction.getNearest(gridDown.x, gridDown.y, gridDown.z);
 
-        // front faces TOWARD the placer, i.e. opposite their facing vector
-        net.minecraft.world.phys.Vec3 gridFront = GravityBlockHelper.worldDirectionToGrid(
-            level, pos, GravityBlockHelper.placementFacingVector(placer).scale(-1)
-        );
-        return new Orientation(bottom, spinForFront(bottom, gridFront));
+        boolean onShip =
+            org.valkyrienskies.mod.common.VSGameUtilsKt.getShipManagingPos(level, pos) != null;
+        net.minecraft.world.phys.Vec3 gridLook = onShip
+            // VS's temporary placement transform: raw angles are already the
+            // ship-grid look — use them verbatim (see javadoc)
+            ? net.cama.gravityapivs.util.RotationUtil.rotToVec(placer.getYRot(), placer.getXRot())
+            // off-ship: grid == world; the true world look (gravity-frame aware)
+            : placer.getLookAngle();
+
+        // front faces TOWARD the placer, i.e. opposite the look
+        return new Orientation(bottom, spinForFront(bottom, gridLook.scale(-1)));
     }
 
     /**
