@@ -1,5 +1,40 @@
 # GravityVS Changelog
 
+## Unreleased (2.0.0-dev) — 2026-08-16 (shadows, fluid seams, core wrap-around)
+
+- **Entity shadows adapt to gravity.** The circle shadow stays
+  world-oriented (it stands in for sunlight), but for rotated entities it
+  is now an ELLIPSE centered under the model's center: the long axis
+  follows the model's world-horizontal lying direction and grows from the
+  vanilla radius toward half the model height as the model tips over — a
+  player on a wall shades a person-length strip of ground under their
+  body; upright and upside-down players keep the vanilla-size circle
+  (centered under the body either way). Faithful port of the vanilla
+  shadow pass with per-corner elliptical UVs and the fade referenced to
+  the model's lowest extent.
+
+- **Fluid rendering: no more transparent gaps at gravity boundaries.**
+  Cells rendered in different gravity frames each culled faces and
+  averaged corner heights assuming their neighbors shared their frame —
+  at a world-down/rotated boundary each side culled faces the other never
+  covered. Cross-frame neighbors are now treated as containing no fluid
+  for every fluid-derived render decision (face culling, same-fluid
+  merging, corner-height averaging, full-column checks), so both sides of
+  a boundary render complete closed surfaces that visually meet (vanilla's
+  0.001 face insets prevent z-fighting). Vanilla-framed cells adjacent to
+  a rotated cell route through the ported renderer's identity basis;
+  scenes with no rotated fluid never leave the vanilla path.
+
+- **Liquid wraps all the way around gravity cores.** On the integer
+  lattice every corner cell around a core sits at an exact 45-degree tie
+  between two cardinals, and vanilla's `Direction.getNearest` breaks ties
+  by a fixed axis order — so wrapping flow always stalled at half the
+  corners (the observed "only flowed out to two faces"). Core fluid
+  gravity now applies a small deterministic tangential bias that resolves
+  every equatorial tie in one consistent rotational sense, letting liquid
+  circulate around all faces; the bias is far too small to affect
+  non-tied cells, and pole ties keep their downward preference.
+
 ## Unreleased (2.0.0-dev) — 2026-08-16 (gravity fluids: test feedback round)
 
 - **Gravity plating is waterloggable.** Plates are thin panels sharing

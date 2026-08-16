@@ -331,7 +331,22 @@ public class GravityCoreBlockEntity extends BlockEntity
             return null;
         }
         // attract: down points toward the core; repulse: away from it
-        Vec3 down = attracting ? delta.scale(-1) : delta;
+        Vec3 down = (attracting ? delta.scale(-1) : delta).normalize();
+
+        // Deterministic ROTATIONAL tie-break: the integer lattice puts every
+        // corner cell around the core at an exact 45-degree tie between two
+        // cardinals, and Direction.getNearest breaks ties by enum order
+        // (Y, then Z, then X) — a fixed axis bias. Around the equator ring
+        // half the corners need the OTHER axis to forward water onto the
+        // next face, so wrapping flow stalled after two faces. A small
+        // tangential bias (down x worldY) resolves every equatorial tie in
+        // one consistent rotational sense, letting liquid circulate around
+        // all faces; it is far too small to affect non-tied cells, and
+        // vertical (pole) ties keep the default downward preference.
+        Vec3 tangent = new Vec3(-down.z, 0.0, down.x);
+        if (tangent.lengthSqr() > 1.0E-6) {
+            down = down.add(tangent.scale(0.05));
+        }
         return net.minecraft.core.Direction.getNearest(down.x, down.y, down.z);
     }
 

@@ -24,6 +24,11 @@ import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.level.LevelReader;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.core.BlockPos;
+import net.minecraft.util.Mth;
+import net.minecraft.world.level.block.RenderShape;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
 @Mixin(EntityRenderDispatcher.class)
 public abstract class EntityRenderDispatcherMixin {
@@ -102,13 +107,31 @@ public abstract class EntityRenderDispatcherMixin {
         }
     }
     
+    @org.spongepowered.asm.mixin.Shadow
+    @org.spongepowered.asm.mixin.Final
+    private static net.minecraft.client.renderer.RenderType SHADOW_RENDER_TYPE;
+
+    @org.spongepowered.asm.mixin.Shadow
+    private static void shadowVertex(
+        PoseStack.Pose pose, VertexConsumer consumer, float alpha,
+        float x, float y, float z, float u, float v
+    ) {
+        throw new AssertionError();
+    }
+
     /**
      * The vanilla circle shadow is a stylistic stand-in for sunlight, so it
      * must NOT rotate with gravity — an upside-down player still casts a
-     * normal shadow on the ground below, in world orientation.
+     * world-oriented shadow on the ground below. But it must ADAPT: a player
+     * lying sideways on a wall shades a longer strip of ground, centered
+     * under the MODEL's center rather than under the feet point. For
+     * visually-default entities vanilla runs untouched; rotated entities get
+     * a ported shadow with an elliptical, model-centered blob (long axis
+     * along the model's world-horizontal lying direction, growing toward
+     * half the model height as the model tips over).
      * inject_render_2 has already applied the player->world physics rotation
-     * to the pose (needed for hitbox rendering), so undo it around the shadow
-     * call and let vanilla render its ordinary world-space shadow.
+     * to the pose (needed for hitbox rendering), so it is undone around the
+     * shadow rendering either way.
      */
     @WrapOperation(
         method = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;render(Lnet/minecraft/world/entity/Entity;DDDFFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V",
@@ -130,8 +153,178 @@ public abstract class EntityRenderDispatcherMixin {
         // (mulPose only reads the quaternion, so the shared canonical
         // instance is safe to pass directly)
         matrices.mulPose(comp.getCurrentRotation());
-        original.call(matrices, vertexConsumers, entity, opacity, tickDelta, world, radius);
+        if (comp.isVisuallyDefault()) {
+            original.call(matrices, vertexConsumers, entity, opacity, tickDelta, world, radius);
+        }
+        else {
+            gravityapivs$renderRotatedShadow(matrices, vertexConsumers, entity, opacity, tickDelta, world, radius, comp);
+        }
         matrices.popPose();
+    }
+
+    /**
+     * Port of vanilla renderShadow (verified against the 1.20.1-47.4.16
+     * decompiled source) with three generalizations: the blob is CENTERED
+     * under the rotated model's center; it is an ELLIPSE whose long axis
+     * follows the model's world-horizontal lying direction (long radius
+     * grows from the vanilla radius toward half the model height as the
+     * model tips over); and the vertical fade references the model's lowest
+     * extent instead of the feet. Geometry stays world-aligned and is
+     * emitted relative to the entity's render position, matching the pose.
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private void gravityapivs$renderRotatedShadow(
+        PoseStack matrices, MultiBufferSource buffers, Entity entity,
+        float weight, float tickDelta, LevelReader world, float radius,
+        net.cama.gravityapivs.capabilities.GravityCapabilityImpl comp
+    ) {
+        if (weight <= 0.0F) {
+            return;
+        }
+        if (entity instanceof net.minecraft.world.entity.Mob mob && mob.isBaby()) {
+            radius *= 0.5F;
+        }
+
+        // entity render position — the pose origin (vertex offsets are
+        // relative to it, exactly like vanilla)
+        double ex = Mth.lerp((double) tickDelta, entity.xOld, entity.getX());
+        double ey = Mth.lerp((double) tickDelta, entity.yOld, entity.getY());
+        double ez = Mth.lerp((double) tickDelta, entity.zOld, entity.getZ());
+
+        Quaternionf renderRotation = comp.getRenderRotation(tickDelta);
+        Vec3 up = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), renderRotation);
+        float height = entity.getBbHeight();
+
+        // model center; the blob centers under it
+        double cx = ex + up.x * (height * 0.5);
+        double cy = ey + up.y * (height * 0.5);
+        double cz = ez + up.z * (height * 0.5);
+
+        // lying direction = world-horizontal part of the model's up;
+        // horizontality 0 (upright/upside-down) .. 1 (fully sideways)
+        double lyingX = up.x;
+        double lyingZ = up.z;
+        double horizontality = Math.sqrt(lyingX * lyingX + lyingZ * lyingZ);
+        double longX;
+        double longZ;
+        if (horizontality > 1.0E-4) {
+            longX = lyingX / horizontality;
+            longZ = lyingZ / horizontality;
+        }
+        else {
+            longX = 0.0;
+            longZ = 1.0;
+        }
+        // perpendicular (short) axis in the ground plane
+        double perpX = -longZ;
+        double perpZ = longX;
+
+        float longRadius = (float) (radius + Math.max(0.0, height * 0.5 - radius) * horizontality);
+        float shortRadius = radius;
+
+        // the model's lowest world-Y extent — fade and sampling reference
+        double lowY = cy - (height * 0.5) * Math.abs(up.y);
+
+        float depth = Math.min(weight / 0.5F, longRadius);
+        int minX = Mth.floor(cx - longRadius);
+        int maxX = Mth.floor(cx + longRadius);
+        int minY = Mth.floor(lowY - depth);
+        int maxY = Mth.floor(lowY);
+        int minZ = Mth.floor(cz - longRadius);
+        int maxZ = Mth.floor(cz + longRadius);
+
+        PoseStack.Pose pose = matrices.last();
+        VertexConsumer consumer = buffers.getBuffer(SHADOW_RENDER_TYPE);
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+
+        for (int z = minZ; z <= maxZ; z++) {
+            for (int x = minX; x <= maxX; x++) {
+                cursor.set(x, 0, z);
+                net.minecraft.world.level.chunk.ChunkAccess chunk = world.getChunk(cursor);
+
+                for (int y = minY; y <= maxY; y++) {
+                    cursor.setY(y);
+                    float alpha = weight - (float) (lowY - cursor.getY()) * 0.5F;
+                    gravityapivs$rotatedBlockShadow(
+                        pose, consumer, chunk, world, cursor,
+                        ex, ey, ez, cx, cz,
+                        longX, longZ, perpX, perpZ, longRadius, shortRadius, alpha
+                    );
+                }
+            }
+        }
+    }
+
+    /**
+     * Port of vanilla renderBlockShadow with an elliptical, rotatable UV
+     * mapping: u runs along the blob's long axis, v along the short axis,
+     * both measured from the blob CENTER (cx, cz) — vertex positions stay
+     * relative to the entity render position to match the pose.
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private static void gravityapivs$rotatedBlockShadow(
+        PoseStack.Pose pose, VertexConsumer consumer,
+        net.minecraft.world.level.chunk.ChunkAccess chunk, LevelReader world, BlockPos pos,
+        double ex, double ey, double ez, double cx, double cz,
+        double longX, double longZ, double perpX, double perpZ,
+        float longRadius, float shortRadius, float alpha
+    ) {
+        BlockPos below = pos.below();
+        BlockState belowState = chunk.getBlockState(below);
+        if (belowState.getRenderShape() == RenderShape.INVISIBLE || world.getMaxLocalRawBrightness(pos) <= 3) {
+            return;
+        }
+        if (!belowState.isCollisionShapeFullBlock(chunk, below)) {
+            return;
+        }
+        VoxelShape shape = belowState.getShape(chunk, below);
+        if (shape.isEmpty()) {
+            return;
+        }
+
+        float brightness = net.minecraft.client.renderer.LightTexture.getBrightness(
+            world.dimensionType(), world.getMaxLocalRawBrightness(pos)
+        );
+        float quadAlpha = alpha * 0.5F * brightness;
+        if (quadAlpha < 0.0F) {
+            return;
+        }
+        if (quadAlpha > 1.0F) {
+            quadAlpha = 1.0F;
+        }
+
+        AABB bounds = shape.bounds();
+        double x0 = pos.getX() + bounds.minX;
+        double x1 = pos.getX() + bounds.maxX;
+        double surfaceY = pos.getY() + bounds.minY;
+        double z0 = pos.getZ() + bounds.minZ;
+        double z1 = pos.getZ() + bounds.maxZ;
+
+        float fy = (float) (surfaceY - ey);
+
+        // per-corner elliptical UVs about the blob center
+        float u00 = gravityapivs$shadowU(x0, z0, cx, cz, longX, longZ, longRadius);
+        float u01 = gravityapivs$shadowU(x0, z1, cx, cz, longX, longZ, longRadius);
+        float u11 = gravityapivs$shadowU(x1, z1, cx, cz, longX, longZ, longRadius);
+        float u10 = gravityapivs$shadowU(x1, z0, cx, cz, longX, longZ, longRadius);
+        float v00 = gravityapivs$shadowU(x0, z0, cx, cz, perpX, perpZ, shortRadius);
+        float v01 = gravityapivs$shadowU(x0, z1, cx, cz, perpX, perpZ, shortRadius);
+        float v11 = gravityapivs$shadowU(x1, z1, cx, cz, perpX, perpZ, shortRadius);
+        float v10 = gravityapivs$shadowU(x1, z0, cx, cz, perpX, perpZ, shortRadius);
+
+        shadowVertex(pose, consumer, quadAlpha, (float) (x0 - ex), fy, (float) (z0 - ez), u00, v00);
+        shadowVertex(pose, consumer, quadAlpha, (float) (x0 - ex), fy, (float) (z1 - ez), u01, v01);
+        shadowVertex(pose, consumer, quadAlpha, (float) (x1 - ex), fy, (float) (z1 - ez), u11, v11);
+        shadowVertex(pose, consumer, quadAlpha, (float) (x1 - ex), fy, (float) (z0 - ez), u10, v10);
+    }
+
+    @org.spongepowered.asm.mixin.Unique
+    private static float gravityapivs$shadowU(
+        double px, double pz, double cx, double cz,
+        double axisX, double axisZ, float axisRadius
+    ) {
+        double along = (px - cx) * axisX + (pz - cz) * axisZ;
+        return (float) (-along / 2.0 / axisRadius + 0.5);
     }
 
     @ModifyVariable(

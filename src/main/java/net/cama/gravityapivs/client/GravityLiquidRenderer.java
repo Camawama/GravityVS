@@ -3,6 +3,7 @@ package net.cama.gravityapivs.client;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 
 import net.cama.gravityapivs.sticky.Rotation24;
+import net.cama.gravityapivs.util.GravityFieldLookup;
 
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
@@ -15,6 +16,7 @@ import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
@@ -51,6 +53,19 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * ({@code ForgeHooksClient.getFluidSprites}, {@code IClientFluidTypeExtensions}
  * tint, {@code shouldDisplayFluidOverlay} overlay sprites) are preserved.
  *
+ * CROSS-FRAME ISOLATION: neighbor fluid living in a different gravity frame
+ * (per {@link GravityFieldLookup#fluidDownAt}) renders its surface on
+ * different axes and can never actually cover a face it would cull here, so
+ * for every fluid-derived decision — same-fluid merging/culling, the
+ * "fluid above me" full-column check, the backward-up-face check, and
+ * corner-height averaging (including diagonal samples) — such fluid is
+ * treated as empty (see {@link #effectiveFluid}). Cells on both sides of a
+ * frame boundary then each render complete closed surfaces (slight overdraw,
+ * no holes; the 0.001 face inset prevents z-fighting). Solid-BLOCK occlusion
+ * is frame-independent and deliberately unaffected. When every consulted
+ * neighbor shares the cell's frame, output is identical to the plain port —
+ * which, on the identity basis (down == DOWN), is identical to vanilla.
+ *
  * Thread-safety: called from chunk-building worker threads — no mutable
  * static state; the direction table is written once in the class initializer.
  */
@@ -58,6 +73,9 @@ public final class GravityLiquidRenderer {
 
     private static final float MAX_FLUID_HEIGHT = 0.8888889F;
     private static final float EPS = 0.001F;
+
+    /** Mask for cross-frame neighbor fluid (see {@link #effectiveFluid}). */
+    private static final FluidState EMPTY_FLUID = Fluids.EMPTY.defaultFluidState();
 
     /** Grid image of each local direction, per down: [down ordinal][local ordinal]. */
     private static final Direction[][] LOCAL_TO_GRID = new Direction[6][6];
@@ -92,31 +110,48 @@ public final class GravityLiquidRenderer {
         float green = (float) (tint >> 8 & 255) / 255.0F;
         float blue = (float) (tint & 255) / 255.0F;
 
-        BlockState downState = level.getBlockState(pos.relative(gDown));
+        BlockPos downPos = pos.relative(gDown);
+        BlockState downState = level.getBlockState(downPos);
         FluidState downFluid = downState.getFluidState();
-        BlockState upState = level.getBlockState(pos.relative(gUp));
+        BlockPos upPos = pos.relative(gUp);
+        BlockState upState = level.getBlockState(upPos);
         FluidState upFluid = upState.getFluidState();
-        BlockState northState = level.getBlockState(pos.relative(gNorth));
+        BlockPos northPos = pos.relative(gNorth);
+        BlockState northState = level.getBlockState(northPos);
         FluidState northFluid = northState.getFluidState();
-        BlockState southState = level.getBlockState(pos.relative(gSouth));
+        BlockPos southPos = pos.relative(gSouth);
+        BlockState southState = level.getBlockState(southPos);
         FluidState southFluid = southState.getFluidState();
-        BlockState westState = level.getBlockState(pos.relative(gWest));
+        BlockPos westPos = pos.relative(gWest);
+        BlockState westState = level.getBlockState(westPos);
         FluidState westFluid = westState.getFluidState();
-        BlockState eastState = level.getBlockState(pos.relative(gEast));
+        BlockPos eastPos = pos.relative(gEast);
+        BlockState eastState = level.getBlockState(eastPos);
         FluidState eastFluid = eastState.getFluidState();
 
-        boolean renderUp = !isNeighborSameFluid(fluidState, upFluid);
+        // Cross-frame isolation: the fluid each neighbor cell contributes to
+        // this cell's decisions, with fluid in a different gravity frame
+        // masked to empty. One fluidDownAt query per neighbor (skipped when
+        // the neighbor holds no fluid), cached here for the whole call.
+        FluidState downFluidEff = effectiveFluid(level, down, downPos, downFluid);
+        FluidState upFluidEff = effectiveFluid(level, down, upPos, upFluid);
+        FluidState northFluidEff = effectiveFluid(level, down, northPos, northFluid);
+        FluidState southFluidEff = effectiveFluid(level, down, southPos, southFluid);
+        FluidState westFluidEff = effectiveFluid(level, down, westPos, westFluid);
+        FluidState eastFluidEff = effectiveFluid(level, down, eastPos, eastFluid);
+
+        boolean renderUp = !isNeighborSameFluid(fluidState, upFluidEff);
         boolean renderDown =
-            shouldRenderFace(level, pos, fluidState, blockState, Direction.DOWN, downFluid, down)
+            shouldRenderFace(level, pos, fluidState, blockState, Direction.DOWN, downFluidEff, down)
             && !isFaceOccludedByNeighbor(level, pos, Direction.DOWN, MAX_FLUID_HEIGHT, downState, down);
         boolean renderNorth =
-            shouldRenderFace(level, pos, fluidState, blockState, Direction.NORTH, northFluid, down);
+            shouldRenderFace(level, pos, fluidState, blockState, Direction.NORTH, northFluidEff, down);
         boolean renderSouth =
-            shouldRenderFace(level, pos, fluidState, blockState, Direction.SOUTH, southFluid, down);
+            shouldRenderFace(level, pos, fluidState, blockState, Direction.SOUTH, southFluidEff, down);
         boolean renderWest =
-            shouldRenderFace(level, pos, fluidState, blockState, Direction.WEST, westFluid, down);
+            shouldRenderFace(level, pos, fluidState, blockState, Direction.WEST, westFluidEff, down);
         boolean renderEast =
-            shouldRenderFace(level, pos, fluidState, blockState, Direction.EAST, eastFluid, down);
+            shouldRenderFace(level, pos, fluidState, blockState, Direction.EAST, eastFluidEff, down);
 
         if (!(renderUp || renderDown || renderEast || renderWest || renderNorth || renderSouth)) {
             return;
@@ -125,7 +160,10 @@ public final class GravityLiquidRenderer {
         float shadeDown = level.getShade(gDown, true);
         float shadeUp = level.getShade(gUp, true);
         Fluid fluid = fluidState.getType();
-        float ownHeight = getHeight(level, fluid, pos, blockState, fluidState, down);
+        // getHeight specialized to the cell itself (the cell's fluid always
+        // matches its own type), reusing the cached up-neighbor frame:
+        // cross-frame fluid "above" does not make this cell a full column.
+        float ownHeight = fluid.isSame(upFluidEff.getType()) ? 1.0F : fluidState.getOwnHeight();
         float hNE;
         float hNW;
         float hSE;
@@ -136,18 +174,18 @@ public final class GravityLiquidRenderer {
             hSE = 1.0F;
             hSW = 1.0F;
         } else {
-            float hN = getHeight(level, fluid, pos.relative(gNorth), northState, northFluid, down);
-            float hS = getHeight(level, fluid, pos.relative(gSouth), southState, southFluid, down);
-            float hE = getHeight(level, fluid, pos.relative(gEast), eastState, eastFluid, down);
-            float hW = getHeight(level, fluid, pos.relative(gWest), westState, westFluid, down);
+            float hN = getHeight(level, fluid, northPos, northState, northFluidEff, down);
+            float hS = getHeight(level, fluid, southPos, southState, southFluidEff, down);
+            float hE = getHeight(level, fluid, eastPos, eastState, eastFluidEff, down);
+            float hW = getHeight(level, fluid, westPos, westState, westFluidEff, down);
             hNE = calculateAverageHeight(level, fluid, ownHeight, hN, hE,
-                pos.relative(gNorth).relative(gEast), down);
+                northPos.relative(gEast), down);
             hNW = calculateAverageHeight(level, fluid, ownHeight, hN, hW,
-                pos.relative(gNorth).relative(gWest), down);
+                northPos.relative(gWest), down);
             hSE = calculateAverageHeight(level, fluid, ownHeight, hS, hE,
-                pos.relative(gSouth).relative(gEast), down);
+                southPos.relative(gEast), down);
             hSW = calculateAverageHeight(level, fluid, ownHeight, hS, hW,
-                pos.relative(gSouth).relative(gWest), down);
+                southPos.relative(gWest), down);
         }
 
         double ox = (double) (pos.getX() & 15);
@@ -217,7 +255,7 @@ public final class GravityLiquidRenderer {
             vertex(consumer, ox, oy, oz, 0.0D, (double) hSW, 1.0D, r, g, b, alpha, uSW, vSW, light, gEast, gUp, gSouth);
             vertex(consumer, ox, oy, oz, 1.0D, (double) hSE, 1.0D, r, g, b, alpha, uSE, vSE, light, gEast, gUp, gSouth);
             vertex(consumer, ox, oy, oz, 1.0D, (double) hNE, 0.0D, r, g, b, alpha, uNE, vNE, light, gEast, gUp, gSouth);
-            if (fluidState.shouldRenderBackwardUpFace(level, pos.relative(gUp))) {
+            if (shouldRenderBackwardUpFace(level, fluidState, upPos, down)) {
                 vertex(consumer, ox, oy, oz, 0.0D, (double) hNW, 0.0D, r, g, b, alpha, uNW, vNW, light, gEast, gUp, gSouth);
                 vertex(consumer, ox, oy, oz, 1.0D, (double) hNE, 0.0D, r, g, b, alpha, uNE, vNE, light, gEast, gUp, gSouth);
                 vertex(consumer, ox, oy, oz, 1.0D, (double) hSE, 1.0D, r, g, b, alpha, uSE, vSE, light, gEast, gUp, gSouth);
@@ -332,6 +370,50 @@ public final class GravityLiquidRenderer {
         return neighbor.getType().isSame(state.getType());
     }
 
+    /** True when the fluid frame at {@code neighborPos} matches this cell's. */
+    private static boolean sameFrame(BlockGetter level, Direction cellDown, BlockPos neighborPos) {
+        return GravityFieldLookup.fluidDownAt(level, neighborPos) == cellDown;
+    }
+
+    /**
+     * A neighbor's fluid as this cell is allowed to see it: fluid in a
+     * different gravity frame renders on different axes and can never stitch
+     * with this cell's surface, so it is masked to empty — it never merges,
+     * never culls our faces, and contributes no height. Same-frame (and
+     * empty) fluid passes through untouched, keeping all-same-frame output
+     * identical to the unisolated port.
+     */
+    private static FluidState effectiveFluid(
+        BlockGetter level, Direction cellDown, BlockPos neighborPos, FluidState actual
+    ) {
+        return actual.isEmpty() || sameFrame(level, cellDown, neighborPos) ? actual : EMPTY_FLUID;
+    }
+
+    /**
+     * Vanilla {@code FluidState.shouldRenderBackwardUpFace} (scan the 3x3
+     * ring of cells in the plane "above"; any cell that is neither this
+     * fluid nor a solid renderer exposes the surface from below) with
+     * cross-frame isolation applied per ring cell: cross-frame fluid counts
+     * as empty, i.e. behaves like an exposed edge. The ring offsets stay the
+     * grid-plane offsets the vanilla method the port previously called here
+     * used, so all-same-frame scenes are unchanged.
+     */
+    private static boolean shouldRenderBackwardUpFace(
+        BlockAndTintGetter level, FluidState fluidState, BlockPos abovePos, Direction down
+    ) {
+        for (int i = -1; i <= 1; i++) {
+            for (int j = -1; j <= 1; j++) {
+                BlockPos ringPos = abovePos.offset(i, 0, j);
+                FluidState ringFluid = effectiveFluid(level, down, ringPos, level.getFluidState(ringPos));
+                if (!ringFluid.getType().isSame(fluidState.getType())
+                        && !level.getBlockState(ringPos).isSolidRender(level, ringPos)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static boolean isFaceOccludedByState(
         BlockGetter level, Direction gridDir, float height,
         BlockPos gridPos, BlockState state, Direction down
@@ -408,7 +490,9 @@ public final class GravityLiquidRenderer {
 
     private static float getHeight(BlockAndTintGetter level, Fluid fluid, BlockPos pos, Direction down) {
         BlockState state = level.getBlockState(pos);
-        return getHeight(level, fluid, pos, state, state.getFluidState(), down);
+        // diagonal corner sample: cross-frame fluid contributes no height
+        return getHeight(level, fluid, pos, state,
+            effectiveFluid(level, down, pos, state.getFluidState()), down);
     }
 
     private static float getHeight(
@@ -416,8 +500,11 @@ public final class GravityLiquidRenderer {
         BlockState blockState, FluidState fluidState, Direction down
     ) {
         if (fluid.isSame(fluidState.getType())) {
-            BlockState above = level.getBlockState(pos.relative(down.getOpposite()));
-            return fluid.isSame(above.getFluidState().getType()) ? 1.0F : fluidState.getOwnHeight();
+            BlockPos abovePos = pos.relative(down.getOpposite());
+            BlockState above = level.getBlockState(abovePos);
+            // cross-frame fluid "above" does not make this cell a full column
+            return fluid.isSame(above.getFluidState().getType()) && sameFrame(level, down, abovePos)
+                ? 1.0F : fluidState.getOwnHeight();
         } else {
             return !blockState.isSolid() ? 0.0F : -1.0F;
         }
