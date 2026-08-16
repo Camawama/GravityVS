@@ -85,6 +85,82 @@ public abstract class FlowingFluidMixin {
         return state.isEmpty() || state.getType().isSame((Fluid) (Object) this);
     }
 
+    /**
+     * THE FEED ARITHMETIC. Three relations move water between frames, and
+     * their costs make every cycle strictly level-decreasing (so no
+     * source-free water can sustain itself, and removal always drains):
+     *   - planar lateral (same or coupled frame): net -1 per hop
+     *   - cross-frame POUR (neighbor's own down points at us): net 0 — the
+     *     level passes THROUGH an edge crossing instead of resetting; the
+     *     pour graph alone is acyclic (sector downs never loop)
+     *   - solid-backed SIDE-ENTRY (the convex-corner wrap): net -1
+     * Full resets to 8 exist only for SAME-frame columns — pure vanilla.
+     */
+
+    /** Does the neighbor at {@code direction} pour into {@code pos} cross-frame? */
+    @Unique
+    private boolean gravityapivs$crossFeeds(LevelReader level, BlockPos pos, Direction direction) {
+        BlockPos neighborPos = pos.relative(direction);
+        FluidState neighbor = level.getFluidState(neighborPos);
+        if (neighbor.isEmpty() || !neighbor.getType().isSame((Fluid) (Object) this)) {
+            return false;
+        }
+        Direction neighborDown = gravityapivs$down(level, neighborPos);
+        if (neighborDown != direction.getOpposite()) {
+            return false;
+        }
+        if (neighborDown == gravityapivs$down(level, pos)) {
+            return false; // same frame: vanilla's above-rule handles it
+        }
+        // mutual-pit guard: two cells whose fields point at EACH OTHER
+        // (opposing attract fields) would sustain each other forever; only
+        // a true source may feed against our own down.
+        return neighbor.isSource() || gravityapivs$down(level, pos) != direction;
+    }
+
+    /**
+     * Solid-backed side-entry (feed side): our own frame-below neighbor may
+     * feed us laterally when both cells are IN a field, it lives in a
+     * different (non-opposite) frame, and it rests directly on solid in its
+     * own frame — a surface cell pouring over a one-block convex lip. The
+     * solid-backing keeps this on the surface: open water never layers
+     * outward. The in-field requirement keeps walls inside sideways fields
+     * from overflowing into normal-gravity space.
+     */
+    @Unique
+    private boolean gravityapivs$sideEntryFeeds(LevelReader level, BlockPos pos, Direction ourDown) {
+        if (!GravityFieldLookup.hasFieldAt(level, pos)) {
+            return false;
+        }
+        BlockPos neighborPos = pos.relative(ourDown);
+        if (!GravityFieldLookup.hasFieldAt(level, neighborPos)) {
+            return false;
+        }
+        FluidState neighbor = level.getFluidState(neighborPos);
+        if (neighbor.isEmpty() || !neighbor.getType().isSame((Fluid) (Object) this)) {
+            return false;
+        }
+        Direction neighborDown = gravityapivs$down(level, neighborPos);
+        if (neighborDown == ourDown || neighborDown == ourDown.getOpposite()) {
+            return false;
+        }
+        return level.getBlockState(neighborPos.relative(neighborDown)).blocksMotion();
+    }
+
+    /** Spread-side mirror of the side-entry (src is dst's frame-below). */
+    @Unique
+    private static boolean gravityapivs$sideEntrySpreadOk(LevelReader level, BlockPos src, BlockPos dst) {
+        if (!GravityFieldLookup.hasFieldAt(level, dst) || !GravityFieldLookup.hasFieldAt(level, src)) {
+            return false;
+        }
+        Direction srcDown = gravityapivs$down(level, src);
+        Direction dstDown = gravityapivs$down(level, dst);
+        if (srcDown == dstDown || srcDown == dstDown.getOpposite()) {
+            return false;
+        }
+        return level.getBlockState(src.relative(srcDown)).blocksMotion();
+    }
+
     // ------------------------------------------------------------------
     // spread(): the fall direction
     // ------------------------------------------------------------------
@@ -123,10 +199,51 @@ public abstract class FlowingFluidMixin {
         original.call(self, level, pos, state, down, fluidState);
     }
 
+    /**
+     * Defer-to-column, frame-aware. Vanilla suppresses side-spreading for a
+     * cell sitting over a "hole" so a falling column defers to the surface
+     * beneath it. FALLING water keeps that behavior verbatim — a stream
+     * landing on cross-frame field water must be absorbed and redirected,
+     * not splash sideways over the boundary like a sheet on glass. LATERAL
+     * (non-falling) water over a CROSS-frame below cell side-spreads
+     * instead: that below cell can never absorb it (same-type fluid never
+     * replaces), so vanilla defer would dead-end the corner wrap — the rim
+     * cell of one face must keep spreading to carry flow onto the next.
+     */
+    @WrapOperation(
+        method = "spread",
+        at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/material/FlowingFluid;isWaterHole(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/world/level/material/Fluid;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)Z")
+    )
+    private boolean gravityapivs$spreadHoleGate(
+        FlowingFluid self, BlockGetter getter, Fluid fluid, BlockPos pos,
+        BlockState state, BlockPos belowPos, BlockState belowState,
+        Operation<Boolean> original,
+        @Local(argsOnly = true) FluidState spreadingState
+    ) {
+        if (GravityFieldLookup.hasSources(getter)
+            && gravityapivs$down(getter, belowPos) != gravityapivs$down(getter, pos)
+            && !(spreadingState.hasProperty(FlowingFluid.FALLING)
+                 && spreadingState.getValue(FlowingFluid.FALLING))) {
+            return false;
+        }
+        return original.call(self, getter, fluid, pos, state, belowPos, belowState);
+    }
+
     // ------------------------------------------------------------------
     // getNewLiquid(): neighbor plane, column continuity, source formation
     // ------------------------------------------------------------------
 
+    /**
+     * Which neighbors feed this cell LATERALLY. Vanilla iterates its own
+     * horizontal plane — implicitly "directions perpendicular to the
+     * NEIGHBOR's down", valid only when every neighbor shares the frame. At
+     * frame boundaries the feeding relation must be judged in the FEEDER's
+     * frame: a neighbor at direction d couples laterally iff d is
+     * perpendicular to THAT neighbor's down. Under uniform gravity this
+     * reduces exactly to the 4-direction plane (fast path: untouched
+     * vanilla iteration when no field sources exist or every consulted cell
+     * is world-down).
+     */
     @WrapOperation(
         method = "getNewLiquid",
         at = @At(value = "INVOKE", target = "Lnet/minecraft/core/Direction$Plane;iterator()Ljava/util/Iterator;")
@@ -135,8 +252,45 @@ public abstract class FlowingFluidMixin {
         Direction.Plane plane, Operation<Iterator<Direction>> original,
         @Local(argsOnly = true) Level level, @Local(argsOnly = true) BlockPos pos
     ) {
-        Direction down = gravityapivs$down(level, pos);
-        return down == Direction.DOWN ? original.call(plane) : gravityapivs$perpendicular(down).iterator();
+        if (!net.cama.gravityapivs.util.GravityFieldLookup.hasSources(level)) {
+            return original.call(plane);
+        }
+        Direction ourDown = gravityapivs$down(level, pos);
+        boolean allDown = ourDown == Direction.DOWN;
+        boolean inField = GravityFieldLookup.hasFieldAt(level, pos);
+        java.util.List<Direction> feeds = new java.util.ArrayList<>(6);
+        for (Direction direction : Direction.values()) {
+            BlockPos neighborPos = pos.relative(direction);
+            Direction neighborDown = gravityapivs$down(level, neighborPos);
+            if (neighborDown != Direction.DOWN) {
+                allDown = false;
+            }
+            if (gravityapivs$crossFeeds(level, pos, direction)) {
+                feeds.add(direction); // cross-frame pour (amount wrap adds +1)
+                continue;
+            }
+            if (direction == ourDown) {
+                // our own frame-below feeds us only via the corner wrap
+                if (gravityapivs$sideEntryFeeds(level, pos, ourDown)) {
+                    feeds.add(direction);
+                }
+                continue;
+            }
+            if (neighborDown.getAxis() == direction.getAxis()) {
+                continue; // parallel: column coupling, not lateral
+            }
+            // FIELD-BOUNDARY CUT: out-of-field water never laterally feeds
+            // in-field cells — water enters a field only by falling in.
+            // Without this, water seeping sideways OUT of a field (a rain
+            // halo beside a falling sheet) feeds back into the boundary row
+            // where the same-frame above-rule resets it to full: a
+            // generator ring that exits and re-enters the field.
+            if (inField && !GravityFieldLookup.hasFieldAt(level, neighborPos)) {
+                continue;
+            }
+            feeds.add(direction);
+        }
+        return allDown ? original.call(plane) : feeds.iterator();
     }
 
     @WrapOperation(
@@ -146,6 +300,29 @@ public abstract class FlowingFluidMixin {
     private BlockPos gravityapivs$newLiquidBelow(BlockPos instance, Operation<BlockPos> original, @Local(argsOnly = true) Level level) {
         Direction down = gravityapivs$down(level, instance);
         return down == Direction.DOWN ? original.call(instance) : instance.relative(down);
+    }
+
+    /**
+     * Pour-through contribution: a cross-frame pour passes the feeder's
+     * LEVEL through the crossing (amount+1 here, the dropOff cancels it)
+     * instead of granting a full falling column. The full reset stays
+     * exclusive to same-frame columns (the vanilla above-rule below).
+     */
+    @WrapOperation(
+        method = "getNewLiquid",
+        at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/material/FluidState;getAmount()I")
+    )
+    private int gravityapivs$feedAmount(
+        FluidState neighbor, Operation<Integer> original,
+        @Local(argsOnly = true) Level level, @Local(argsOnly = true) BlockPos pos,
+        @Local Direction direction
+    ) {
+        int amount = original.call(neighbor);
+        if (net.cama.gravityapivs.util.GravityFieldLookup.hasSources(level)
+            && gravityapivs$crossFeeds(level, pos, direction)) {
+            return Math.min(8, amount + 1);
+        }
+        return amount;
     }
 
     @WrapOperation(
@@ -169,13 +346,64 @@ public abstract class FlowingFluidMixin {
         FlowingFluid self, Direction direction, BlockGetter getter, BlockPos pos,
         BlockState state, BlockPos abovePos, BlockState aboveState, Operation<Boolean> original
     ) {
-        return original.call(self, gravityapivs$down(getter, pos).getOpposite(), getter, pos, state, abovePos, aboveState);
+        if (!net.cama.gravityapivs.util.GravityFieldLookup.hasSources(getter)) {
+            return original.call(self, direction, getter, pos, state, abovePos, aboveState);
+        }
+        Direction ourDown = gravityapivs$down(getter, pos);
+        // the full-column branch may only fire for a SAME-FRAME above cell
+        // (whose fluid genuinely falls into us) — cross-frame fluid at our
+        // frame-up must not turn us into a full column; cross-frame pours
+        // contribute level-preserving feeds instead (gravityapivs$feedAmount)
+        if (gravityapivs$down(getter, abovePos) != ourDown) {
+            return false;
+        }
+        return original.call(self, ourDown.getOpposite(), getter, pos, state, abovePos, aboveState);
+    }
+
+    // Source conversion (the infinite-water rule) lives in getNewLiquid's
+    // own neighbor loop and is gated by FluidState.canConvertToSource —
+    // suppress it inside rotated frames: fields move water, they never
+    // create it (manufactured sources are permanent blocks that outlive
+    // the field). NOTE: an earlier fix emptied sourceNeighborCount instead,
+    // which gates a different mechanic (falling side-spread) — that wrap is
+    // reverted to the proper perpendicular plane below.
+    @WrapOperation(
+        method = "getNewLiquid",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/world/level/material/FluidState;canConvertToSource(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;)Z"
+        )
+    )
+    private boolean gravityapivs$noRotatedSourceConversion(
+        FluidState fluidState, Level level, BlockPos pos, Operation<Boolean> original
+    ) {
+        // suppressed inside ANY field region — including DOWN-pointing
+        // fields (floor plates): a source minted inside a plate cell is
+        // undrainable and blocks flow through it
+        return !net.cama.gravityapivs.util.GravityFieldLookup.hasFieldAt(level, pos)
+            && original.call(fluidState, level, pos);
     }
 
     // ------------------------------------------------------------------
     // getSpread()/getSlopeDistance(): the slope-hole search plane
     // ------------------------------------------------------------------
 
+    /**
+     * THE UP-ENTRY PROHIBITION. Vanilla fluid stability rests on water
+     * never moving upward; with per-cell frames, "lateral" spread judged
+     * only in the spreader's frame can climb another frame's up — a face
+     * cell's plane includes world-UP when its down is horizontal, and one
+     * such uphill hop lets vanilla's own above-rule reset the level to
+     * full, forming source-free feed loops (the runaway flood that filled
+     * the whole field and would not drain). The law that restores
+     * acyclicity: water may NEVER spread into a cell from that cell's own
+     * frame-below. Combined with acyclically-oriented sector frames (see
+     * GravityCoreBlockEntity#fluidDownAt) every transfer chain terminates,
+     * so spread stays bounded and removal of the source drains everything.
+     * Note no world-down fast path here: a plain DOWN-frame rim cell
+     * spreading outward into a sideways-frame cell is exactly such an
+     * up-entry, so the filter must run whenever any field source exists.
+     */
     @WrapOperation(
         method = "getSpread",
         at = @At(value = "INVOKE", target = "Lnet/minecraft/core/Direction$Plane;iterator()Ljava/util/Iterator;")
@@ -184,8 +412,51 @@ public abstract class FlowingFluidMixin {
         Direction.Plane plane, Operation<Iterator<Direction>> original,
         @Local(argsOnly = true) Level level, @Local(argsOnly = true) BlockPos pos
     ) {
-        Direction down = gravityapivs$down(level, pos);
-        return down == Direction.DOWN ? original.call(plane) : gravityapivs$perpendicular(down).iterator();
+        if (!net.cama.gravityapivs.util.GravityFieldLookup.hasSources(level)) {
+            return original.call(plane);
+        }
+        return gravityapivs$spreadDirections(level, pos, gravityapivs$down(level, pos));
+    }
+
+    /**
+     * Perpendicular plane of {@code down} minus up-entry directions —
+     * except the solid-backed side-entry, which is the corner wrap's
+     * spread leg.
+     */
+    @Unique
+    private static Iterator<Direction> gravityapivs$spreadDirections(LevelReader level, BlockPos pos, Direction down) {
+        java.util.List<Direction> dirs = new java.util.ArrayList<>(4);
+        for (Direction direction : gravityapivs$PERPENDICULAR[down.ordinal()]) {
+            BlockPos target = pos.relative(direction);
+            if (gravityapivs$down(level, target) != direction.getOpposite()
+                || gravityapivs$sideEntrySpreadOk(level, pos, target)) {
+                dirs.add(direction);
+            }
+        }
+        return dirs.iterator();
+    }
+
+    /**
+     * Uniform in-field spreading: vanilla channels flow toward the nearest
+     * hole (min slope distance), which starves plateau corners — fine on
+     * terrain, wrong on a planet face that should be covered uniformly.
+     * Forcing the hole flag true for in-field origins makes every direction
+     * tie at distance 0, so in-field water spreads all ways (and skips the
+     * slope recursion entirely). Vanilla terrain is untouched.
+     */
+    @WrapOperation(
+        method = "getSpread",
+        at = @At(value = "INVOKE", target = "Lit/unimi/dsi/fastutil/shorts/Short2BooleanMap;computeIfAbsent(SLit/unimi/dsi/fastutil/shorts/Short2BooleanFunction;)Z")
+    )
+    private boolean gravityapivs$uniformInFieldSpread(
+        it.unimi.dsi.fastutil.shorts.Short2BooleanMap map, short key,
+        it.unimi.dsi.fastutil.shorts.Short2BooleanFunction fn, Operation<Boolean> original,
+        @Local(argsOnly = true) Level level, @Local(argsOnly = true) BlockPos pos
+    ) {
+        if (GravityFieldLookup.hasFieldAt(level, pos)) {
+            return true;
+        }
+        return original.call(map, key, fn);
     }
 
     @WrapOperation(
@@ -197,16 +468,23 @@ public abstract class FlowingFluidMixin {
         return down == Direction.DOWN ? original.call(instance) : instance.relative(down);
     }
 
+    // the recursive slope probe walks the ORIGIN's plane but hops from the
+    // current probe position — the up-entry filter must judge each hop at
+    // the probe (mirrors the getSpread filter above)
     @WrapOperation(
         method = "getSlopeDistance",
         at = @At(value = "INVOKE", target = "Lnet/minecraft/core/Direction$Plane;iterator()Ljava/util/Iterator;")
     )
     private Iterator<Direction> gravityapivs$slopePlane(
         Direction.Plane plane, Operation<Iterator<Direction>> original,
-        @Local(argsOnly = true) LevelReader level, @Local(argsOnly = true, ordinal = 1) BlockPos originPos
+        @Local(argsOnly = true) LevelReader level,
+        @Local(argsOnly = true, ordinal = 0) BlockPos probePos,
+        @Local(argsOnly = true, ordinal = 1) BlockPos originPos
     ) {
-        Direction down = gravityapivs$down(level, originPos);
-        return down == Direction.DOWN ? original.call(plane) : gravityapivs$perpendicular(down).iterator();
+        if (!net.cama.gravityapivs.util.GravityFieldLookup.hasSources(level)) {
+            return original.call(plane);
+        }
+        return gravityapivs$spreadDirections(level, probePos, gravityapivs$down(level, originPos));
     }
 
     // The slope search caches "is there a hole below this position" through a
@@ -244,11 +522,6 @@ public abstract class FlowingFluidMixin {
         return original.call(self, gravityapivs$down(getter, pos), getter, pos, state, holePos, holeState);
     }
 
-    // Inside a rotated field the source-neighbor count is forced to ZERO
-    // (empty iteration): the infinite-water rule must never run in a rotated
-    // frame, because the sources it manufactures are PERMANENT blocks that
-    // outlive the field — removing the gravity source left walls studded
-    // with water sources. Rotated fields move water; they never create it.
     @WrapOperation(
         method = "sourceNeighborCount",
         at = @At(value = "INVOKE", target = "Lnet/minecraft/core/Direction$Plane;iterator()Ljava/util/Iterator;")
@@ -258,7 +531,7 @@ public abstract class FlowingFluidMixin {
         @Local(argsOnly = true) LevelReader level, @Local(argsOnly = true) BlockPos pos
     ) {
         Direction down = gravityapivs$down(level, pos);
-        return down == Direction.DOWN ? original.call(plane) : java.util.Collections.emptyIterator();
+        return down == Direction.DOWN ? original.call(plane) : gravityapivs$perpendicular(down).iterator();
     }
 
     @WrapOperation(
@@ -268,6 +541,32 @@ public abstract class FlowingFluidMixin {
     private static BlockPos gravityapivs$sameAbovePos(BlockPos instance, Operation<BlockPos> original, @Local(argsOnly = true) BlockGetter getter) {
         Direction down = gravityapivs$down(getter, instance);
         return down == Direction.DOWN ? original.call(instance) : instance.relative(down.getOpposite());
+    }
+
+    // ------------------------------------------------------------------
+    // tick(): container preservation
+    // ------------------------------------------------------------------
+
+    /**
+     * Vanilla tick assumes non-source fluid lives in a plain LiquidBlock: it
+     * replaces the whole block when the level changes (or dries up) — which
+     * would DELETE a gravity plate holding flowing water. Plates store the
+     * fluid level in their state; update it in place instead.
+     */
+    @WrapOperation(
+        method = "tick",
+        at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/Level;setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z")
+    )
+    private boolean gravityapivs$tickPreservePlating(
+        Level level, BlockPos pos, BlockState newState, int flags, Operation<Boolean> original
+    ) {
+        BlockState current = level.getBlockState(pos);
+        if (current.getBlock() instanceof net.cama.gravityapivs.plating.GravityPlatingBlock) {
+            return original.call(level, pos,
+                net.cama.gravityapivs.plating.GravityPlatingBlock.withFluid(current, newState.getFluidState()),
+                flags);
+        }
+        return original.call(level, pos, newState, flags);
     }
 
     // ------------------------------------------------------------------

@@ -121,21 +121,52 @@ public final class GravityFieldLookup {
     }
 
     /**
+     * Cheap fast-path test: does this level have ANY registered field
+     * sources? Lets fluid hooks skip per-neighbor scans entirely in worlds
+     * (or regions) with no gravity fields.
+     */
+    public static boolean hasSources(@Nullable BlockGetter getter) {
+        Level level = resolveLevel(getter);
+        if (level == null) {
+            return false;
+        }
+        ConcurrentHashMap<BlockPos, Entry> map = SOURCES.get(level);
+        return map != null && !map.isEmpty() && GravityConfig.gravityAffectsFluids.get();
+    }
+
+    /**
+     * Whether ANY field source claims {@code pos} — including fields whose
+     * down is plain DOWN (a floor plate). Distinct from
+     * {@code fluidDownAt(...) != DOWN}: source-conversion suppression must
+     * cover DOWN-pointing field regions too, or plates over solid ground
+     * could still mint permanent sources.
+     */
+    public static boolean hasFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
+        return bestFieldDownAt(getter, pos) != null;
+    }
+
+    /**
      * The gravity down direction fluids at {@code pos} should use. Plain
      * {@link Direction#DOWN} outside all fields, when the feature is
      * disabled, or when {@code getter} cannot be resolved to a level.
      */
     public static Direction fluidDownAt(@Nullable BlockGetter getter, BlockPos pos) {
+        Direction best = bestFieldDownAt(getter, pos);
+        return best != null ? best : Direction.DOWN;
+    }
+
+    @Nullable
+    private static Direction bestFieldDownAt(@Nullable BlockGetter getter, BlockPos pos) {
         Level level = resolveLevel(getter);
         if (level == null) {
-            return Direction.DOWN;
+            return null;
         }
         ConcurrentHashMap<BlockPos, Entry> map = SOURCES.get(level);
         if (map == null || map.isEmpty()) {
-            return Direction.DOWN;
+            return null;
         }
         if (!GravityConfig.gravityAffectsFluids.get()) {
-            return Direction.DOWN;
+            return null;
         }
 
         long now = level.getGameTime();
@@ -160,17 +191,40 @@ public final class GravityFieldLookup {
                 continue;
             }
             int priority = source.sourcePriority();
-            if (priority < bestPriority || (priority == bestPriority && distance >= bestDistance)) {
+            if (priority < bestPriority || (priority == bestPriority && distance > bestDistance)) {
                 continue;
             }
             Direction down = source.fluidDownAt(pos);
-            if (down != null) {
-                best = down;
-                bestPriority = priority;
-                bestDistance = distance;
+            if (down == null) {
+                continue;
             }
+            // Exact ties (same priority, same distance — e.g. a cube edge
+            // cell equidistant from two plates) resolve by the same fixed
+            // direction priority the core's sector frames use, DOWN > X >
+            // Z > UP, instead of map iteration order. This keeps convex
+            // edges of plated builds pour-over lips of the upstream face;
+            // an arbitrary tie could hand a top-edge cell to a side plate,
+            // making the rim's pour into it a forbidden up-entry (a wrap
+            // stall at that edge).
+            if (priority == bestPriority && distance == bestDistance && best != null
+                && directionRank(down) >= directionRank(best)) {
+                continue;
+            }
+            best = down;
+            bestPriority = priority;
+            bestDistance = distance;
         }
-        return best != null ? best : Direction.DOWN;
+        return best;
+    }
+
+    /** Fixed frame priority for tie-breaking: DOWN > X > Z > UP. */
+    private static int directionRank(Direction down) {
+        return switch (down) {
+            case DOWN -> 0;
+            case WEST, EAST -> 1;
+            case NORTH, SOUTH -> 2;
+            case UP -> 3;
+        };
     }
 
     @Nullable

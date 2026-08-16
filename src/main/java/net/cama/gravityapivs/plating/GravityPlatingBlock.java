@@ -48,7 +48,8 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 /**
  * Based on code from AmethystGravity (by CyborgCabbage)
  */
-public class GravityPlatingBlock extends BaseEntityBlock implements net.minecraft.world.level.block.SimpleWaterloggedBlock {
+public class GravityPlatingBlock extends BaseEntityBlock
+    implements net.minecraft.world.level.block.LiquidBlockContainer, net.minecraft.world.level.block.BucketPickup {
     // in a corner, multiple faces of plates can occupy the same block
     
     public static final BooleanProperty NORTH = BlockStateProperties.NORTH;
@@ -57,10 +58,16 @@ public class GravityPlatingBlock extends BaseEntityBlock implements net.minecraf
     public static final BooleanProperty WEST = BlockStateProperties.WEST;
     public static final BooleanProperty UP = BlockStateProperties.UP;
     public static final BooleanProperty DOWN = BlockStateProperties.DOWN;
-    // plates are thin panels sharing their cell with fluid: waterloggable so
-    // a water source does not destroy them (gravity fields routinely put
-    // water into plate cells now that fluids follow fields)
-    public static final BooleanProperty WATERLOGGED = BlockStateProperties.WATERLOGGED;
+    // Plates are thin panels sharing their cell with fluid, and the plate
+    // cells are exactly where face-hugging water lives — so unlike vanilla
+    // waterlogging (source-only boolean), plating stores the FULL fluid
+    // level: 0 = dry, 1-7 flowing, 8 = source (or full falling when
+    // WATER_FALLING). FlowingFluid's tick updates these through the
+    // container-preservation hook in FlowingFluidMixin instead of replacing
+    // the plate.
+    public static final net.minecraft.world.level.block.state.properties.IntegerProperty WATER_LEVEL =
+        net.minecraft.world.level.block.state.properties.IntegerProperty.create("water_level", 0, 8);
+    public static final BooleanProperty WATER_FALLING = BooleanProperty.create("water_falling");
     
     protected static final VoxelShape DOWN_SHAPE = Block.box(0.0, 0.0, 0.0, 16.0, 1.0, 16.0);
     protected static final VoxelShape UP_SHAPE = Block.box(0.0, 15.0, 0.0, 16.0, 16.0, 16.0);
@@ -79,7 +86,8 @@ public class GravityPlatingBlock extends BaseEntityBlock implements net.minecraf
             .setValue(WEST, false)
             .setValue(UP, false)
             .setValue(DOWN, false)
-            .setValue(WATERLOGGED, false)
+            .setValue(WATER_LEVEL, 0)
+            .setValue(WATER_FALLING, false)
         );
         this.shapesByState =
             ImmutableMap.copyOf(
@@ -123,21 +131,84 @@ public class GravityPlatingBlock extends BaseEntityBlock implements net.minecraf
     
     @Override
     protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> stateManager) {
-        stateManager.add(UP, DOWN, NORTH, SOUTH, EAST, WEST, WATERLOGGED);
+        stateManager.add(UP, DOWN, NORTH, SOUTH, EAST, WEST, WATER_LEVEL, WATER_FALLING);
     }
     
     @Override
     public net.minecraft.world.level.material.FluidState getFluidState(BlockState state) {
-        return state.getValue(WATERLOGGED)
-            ? net.minecraft.world.level.material.Fluids.WATER.getSource(false)
-            : super.getFluidState(state);
+        int waterLevel = state.getValue(WATER_LEVEL);
+        if (waterLevel == 0) {
+            return super.getFluidState(state);
+        }
+        boolean falling = state.getValue(WATER_FALLING);
+        if (waterLevel == 8 && !falling) {
+            return net.minecraft.world.level.material.Fluids.WATER.getSource(false);
+        }
+        return net.minecraft.world.level.material.Fluids.WATER.getFlowing(waterLevel, falling);
+    }
+
+    /** Encodes a fluid state into the plate's water properties. */
+    public static BlockState withFluid(BlockState state, net.minecraft.world.level.material.FluidState fluid) {
+        if (fluid.isEmpty() || !fluid.getType().isSame(net.minecraft.world.level.material.Fluids.WATER)) {
+            return state.setValue(WATER_LEVEL, 0).setValue(WATER_FALLING, false);
+        }
+        int amount = fluid.isSource() ? 8 : fluid.getAmount();
+        boolean falling = !fluid.isSource()
+            && fluid.getValue(net.minecraft.world.level.material.FlowingFluid.FALLING);
+        return state.setValue(WATER_LEVEL, amount).setValue(WATER_FALLING, falling);
+    }
+
+    @Override
+    public boolean canPlaceLiquid(BlockGetter level, BlockPos pos, BlockState state,
+                                  net.minecraft.world.level.material.Fluid fluid) {
+        // water in any form — SOURCE OR FLOWING: face-hugging flow must be
+        // able to pass through plate cells (vanilla waterlogging is
+        // source-only, which walled the whole face off from flowing water)
+        return fluid.isSame(net.minecraft.world.level.material.Fluids.WATER);
+    }
+
+    @Override
+    public boolean placeLiquid(LevelAccessor level, BlockPos pos, BlockState state,
+                               net.minecraft.world.level.material.FluidState fluid) {
+        if (!fluid.getType().isSame(net.minecraft.world.level.material.Fluids.WATER)) {
+            return false;
+        }
+        BlockState updated = withFluid(state, fluid);
+        if (updated != state) {
+            level.setBlock(pos, updated, 3);
+        }
+        // schedule the ACTUAL stored fluid type: the fluid ticker validates
+        // scheduled ticks with an exact type match (fluidState.is(fluid)),
+        // so scheduling the source singleton for FLOWING content silently
+        // discards the tick — water entered a plate and froze forever
+        net.minecraft.world.level.material.Fluid stored = updated.getFluidState().getType();
+        if (stored != net.minecraft.world.level.material.Fluids.EMPTY) {
+            level.scheduleTick(pos, stored, stored.getTickDelay(level));
+        }
+        return true;
+    }
+
+    @Override
+    public ItemStack pickupBlock(LevelAccessor level, BlockPos pos, BlockState state) {
+        // buckets pick up sources only, like vanilla
+        if (state.getValue(WATER_LEVEL) == 8 && !state.getValue(WATER_FALLING)) {
+            level.setBlock(pos, state.setValue(WATER_LEVEL, 0).setValue(WATER_FALLING, false), 3);
+            return new ItemStack(net.minecraft.world.item.Items.WATER_BUCKET);
+        }
+        return ItemStack.EMPTY;
+    }
+
+    @Override
+    public java.util.Optional<net.minecraft.sounds.SoundEvent> getPickupSound() {
+        return net.minecraft.world.level.material.Fluids.WATER.getPickupSound();
     }
 
     @Override
     public BlockState updateShape(BlockState state, Direction direction, BlockState neighborState, LevelAccessor world, BlockPos pos, BlockPos neighborPos) {
-        if (state.getValue(WATERLOGGED)) {
-            world.scheduleTick(pos, net.minecraft.world.level.material.Fluids.WATER,
-                net.minecraft.world.level.material.Fluids.WATER.getTickDelay(world));
+        if (state.getValue(WATER_LEVEL) > 0) {
+            // the actual stored type — see placeLiquid: exact-type-matched
+            net.minecraft.world.level.material.Fluid stored = getFluidState(state).getType();
+            world.scheduleTick(pos, stored, stored.getTickDelay(world));
         }
         if (hasDir(state, direction) && !canPlaceOn(world, pos.relative(direction), direction.getOpposite())) {
             state = state.setValue(directionToProperty(direction), false);
@@ -215,11 +286,10 @@ public class GravityPlatingBlock extends BaseEntityBlock implements net.minecraf
         if (blockState.is(this)) {
             return blockState.setValue(directionToProperty(ctx.getClickedFace().getOpposite()), true);
         }
-        boolean water = ctx.getLevel().getFluidState(ctx.getClickedPos()).getType()
-            == net.minecraft.world.level.material.Fluids.WATER;
-        return defaultBlockState()
-            .setValue(directionToProperty(ctx.getClickedFace().getOpposite()), true)
-            .setValue(WATERLOGGED, water);
+        return withFluid(
+            defaultBlockState().setValue(directionToProperty(ctx.getClickedFace().getOpposite()), true),
+            ctx.getLevel().getFluidState(ctx.getClickedPos())
+        );
     }
     
     private boolean canPlaceOn(BlockGetter world, BlockPos pos, Direction side) {

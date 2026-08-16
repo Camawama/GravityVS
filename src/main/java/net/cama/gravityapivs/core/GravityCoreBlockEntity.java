@@ -325,40 +325,41 @@ public class GravityCoreBlockEntity extends BlockEntity
 
     @Override
     public @Nullable net.minecraft.core.Direction fluidDownAt(net.minecraft.core.BlockPos pos) {
-        Vec3 delta = Vec3.atCenterOf(pos).subtract(Vec3.atCenterOf(worldPosition));
-        double distance = delta.length();
+        int dx = pos.getX() - worldPosition.getX();
+        int dy = pos.getY() - worldPosition.getY();
+        int dz = pos.getZ() - worldPosition.getZ();
+        double distance = Math.sqrt((double) dx * dx + (double) dy * dy + (double) dz * dz);
         if (distance > range || distance < 1.0) {
             return null;
         }
-        // attract: down points toward the core; repulse: away from it
-        Vec3 down = (attracting ? delta.scale(-1) : delta).normalize();
-
-        // Deterministic tie-breaking. The integer lattice puts every edge/
-        // corner cell around a core at an EXACT 45-degree tie between two
-        // cardinals, and Direction.getNearest breaks ties by enum order
-        // (Y, then Z, then X) — a fixed axis bias that stalls wrapping flow:
-        //
-        // (1) VERTICAL ties (a horizontal axis vs Y, i.e. the top/bottom
-        //     edge cells of a cube): resolving to Y makes water at a top
-        //     edge fall straight back onto the face it came from — the
-        //     "reaches the edge and just stops" stall. Prefer the
-        //     HORIZONTAL axis instead (shrink the Y component slightly):
-        //     the tie cell then "falls" sideways into the adjacent face's
-        //     cell, crossing the edge — and the reverse direction still
-        //     works through planar spread. Each crossing is a falling step,
-        //     which refreshes the fluid's spread budget, so one source can
-        //     cover a whole cube.
-        // (2) HORIZONTAL-HORIZONTAL ties (equator corners): a small
-        //     tangential bias (down x worldY) resolves them all in one
-        //     consistent rotational sense so flow circulates.
-        //
-        // Both nudges are far too small to affect any non-tied cell.
-        down = new Vec3(down.x, down.y * 0.93, down.z);
-        Vec3 tangent = new Vec3(-down.z, 0.0, down.x);
-        if (tangent.lengthSqr() > 1.0E-6) {
-            down = down.add(tangent.scale(0.05));
+        // SECTOR FRAMES: down is the dominant-axis cardinal toward the core
+        // (attract) or away from it (repulse); lattice ties — every edge and
+        // corner cell of a cube sits at an exact |x|==|y| style tie — are
+        // resolved by the fixed priority world-DOWN > X > Z > world-UP.
+        // This partitions the field into six face sectors whose boundaries
+        // are all oriented ONE way (top feeds sides, sides feed bottom, Z
+        // feeds X), so cross-sector fluid transfer forms an acyclic graph:
+        // convex-edge cells become pour-over lips of the upstream face
+        // (vanilla cliff rims), and no chain of feeds can loop back to its
+        // origin. Earlier continuous tie-nudges (y-shrink + rotational
+        // tangent) gave edge cells TANGENTIAL downs, which let "lateral"
+        // spread climb another frame's up — the runaway-flood generator.
+        int ax = Math.abs(dx);
+        int ay = Math.abs(dy);
+        int az = Math.abs(dz);
+        int dominant = Math.max(ax, Math.max(ay, az));
+        if (ay == dominant && (attracting ? dy > 0 : dy < 0)) {
+            return net.minecraft.core.Direction.DOWN;
         }
-        return net.minecraft.core.Direction.getNearest(down.x, down.y, down.z);
+        if (ax == dominant && ax > 0) {
+            return (attracting ? dx > 0 : dx < 0)
+                ? net.minecraft.core.Direction.WEST : net.minecraft.core.Direction.EAST;
+        }
+        if (az == dominant && az > 0) {
+            return (attracting ? dz > 0 : dz < 0)
+                ? net.minecraft.core.Direction.NORTH : net.minecraft.core.Direction.SOUTH;
+        }
+        return net.minecraft.core.Direction.UP;
     }
 
     @Override

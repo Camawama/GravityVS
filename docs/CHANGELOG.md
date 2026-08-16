@@ -1,5 +1,185 @@
 # GravityVS Changelog
 
+## Unreleased (2.0.0-dev) — 2026-08-16 (the feed arithmetic: pour-through, corner wraps, boundary cut)
+
+- **Complete cross-frame feed arithmetic**, replacing the previous round's
+  full-reset pours after simulator-driven diagnosis of three in-game
+  reports (boundary splash "flowing across like a solid block", lingering
+  undrainable branches, incomplete cube coverage). Every fluid transfer now
+  has a cost that makes all cycles strictly level-decreasing — no
+  source-free water can sustain itself, so removal always drains:
+  - **Pour-through (net 0)**: a cross-frame pour passes the feeder's LEVEL
+    through the edge crossing instead of resetting to full. Full resets are
+    exclusive to same-frame columns (pure vanilla). One top-center source
+    on a 3×3×3 core cube: the level budget exactly wraps the whole cube
+    with fading levels.
+  - **Solid-backed side-entry (net -1)**: the convex-corner wrap. A cell's
+    own frame-below neighbor may feed it when both are in a field, frames
+    differ (non-opposite), and the feeder rests directly on solid — a
+    surface cell pouring over a one-block lip. Solid-backing confines water
+    to the surface (no outward layering); the in-field gate keeps walls
+    inside sideways fields from overflowing into normal space. This opens
+    face-to-face wraps in every direction the budget allows: side sources
+    cover the cube; bottom sources climb (top face partial — the flat-ground
+    budget honestly runs out).
+  - **Field-boundary cut**: out-of-field water never LATERALLY feeds
+    in-field cells (it may only fall in). Without this, the rain halo
+    beside a falling sheet fed back into the field's boundary row where the
+    same-frame above-rule reset it to full — a generator ring that exited
+    and re-entered the field (the simulator's frozen 370-cell state).
+  - **Defer-to-column, frame-aware**: FALLING water over cross-frame field
+    water defers exactly like vanilla — a world stream landing on a
+    sideways field is absorbed and redirected, never splashing sideways
+    over the boundary (the round-23 unconditional gate caused exactly that
+    splash). Only LATERAL water over a cross-frame below cell side-spreads,
+    which is the corner wrap continuing instead of dead-ending.
+  - **Uniform in-field spreading**: vanilla's min-slope-distance channeling
+    starves plateau corners (fine on terrain, wrong on planet faces).
+    In-field origins tie every direction at distance 0 — uniform discs and
+    full face coverage; vanilla terrain untouched.
+  - All validated in `tools/fluidsim.py` (9 scenarios: 5 cube-source
+    positions, stream into sideways field, plated plane, pour onto UP
+    field, hanging ceiling water — all stable, covered, fully draining).
+    The flat-plane frontier oscillation of the previous build (rendered as
+    glitchy, non-connecting water at the end of the spread) converges
+    cleanly under the new arithmetic.
+
+## Unreleased (2.0.0-dev) — 2026-08-16 (sector frames + the up-entry prohibition — feeds superseded same day)
+
+- **Field fluid mechanics redesigned on a provable foundation** after the
+  DAG-rule fix below still left runaway flooding (verified by building an
+  offline cellular-automaton simulator of the exact vanilla + GravityVS
+  fluid rules; the simulator reproduced the runaway immediately and showed
+  the real loop: an edge cell whose frame treats world-UP as "lateral"
+  pushed water above the rim, where vanilla's own above-rule legitimately
+  reset it to a full column — a 4-cell fountain no feeder-side condition
+  can see). Two structural rules replace the patchwork:
+  - **Sector frames** (`GravityCoreBlockEntity.fluidDownAt`): a core field's
+    down is the dominant-axis cardinal toward the core, with lattice ties
+    resolved by fixed priority world-DOWN > X > Z > world-UP. The field
+    partitions into six face sectors with one-way boundaries (top → sides →
+    bottom, Z → X): an acyclic sector graph, each sector internally pure
+    vanilla. Convex edge cells become pour-over lips of the upstream face —
+    real vanilla cliff rims. The old continuous tie-nudges (y×0.93 shrink +
+    0.05 rotational tangent) are gone; tangential edge downs were the
+    enabling defect.
+  - **The up-entry prohibition** (`FlowingFluidMixin`): water may NEVER
+    spread into a cell from that cell's own frame-below — enforced in
+    getSpread, the slope search, and mirrored in getNewLiquid's lateral
+    feed set. With it, the falling feeder returns to vanilla-lenient (any
+    neighbor pouring in its own frame feeds full, like a rim pouring over
+    a cliff) because acyclicity now comes from the transfer relation, not
+    feeder-state conditions.
+  - `GravityFieldLookup` resolves exact source ties (priority + distance,
+    e.g. a plated cube's edge cells) by the same DOWN > X > Z > UP rank
+    instead of map iteration order, so plated builds get the same proven
+    sector layout.
+  - Simulator verdict (3×3×3 cube, one source top-center): stable in 11
+    rounds, 98 cells, all six faces fully covered with levels fading from
+    the source, ZERO cells beyond the surface shell, and complete drainage
+    to zero on source removal. The simulator is committed at
+    `tools/fluidsim.py` — port any future fluid-rule change there FIRST.
+  - Cleanup for worlds already flooded: stuck water has no pending ticks —
+    break and replace the field block (or place a block beside the water)
+    to wake it; it drains fully under the new rules.
+
+## Unreleased (2.0.0-dev) — 2026-08-16 (the water generator: feeding must stay a DAG — superseded same day)
+
+- **Runaway field flooding fixed.** The cross-frame "falling feeder" rule
+  violated the invariant that keeps vanilla fluids stable: the feeding
+  graph must be acyclic (full-strength feeds go strictly down, lateral
+  feeds strictly lose a level). Cross-frame, a face cell could laterally
+  feed an edge cell at level-1 while the edge cell — whose gravity points
+  back at the face — "falling-fed" the face cell back to FULL: a two-cell
+  water GENERATOR at every frame boundary. It flooded the entire field
+  with regenerating water and kept running after the source was removed
+  (the undrainable pollution). Full-strength feeds now require a GENUINE
+  column — the feeder must itself be falling or a source; lateral feeds
+  never produce falling states, so every falling chain traces back to a
+  real fall or a real source and no cycle can bootstrap. A companion guard
+  stops two mutually-attracted cells (opposing fields) from sustaining
+  each other. Spread is now bounded like flat ground: levels fade with
+  distance and only reset across a REAL fall over an edge into air — the
+  vanilla cliff behavior.
+  - Cleanup for worlds flooded by the bug: the stuck water has no pending
+    ticks — break and replace the field block (core/plate), or place any
+    block beside the water, to wake it; it then drains under the fixed
+    rules.
+
+## Unreleased (2.0.0-dev) — 2026-08-16 (core-cube wrap: the edge dead-end)
+
+- **Water wraps around bare core cubes — the edge dead-end removed.**
+  Vanilla suppresses side-spreading for a fluid cell sitting over a "hole"
+  so a falling column defers to the water surface beneath it. At a
+  gravity-frame boundary that rule misfires: the edge cell past a face rim
+  "falls" toward the face water it came from (a different frame), can
+  never actually enter it (same-type fluid never replaces), and was then
+  ALSO forbidden from side-spreading — a dead end at every cube edge
+  ("flows 4 blocks, gets stuck on the edge"). The defer-to-column rule now
+  applies only when the cell and its frame-below share a gravity frame;
+  cross-frame, the edge cell side-spreads along its own plane, which is
+  what carries flow onto the next face. Traced end-to-end on a 3x3x3 core
+  cube: one top source channels to the rim, side faces disperse fully
+  (no holes in their planes, so spread goes all directions with fading
+  levels), bottom-edge crossings are genuine falls that refresh the level,
+  and the top corners fill via the rim — full planet coverage with the
+  water level fading away from the source.
+
+## Unreleased (2.0.0-dev) — 2026-08-16 (fluid freeze fix: scheduled-tick type match)
+
+- **Water no longer freezes inside plates (the regression's single root
+  cause).** Minecraft's fluid ticker validates scheduled ticks with an
+  EXACT type match (`fluidState.is(scheduledFluid)`), and the plate's
+  container code scheduled the source singleton (`WATER`) while the plate
+  held `FLOWING_WATER` — every scheduled tick for flowing water inside a
+  plate was silently discarded. Water entered a plate cell and froze
+  forever: it never spread onward ("stopped flowing once it waterlogged
+  the plating", "stopped at the face edge" — edge cells are plates) and
+  never drained (the reported undrainable "lingering water"). Vanilla
+  never hits this because vanilla waterlogging stores sources only.
+  Plates now schedule the actual stored fluid type.
+
+- **Source conversion suppressed inside ALL field regions, not just
+  rotated ones.** Floor and top-face plates have field-down == world-down,
+  so the rotation-keyed suppression didn't cover them — the vanilla
+  infinite-water rule could still mint sources inside plate cells, which
+  are undrainable and block flow through them. Conversion is now keyed on
+  "inside any field source's region" (new `hasFieldAt` query); vanilla
+  ground outside fields keeps normal infinite-water behavior.
+
+## Unreleased (2.0.0-dev) — 2026-08-16 (water planets: flowing water in plates + cross-frame feeding)
+
+- **Flowing water passes through gravity plating.** Vanilla waterlogging
+  is source-only (one boolean), so FLOWING water could never enter a plate
+  cell — and plate cells are exactly where face-hugging flow lives, so the
+  whole face was walled off. Plating now stores the full fluid level in
+  its state (dry / flowing 1-7 / source / falling), accepts flowing water
+  through the container API, and the fluid engine's tick updates the
+  plate's stored level in place instead of replacing the plate. Buckets
+  still pick up sources only; breaking a plate releases its water.
+
+- **Cross-frame fluid feeding — the water-planet rule.** Vanilla
+  `getNewLiquid` judges "who feeds me" in the cell's OWN frame; at a
+  gravity-frame boundary the feeder's flow direction lives in the
+  FEEDER's frame, so the receiving edge cell recomputed its level as zero
+  and evaporated the tick after the water arrived — spread re-placed it,
+  and the edge flickered forever without wrapping ("flows to the edge and
+  stops", "single strand instead of dispersing"). Feeding is now judged in
+  the feeder's frame: a neighbor feeds laterally when the direction to us
+  is perpendicular to ITS down, and feeds as a FULL falling column when
+  its down points AT us — the vanilla above-check is the uniform-gravity
+  special case of this rule. Falling feeds carry full level, so the spread
+  budget REFRESHES at every edge crossing: one source can now wrap and
+  cover an entire plated or core cube — water planets work.
+
+- **Source-conversion suppression fixed (was gating the wrong counter).**
+  The infinite-water rule lives in `getNewLiquid`'s own neighbor loop
+  behind `FluidState.canConvertToSource` — the earlier fix emptied
+  `sourceNeighborCount`, which gates a different mechanic. Conversion is
+  now suppressed at the real site for rotated frames (fields still never
+  create sources), and `sourceNeighborCount` is restored to the proper
+  perpendicular plane.
+
 ## Unreleased (2.0.0-dev) — 2026-08-16 (fluid wrap-around v2 + seamless boundary rendering)
 
 - **Liquid wraps over every edge of a plated/core cube.** The first
