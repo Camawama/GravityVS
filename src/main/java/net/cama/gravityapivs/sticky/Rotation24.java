@@ -113,37 +113,61 @@ public final class Rotation24 {
         throw new IllegalStateException("unreachable: LOCAL_TO_WORLD is a bijection");
     }
 
-    /**
-     * The spin (0-3) that makes {@link #LOCAL_FRONT} face {@code worldFront}
-     * for the given bottom face. Falls back to 0 if {@code worldFront} is
-     * parallel to the bottom axis (unreachable by any spin).
-     */
-    public static int spinForFront(Direction bottom, Direction worldFront) {
-        for (int spin = 0; spin < 4; spin++) {
-            if (localToWorld(LOCAL_FRONT, bottom, spin) == worldFront) {
-                return spin;
-            }
-        }
-        return 0;
-    }
-
     /** An orientation picked for a placement. */
     public record Orientation(Direction bottom, int spin) {}
 
     /**
-     * Picks the orientation for a block being placed by {@code placer}:
-     * the bottom face is the placer's gravity down and the spin turns the
-     * block's front toward the placer — all in the placer's gravity frame,
-     * via {@link GravityBlockHelper}. Null-safe: defaults to (DOWN, 0).
+     * The spin (0-3) whose front direction points most along
+     * {@code gridFrontVec} for the given bottom face. Vector-based (not
+     * snapped-direction equality) so it stays robust when the desired front
+     * is not axis-aligned in the target grid — e.g. placement on a rotated
+     * Valkyrien Skies ship, where the placer's facing lands between the
+     * ship-grid cardinals.
      */
-    public static Orientation fromPlacement(@Nullable Entity placer) {
+    public static int spinForFront(Direction bottom, net.minecraft.world.phys.Vec3 gridFrontVec) {
+        int best = 0;
+        double bestDot = -Double.MAX_VALUE;
+        for (int spin = 0; spin < 4; spin++) {
+            Direction front = localToWorld(LOCAL_FRONT, bottom, spin);
+            double dot = front.getStepX() * gridFrontVec.x
+                + front.getStepY() * gridFrontVec.y
+                + front.getStepZ() * gridFrontVec.z;
+            if (dot > bestDot) {
+                bestDot = dot;
+                best = spin;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Picks the orientation for a block being placed by {@code placer} at
+     * {@code pos}: the bottom face is the placer's gravity down and the spin
+     * turns the block's front toward the placer — computed as world-space
+     * VECTORS, re-expressed in the BLOCK GRID at the placement position
+     * (shipyard space on Valkyrien Skies ships), and only then snapped to
+     * grid cardinals. Snapping in world space first — the old behavior —
+     * picked the wrong axes on any ship whose rotation was off-identity.
+     * Null-safe: defaults to (DOWN, 0).
+     */
+    public static Orientation fromPlacement(
+        @Nullable Entity placer,
+        net.minecraft.world.level.Level level,
+        net.minecraft.core.BlockPos pos
+    ) {
         if (placer == null) {
             return new Orientation(Direction.DOWN, 0);
         }
-        Direction bottom = GravityBlockHelper.placementDown(placer);
-        // front faces TOWARD the placer, i.e. opposite their horizontal facing
-        Direction worldFront = GravityBlockHelper.placementHorizontalFacing(placer).getOpposite();
-        return new Orientation(bottom, spinForFront(bottom, worldFront));
+        net.minecraft.world.phys.Vec3 gridDown = GravityBlockHelper.worldDirectionToGrid(
+            level, pos, GravityBlockHelper.gravityDownVector(placer)
+        );
+        Direction bottom = Direction.getNearest(gridDown.x, gridDown.y, gridDown.z);
+
+        // front faces TOWARD the placer, i.e. opposite their facing vector
+        net.minecraft.world.phys.Vec3 gridFront = GravityBlockHelper.worldDirectionToGrid(
+            level, pos, GravityBlockHelper.placementFacingVector(placer).scale(-1)
+        );
+        return new Orientation(bottom, spinForFront(bottom, gridFront));
     }
 
     /**

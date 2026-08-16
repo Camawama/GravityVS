@@ -1,5 +1,26 @@
 # GravityVS Changelog
 
+## Unreleased (2.0.0-dev) — 2026-08-16 (sticky chest fixes)
+
+- **Sticky chest orients correctly on rotated Valkyrien Skies ships.**
+  Placement orientation was computed as world-space cardinals, but a ship
+  block's state lives in the SHIPYARD grid — correct only while the ship's
+  rotation was identity. The placer's gravity down and facing are now
+  carried as world-space vectors, re-expressed in the target block grid
+  (world → ship transform), and only then snapped to grid cardinals; the
+  spin is chosen by best-alignment against the facing vector so it stays
+  robust when the facing lands between ship-grid cardinals. New grid-aware
+  framework API: `GravityBlockHelper.worldDirectionToGrid`,
+  `gravityDownVector`, `placementFacingVector`, and a ship-aware
+  `placementDown(entity, level, pos)` — this is the pattern every Gravity
+  Block Framework block should use for placement.
+
+- **Sticky chest item looks like a chest.** Chest geometry lives in entity
+  textures, so a JSON model cannot draw it — the item now uses the vanilla
+  chest item's mechanism: a `builtin/entity` model (with the vanilla chest
+  display transforms) plus a custom item renderer that draws a closed
+  sticky chest through the block-entity render dispatcher.
+
 ## Unreleased (2.0.0-dev) — 2026-08-15 (thirteenth pass: twelfth-pass test feedback)
 
 All items from the first in-game test of the twelfth pass.

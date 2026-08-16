@@ -63,5 +63,68 @@ public final class GravityBlockHelper {
         return localToWorld(local, entity);
     }
 
+    // ------------------------------------------------------------------
+    // grid-aware placement (Valkyrien Skies ships)
+    //
+    // Blockstates live in the BLOCK GRID of their level region — for blocks
+    // on a VS ship that grid is the SHIPYARD frame, which can be arbitrarily
+    // rotated against the world. Placement orientation must therefore be
+    // computed as world-space VECTORS and re-expressed in the target grid
+    // BEFORE snapping to cardinals; snapping in world space first picks the
+    // wrong axes on any tilted ship.
+    // ------------------------------------------------------------------
+
+    /**
+     * The world-space DOWN direction of the entity's smooth gravity frame,
+     * as a vector (not snapped to a cardinal).
+     */
+    public static Vec3 gravityDownVector(Entity entity) {
+        return RotationUtil.vecPlayerToWorld(
+            new Vec3(0, -1, 0), GravityChangerAPI.getAimRotation(entity)
+        );
+    }
+
+    /**
+     * The entity's horizontal facing (flattened in its OWN gravity frame),
+     * as a world-space vector.
+     */
+    public static Vec3 placementFacingVector(Entity entity) {
+        Vec3 lookLocal = RotationUtil.vecWorldToPlayer(
+            entity.getLookAngle(), GravityChangerAPI.getAimRotation(entity)
+        );
+        Vec3 flatLocal = new Vec3(lookLocal.x, 0, lookLocal.z);
+        if (flatLocal.lengthSqr() < 1.0E-6) {
+            flatLocal = new Vec3(0, 0, 1);
+        }
+        return RotationUtil.vecPlayerToWorld(flatLocal.normalize(), GravityChangerAPI.getAimRotation(entity));
+    }
+
+    /**
+     * Re-expresses a world-space direction vector in the BLOCK GRID that
+     * contains {@code pos}: shipyard space when the position is managed by a
+     * Valkyrien Skies ship, unchanged otherwise.
+     */
+    public static Vec3 worldDirectionToGrid(net.minecraft.world.level.Level level, net.minecraft.core.BlockPos pos, Vec3 worldDir) {
+        org.valkyrienskies.core.api.ships.Ship ship =
+            org.valkyrienskies.mod.common.VSGameUtilsKt.getShipManagingPos(level, pos);
+        if (ship == null) {
+            return worldDir;
+        }
+        org.joml.Vector3d v = new org.joml.Vector3d(worldDir.x, worldDir.y, worldDir.z);
+        ship.getTransform().getWorldToShipMatrix().transformDirection(v);
+        v.normalize();
+        return new Vec3(v.x, v.y, v.z);
+    }
+
+    /**
+     * The GRID direction a block placed at {@code pos} should treat as
+     * "down" for this entity — the entity's gravity down re-expressed in the
+     * target grid (ship-aware), snapped to the nearest grid cardinal.
+     */
+    public static Direction placementDown(Entity entity, net.minecraft.world.level.Level level, net.minecraft.core.BlockPos pos) {
+        Vec3 down = worldDirectionToGrid(level, pos, gravityDownVector(entity));
+        return Direction.getNearest(down.x, down.y, down.z);
+    }
+
     private GravityBlockHelper() {}
 }

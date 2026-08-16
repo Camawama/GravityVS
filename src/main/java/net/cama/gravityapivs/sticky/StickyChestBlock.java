@@ -78,8 +78,12 @@ public class StickyChestBlock extends BaseEntityBlock {
     @Nullable
     @Override
     public BlockState getStateForPlacement(BlockPlaceContext context) {
-        // null-safe: fromPlacement defaults to (DOWN, 0) without a placer
-        Rotation24.Orientation orientation = Rotation24.fromPlacement(context.getPlayer());
+        // null-safe: fromPlacement defaults to (DOWN, 0) without a placer.
+        // Level+pos matter: on a Valkyrien Skies ship the orientation is
+        // computed in SHIPYARD grid space, not world space.
+        Rotation24.Orientation orientation = Rotation24.fromPlacement(
+            context.getPlayer(), context.getLevel(), context.getClickedPos()
+        );
         return this.defaultBlockState()
             .setValue(BOTTOM, orientation.bottom())
             .setValue(SPIN, orientation.spin());
