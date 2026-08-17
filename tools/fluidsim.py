@@ -357,6 +357,16 @@ def main():
                            [("coverage", chk),
                             ("shell only", confined_to_shell(3.8))])
 
+    # --- bare core (single block): must form the symmetric 3x3x3 shell ---
+    CORE1 = {(0,0,0)}
+    w = World(CORE1, core_down((0,0,0), 8), field_fn=core_field)
+    all_ok &= scenario("bare core 3x3x3 shell", w, [(0,1,0)],
+        [("26-cell shell", lambda wd: (len(wd.fluid) == 26, f"{len(wd.fluid)} cells")),
+         ("x/z symmetric", lambda wd: (
+             all((wd.f((x,y,z)) is None) == (wd.f((-x,y,z)) is None)
+                 and (wd.f((x,y,z)) is None) == (wd.f((x,y,-z)) is None)
+                 for x in range(-2,3) for y in range(-2,3) for z in range(-2,3)), ""))])
+
     # --- vertical stream into a sideways (WEST) plating field ---
     # field box x in [4..10], y in [-2..2], z in [-2..2], down=WEST inside;
     # wall at x=3 (the "plate face"); stream falls at x=7 from y=6

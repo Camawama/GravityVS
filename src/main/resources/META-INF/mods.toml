@@ -1,12 +1,12 @@
 modLoader="javafml"
 loaderVersion="[47,)"
 license="MIT"
-issueTrackerURL="https://github.com/Camawama/GravityVS/issues"
+issueTrackerURL="https://github.com/Camawama/GravityUnbound/issues"
 
 [[mods]]
-modId="gravityapivs"
+modId="gravityunbound"
 version="1.0.2"
-displayName="GravityVS"
+displayName="Gravity Unbound"
 credits="original mod by Gaider10, fork by qouteall, forge fork by min01"
 authors="cama"
 displayTest="MATCH_VERSION"
@@ -15,21 +15,21 @@ description='''A Forge mod and API that allows for changing an entity's gravity 
 [mods."lithium:options"]
 "mixin.entity.collisions.movement"=false
 
-[[dependencies.gravityapivs]]
+[[dependencies.gravityunbound]]
     modId="forge"
     mandatory=true
     versionRange="[47,)"
     ordering="NONE"
     side="BOTH"
 
-[[dependencies.gravityapivs]]
+[[dependencies.gravityunbound]]
     modId="minecraft"
     mandatory=true
     versionRange="[1.20.1,1.21)"
     ordering="NONE"
     side="BOTH"
 
-[[dependencies.gravityapivs]]
+[[dependencies.gravityunbound]]
     modId="valkyrienskies"
     mandatory=true
     versionRange="[2.4.0,)"

@@ -28,8 +28,8 @@ base {
 }
 
 mixin {
-    add sourceSets.main, "gravityapivs.refmap.json"
-    config "gravityapivs.mixin.json"
+    add sourceSets.main, "gravityunbound.refmap.json"
+    config "gravityunbound.mixin.json"
 }
 
 sourceSets {

@@ -1,4 +1,125 @@
-# GravityVS Changelog
+# Gravity Unbound Changelog (formerly GravityVS)
+
+## Unreleased (2.0.0-dev) — 2026-08-16 (round 28: Gravity Unbound — rename, rails, refinement)
+
+- **RENAMED: the mod is now "Gravity Unbound"** — mod id `gravityunbound`,
+  package `net.camacraft.gravityunbound` (was GravityVS /
+  `net.cama.gravityapivs`). 178 files rewritten, all registries, assets,
+  mixin config, refmap, network channel and capability IDs follow.
+  NOTE: existing test worlds lose this mod's blocks/items (registry
+  namespace changed) — recreate test setups.
+- **Sticky rails + minecarts (v1)**: new Sticky Rail block placeable in
+  all 24 orientations (straight + all four curves, vanilla-identical
+  connection logic ported to the rail's local frame; junctions respond to
+  redstone; rails pop off when support is lost). Minecarts attach and
+  ride them under rotated gravity: a line-for-line port of vanilla's
+  on-track physics runs in the rail frame, the cart's gravity is pinned
+  to the rail while riding, and momentum is conserved on attach. Renders
+  the real vanilla rail model rotated. DEFERRED (documented in-code):
+  cross-frame links around cube edges, slopes, powered/detector
+  variants, carts on VS ships.
+  - Root fix discovered en route: minecart gravity capabilities NEVER
+    ticked (AbstractMinecart.tick doesn't call super) — carts now tick
+    the capability and respond to all gravity fields.
+- **Sticky mimic refinement**: doors place BOTH halves (paired placement,
+  paired breaking, paired open/close); mimic orientation now derives from
+  the CLICKED face (redstone/carpets no longer stand upright); break and
+  hit particles use the captured block; pick-block returns a loaded
+  caster; clearer refusal for block-entity captures + honest tooltips.
+  Rotated block LOGIC (redstone conduction, growth) remains future
+  virtual-space work.
+- **Sticky chest container titles are vanilla** ("Chest" / "Large Chest")
+  so gravity zones read as normal play.
+- **Projectile field-entry desync fixed at the root**: the frame chase's
+  per-tick world-velocity re-expression was bending world-frame
+  projectiles' real velocity during the whole transit ("teleports around
+  before settling"); projectile frames now snap instantly (no camera) and
+  are exempt from the re-expression.
+- **Capsule for ALL entities except projectiles** (boats, modded planes,
+  items, TNT — anything that moves through move()).
+- **Snap-off walking fixed for real**: grounded detection for the
+  cardinal-direction rule now uses the capsule's grounded state (vanilla
+  onGround() is world-down based and stayed false on rotated faces,
+  leaving standing entities under the radial center-pull).
+- **Water no longer freezes grounded players**: the pre-collision static
+  pin (a third pin, missed last round) stripped the current's small
+  tangential movement every tick; it now yields in water/lava.
+- **Per-dimension gravity**: config `dimensionGravity` entries
+  ("minecraft:the_nether=up,0.5") and a runtime API
+  (DimensionGravity.set/clear) apply ambient gravity as a low-priority
+  effect — any field overrides it.
+- **Spawn-egg mobs adopt field gravity the same tick**: entity joins
+  invalidate nearby field sources' entity-query caches (the staggered
+  caches left new mobs unaffected for a few visible ticks).
+- **Per-core "Affects Ships" GUI toggle** (ANDed with the global config)
+  — ship-planets attracting other VS ships is per-block controllable.
+  Core-as-ship attracting other ships already works via the existing
+  force system.
+- Gravity tipped arrows removed from the creative tab (reverted).
+- Simulator: bare-core scenario added — a single core + one source
+  settles as the exact symmetric 26-cell 3×3×3 water shell and drains;
+  if the in-game shape still looks oblong, the remaining suspect is
+  renderer height-shaping at frame boundaries, not physics.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-16 (round 27: entities, projectiles, sticky system, polish)
+
+- **Capsule collider extended to ALL living entities** under active gravity
+  frames (was players-only): mobs on rotated plating no longer catch on
+  their own tilted-envelope AABB (glitchy immobile creepers). Mobs get the
+  full continuous frame: surface probe, planet-walk alignment, twist
+  anchoring, transition pull, capsule grounding, exit watchdog.
+- **Core fields no longer drag grounded entities to the face center.**
+  Grounded mobs (and players with surface snap off) get the SECTOR-FRAME
+  CARDINAL direction (same dominant-axis rule as fluids) — clean
+  face-normal gravity per face; the raw radial pull (whose tangential
+  component dragged everything toward the face center: stuck pigs,
+  unwalkable snap-off cubes) now applies only to airborne entities, where
+  it belongs (orbits, edge falls). Snap-on players keep radial+alignment.
+- **Projectile model unified: projectiles are WORLD-frame.** They integrate
+  position by raw world addition (never move()), so their deltaMovement is
+  world-space with gravity applied along the rotated axis — but three
+  newer local-frame systems corrupted them: the lerpMotion packet
+  conversion, the fluid-push conversion, and the frame-adoption velocity
+  re-expression all now exempt Projectile; cardinal crossings never run
+  the legacy reposition (which also rewrote projectile yaw/pitch with
+  per-cardinal conventions — the "trident flipping all over"). Arrow and
+  throwable gravity now pulls along the CONTINUOUS field vector (frame-
+  down fallback on remote clients, cardinal last) — smooth orbits.
+- **Flowing liquids can push capsule entities**: the anti-slide brake and
+  the ship idle-anchor ate the ~0.005/tick current push; both now yield
+  while the entity is in water or lava.
+- **Gradual falloff is now inverse-square** (full strength within 4
+  blocks) for entities and ships — a linear ramp stayed too strong at
+  range to sustain orbits.
+- **Rotated fluids shade correctly**: each face uses its LOCAL role's
+  vanilla brightness (frame-up surface = full top shade) instead of the
+  rotated world direction's (sideways water looked uniformly darker).
+- **Flow arrows respect frame boundaries**: getFlow gained the renderer's
+  asymmetric cross-frame isolation (pouring feeder reads full, other
+  cross-frame water reads empty; DOWN cells bordering rotated water get
+  the same treatment) — water no longer appears to flow UP a face toward
+  the rim before wrapping. Note: small level differences between faces
+  are inherent to the lattice feed arithmetic (pour-through vs corner
+  tolls) and are not fully removable.
+- **Sticky chests combine into double chests** (vanilla-mirrored TYPE
+  pairing in the chest's local frame, DoubleBlockCombiner menu, shared
+  lid animation, left/right chest models).
+- **Dynamic sticky system**: new Sticky Caster (creative-only): sneak-click
+  any block to capture it, click to place a Sticky Mimic — an invisible
+  shell BE that renders and collides as the captured block in any of the
+  24 grid orientations (doors/trapdoors/gates toggle OPEN on use).
+  Mimics are static visual/collision experiments: block LOGIC (redstone
+  power, rail connections, growth) does not run rotated — documented in
+  the class javadoc. Rails that carry minecarts around a cube would need
+  a minecart-physics port and remain future work.
+- **Creative-only configuration**: the settings GUI (and its packet) now
+  requires creative mode, like command blocks; all legacy item-shortcut
+  interactions (echo shard, amethyst, glow ink) removed — the GUI is the
+  only configuration path. No crafting recipes exist for any mod item.
+  Gravity tipped arrows added to the GravityVS creative tab, and all 12
+  "Arrow of ..." names added to the lang file.
 
 ## Unreleased (2.0.0-dev) — 2026-08-16 (the feed arithmetic: pour-through, corner wraps, boundary cut)
 
