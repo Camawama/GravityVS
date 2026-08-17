@@ -30,7 +30,7 @@ public class GravityCoreBlock extends BaseEntityBlock {
     public GravityCoreBlock() {
         super(BlockBehaviour.Properties.of()
             .mapColor(MapColor.COLOR_PURPLE)
-            .strength(3.0f, 12.0f)
+            .strength(3.0f, 3600000.0f)
             .sound(SoundType.AMETHYST)
         );
     }

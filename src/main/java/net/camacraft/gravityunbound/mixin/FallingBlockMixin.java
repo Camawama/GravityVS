@@ -66,4 +66,13 @@ public abstract class FallingBlockMixin extends Entity {
     private double multiplyGravity(double x) {
         return x * GravityChangerAPI.getGravityStrength(this);
     }
+
+    // PrimedTnt/FallingBlockEntity override tick() WITHOUT calling
+    // super.tick(), so the gravity capability's per-tick driver (injected
+    // into Entity.tick) never ran for them — TNT ignored fields entirely.
+    @org.spongepowered.asm.mixin.injection.Inject(method = "tick", at = @org.spongepowered.asm.mixin.injection.At("HEAD"))
+    private void gravityunbound$tickCapability(org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
+        this.getCapability(net.camacraft.gravityunbound.capabilities.GravityCapabilities.GRAVITY)
+            .ifPresent(net.camacraft.gravityunbound.capabilities.IGravityCapability::tick);
+    }
 }

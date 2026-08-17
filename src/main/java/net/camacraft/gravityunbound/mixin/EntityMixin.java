@@ -374,17 +374,29 @@ public abstract class EntityMixin {
         return v > 0.0 ? v - 0.05 : v + 0.05;
     }
 
-    /** True when the destination has NO ground within step height below. */
+    /**
+     * True when the destination has NO ground within step height below.
+     * A RAYCAST from the destination feet, straight down the frame — the
+     * earlier capsule-fit test kept "finding support" on the cliff's SIDE
+     * face through the fat bottom sphere (supported up to ~radius past the
+     * edge, by which point the grounded flag had already dropped and the
+     * guard disengaged: "I still fall right off while crouching").
+     */
     @org.spongepowered.asm.mixin.Unique
     private boolean gravityunbound$edgeUnsupported(
         Entity self, GravityCapabilityImpl comp, Vec3 up, org.joml.Quaternionf frame,
         double localX, double localY, double localZ
     ) {
-        Vec3 offset = RotationUtil.vecPlayerToWorld(new Vec3(localX, localY, localZ), frame);
-        Vec3 lowered = self.position().add(offset).subtract(up.scale(0.6));
-        EntityDimensions dim = self.getDimensions(self.getPose());
-        // fits == true means the lowered capsule floats in open air: no support
-        return net.camacraft.gravityunbound.util.CapsuleCollider.fits(self, lowered, up, dim.width, dim.height);
+        Vec3 offset = RotationUtil.vecPlayerToWorld(new Vec3(localX, 0.0, localZ), frame);
+        Vec3 from = self.position().add(offset).add(up.scale(0.05));
+        net.minecraft.world.phys.BlockHitResult hit = self.level().clip(new net.minecraft.world.level.ClipContext(
+            from,
+            from.subtract(up.scale(0.05 + 0.6)),
+            net.minecraft.world.level.ClipContext.Block.COLLIDER,
+            net.minecraft.world.level.ClipContext.Fluid.NONE,
+            self
+        ));
+        return hit.getType() != net.minecraft.world.phys.HitResult.Type.BLOCK;
     }
 
     @WrapOperation(method = "Lnet/minecraft/world/entity/Entity;makeBoundingBox()Lnet/minecraft/world/phys/AABB;", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/EntityDimensions;makeBoundingBox(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/AABB;"))

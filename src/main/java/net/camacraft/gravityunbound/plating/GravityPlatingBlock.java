@@ -78,7 +78,7 @@ public class GravityPlatingBlock extends BaseEntityBlock
     private final Map<BlockState, VoxelShape> shapesByState;
     
     public GravityPlatingBlock() {
-        super(BlockBehaviour.Properties.of().noOcclusion().noCollission().instabreak());
+        super(BlockBehaviour.Properties.of().noOcclusion().noCollission().instabreak().explosionResistance(3600000.0f));
         registerDefaultState(getStateDefinition().any()
             .setValue(NORTH, false)
             .setValue(EAST, false)

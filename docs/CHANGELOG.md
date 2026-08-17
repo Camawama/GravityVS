@@ -1,5 +1,64 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-17 (round 30: sync cadence, cliff-edge water, ramps, TNT)
+
+- **Universal in-field smoothness (arrows/items/orbs/tridents)**: entities
+  under an active gravity frame now sync position AND velocity every tick
+  (new ServerEntityMixin). Vanilla's sparse cadence (items every 20
+  ticks) works because plain gravity is a constant vector and client
+  prediction is exact; inside a radial field prediction inevitably
+  drifts, and each rare correction arrived as a visible teleport — the
+  item/orb "teleporting around" and arrow "skipping". Per-tick
+  corrections are tiny and smooth; only entities inside fields pay the
+  bandwidth.
+- **TNT (and falling blocks) now obey gravity**: PrimedTnt and
+  FallingBlockEntity override tick() without calling super, so their
+  gravity capabilities NEVER ticked (same root as the round-28 minecart
+  find). Both mixins now drive the capability.
+- **Field blocks are explosion-immune**: core, plating, and normalizer
+  get bedrock-class blast resistance.
+- **Sneak edge-guard actually works now**: the support test was a
+  capsule-fit check, and the fat bottom sphere kept "finding support" on
+  the cliff's SIDE face until past the point where the grounded flag had
+  already dropped — the guard never engaged. Replaced with a raycast
+  straight down the frame from the destination feet: crouching stops at
+  edges like vanilla.
+- **Stair ramps between faces (snap on)**: new RAMP CONSENSUS adoption —
+  standing on a collision plane that disagrees with the held face for
+  several consecutive ticks re-adopts the plane actually stood on (same
+  relative-endorsement gate as other adoptions). Walking a stair ramp
+  between two faces of a hollow repulse cube transitions cleanly instead
+  of snapping wrong. (Snap OFF on stairs remains hard mode by design —
+  pure radial with no assists, per the snap-off spec.)
+- **Camera-in-block during transitions fixed**: rotating the frame
+  rotates the capsule in place, and nothing re-resolved contacts until
+  the next move — the head could spend frames inside a block near walls.
+  After any significant frame-chase step the capsule now depenetrates
+  immediately at the current position.
+- **Water boundary shape**: the renderer's cross-frame height-shaping
+  policy is flipped from "full column" to CLIFF-EDGE — cross-frame water
+  shapes as empty, so each face's water renders its own closed vanilla
+  cliff edge at cube boundaries instead of bulging to full height (the
+  "shape doesn't appear right" on the 3×3×3).
+- **Minecarts on rotated rails fixed** (rails v3): the cart body now
+  visually aligns to the track bed via the new render-frame override
+  (gravity stays the cart's own, with exact velocity re-expression when
+  the pin engages/releases); seating uses vanilla's exact offset along
+  the rail's up, applied on the attach tick too. The real "wall carts
+  don't slide" culprit turned out to be the BOUNDING BOX: a plain-gravity
+  cart on a wall rail kept its world-frame box embedded ~0.4 into the
+  wall, so movement clipped against the wall column every tick — the
+  cart accelerated but never moved (and the pick ray hit the wall,
+  making carts hard to break). While riding a non-DOWN rail the box is
+  now built in the rail frame; the gravity projection itself was already
+  correct on every shape.
+- Trident note: a full-speed trident genuinely exceeds a small field's
+  escape velocity — that is real orbital mechanics, not a bug. For
+  orbit play with fast projectiles, raise the core's Gravity Accel in
+  the GUI (it scales projectile pull too).
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-17 (round 29: feel, snap, rails v2, desync — 12-finding pass)
 
 - **Capsule feel on flat ground**: all anti-slide pins/brakes now engage

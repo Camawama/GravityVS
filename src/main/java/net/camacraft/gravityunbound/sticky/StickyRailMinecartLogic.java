@@ -27,15 +27,19 @@ import net.minecraft.world.phys.Vec3;
  * {@code mixin.AbstractMinecartMixin} (which owns the parts that need
  * protected {@code AbstractMinecart} access).
  *
- * <p><b>Physics model (no gravity pin).</b> The cart KEEPS ITS OWN gravity —
- * whatever fields or normal gravity give it — and the rail CONSTRAINS it:
- * the position clamp onto the track chord holds the cart laterally, and the
- * only accelerating influence of gravity on a riding cart is its projection
- * onto the track line ({@code slopeAdjustment * (gravityUnit . trackDir)},
- * the generalization of vanilla's hardcoded per-slope thrust — see the mixin).
- * A cart on a wall rail under normal world gravity sits still on a
- * world-horizontal track (gravity perpendicular to the track) and rolls along
- * a track that has a component along gravity.
+ * <p><b>Physics model (no gravity pin, but a VISUAL pin).</b> The cart KEEPS
+ * ITS OWN gravity — whatever fields or normal gravity give it — and the rail
+ * CONSTRAINS it: the position clamp onto the track chord holds the cart
+ * laterally, and the only accelerating influence of gravity on a riding cart
+ * is its projection onto the track line
+ * ({@code slopeAdjustment * (gravityUnit . trackDir)}, the generalization of
+ * vanilla's hardcoded per-slope thrust — see the mixin). A cart on a wall
+ * rail under normal world gravity sits still on a world-horizontal track
+ * (gravity perpendicular to the track) and rolls along a track that has a
+ * component along gravity. While riding, the cart's VISUAL frame (and its
+ * bounding box) is mechanically pinned to the rail's bottom frame via
+ * {@code GravityCapabilityImpl.setExternalVisualOverride} — render/pick
+ * alignment only; the gravity stays the cart's own (see the mixin).
  *
  * <p><b>Coordinate systems.</b> Three frames are involved:
  * <ul>
@@ -82,8 +86,8 @@ public final class StickyRailMinecartLogic {
 
     /** A {@link Decision} plus the rail it applies to (RIDE only). */
     public record DetectResult(Decision decision, @Nullable RailHit hit) {
-        static final DetectResult VANILLA = new DetectResult(Decision.VANILLA, null);
-        static final DetectResult OFF_TRACK = new DetectResult(Decision.OFF_TRACK, null);
+        public static final DetectResult VANILLA = new DetectResult(Decision.VANILLA, null);
+        public static final DetectResult OFF_TRACK = new DetectResult(Decision.OFF_TRACK, null);
 
         static DetectResult ride(BlockPos pos, BlockState state) {
             return new DetectResult(Decision.RIDE, new RailHit(pos, state, state.getValue(StickyRailBlock.BOTTOM)));

@@ -43,6 +43,7 @@
     "PrimedTntMixin",
     "ProjectileMixin",
     "RamTargetMixin",
+    "ServerEntityMixin",
     "ServerGamePacketListenerImplMixin",
     "ServerPlayerGameModeMixin",
     "ShulkerBoxBlockEntityMixin",

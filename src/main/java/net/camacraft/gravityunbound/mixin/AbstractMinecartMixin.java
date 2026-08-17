@@ -51,24 +51,48 @@ import net.minecraft.world.phys.Vec3;
  *       when {@code BOTTOM != DOWN}, or when vanilla's world-frame detection
  *       would misread a rotated rail as a flat one (then the ported off-track
  *       branch runs instead, so vanilla track physics never double-run).</li>
- *   <li>Physics model: the cart KEEPS ITS OWN gravity (no pin). The rail
- *       constrains it — the track clamp holds it laterally, and the on-track
- *       acceleration is the PROJECTION of the cart's actual gravity vector
- *       onto the track line, scaled by vanilla's slope constant
+ *   <li>Physics model: the cart KEEPS ITS OWN gravity (no gravity pin). The
+ *       rail constrains it — the track clamp holds it laterally, and the
+ *       on-track acceleration is the PROJECTION of the cart's actual gravity
+ *       vector onto the track line, scaled by vanilla's slope constant
  *       ({@code getSlopeAdjustment()} = 0.0078125/tick; exactly vanilla's
  *       hardcoded slope thrust when gravity is plain DOWN and the shape
- *       ascending). Vanilla's free-fall gravity add is NOT applied while
- *       riding: under plain gravity vanilla immediately discards it anyway
- *       (Forge's {@code moveMinecartOnRail} moves with y=0 and
+ *       ascending — verified sign-for-sign against all four ascending cases;
+ *       it applies on EVERY shape, so a wall track running along gravity
+ *       accelerates the cart). Vanilla's free-fall gravity add is NOT applied
+ *       while riding: under plain gravity vanilla immediately discards it
+ *       anyway (Forge's {@code moveMinecartOnRail} moves with y=0 and
  *       {@code applyNaturalSlowdown} zeroes dm.y), and under a rotated rail
  *       frame it would leak into the track plane — the source of the old
  *       oscillation bug. Friction and speed caps are applied in the RAIL
  *       frame (ports of {@code applyNaturalSlowdown}/{@code
  *       moveMinecartOnRail}), since the cart-local frame no longer coincides
  *       with the rail frame.</li>
+ *   <li>VISUAL pin: while riding a non-DOWN rail (both sides, every tick) the
+ *       capability's external visual override pins the cart's visual frame to
+ *       the rail bottom's CANONICAL cardinal frame, so the model lies on the
+ *       track bed instead of rendering upright half inside the wall. The
+ *       canonical frame (not the rail's spin-inclusive Rotation24 quaternion)
+ *       is used so neighboring rails of different SPIN share one frame — the
+ *       in-plane heading is yaw's job — and so the frame helpers recognize it
+ *       and use exact cardinal math. The override is consumed by
+ *       {@code advanceVisualRotation} WITHOUT the chase's world-velocity
+ *       re-expression, so this mixin re-expresses dm across the frame change
+ *       itself on ridden ticks (see the HEAD injection). Because {@code
+ *       EntityMixin} interprets move()'s dm in the settled-cardinal/visual
+ *       frame, the dm frame while riding IS the pinned frame — the explicit
+ *       cartToRail/railToCart conversions mirror that exactly.</li>
+ *   <li>Bounding box: while riding a non-DOWN rail the box is built in the
+ *       RAIL frame instead of the cart's gravity frame ({@link
+ *       #makeBoundingBox()}). The gravity-frame box of e.g. a plain-gravity
+ *       cart on a wall rail is embedded ~0.43 into the wall, which made
+ *       move() clip ALL track travel (carts froze instead of rolling) and the
+ *       pick ray hit the wall (carts "difficult to break").</li>
  *   <li>Rider position: {@link #positionRider} rotates the riding offset into
- *       the cart's gravity frame instead of applying it on the world Y axis
- *       (vanilla path untouched when the cart's gravity is default).</li>
+ *       the RAIL frame while riding a non-DOWN sticky rail (whatever the
+ *       cart's gravity), else into the cart's gravity frame instead of the
+ *       world Y axis (vanilla path untouched for a default-gravity cart off
+ *       sticky rails).</li>
  *   <li>Yaw is computed from the position delta in the cart's VISUAL frame
  *       (player convention — the frame the render dispatcher poses the cart
  *       in), with vanilla's exact atan2 + flip logic.</li>
@@ -87,8 +111,46 @@ public abstract class AbstractMinecartMixin extends Entity {
 
     @Shadow protected abstract void comeOffTrack();
 
+    /**
+     * The BOTTOM of the non-DOWN sticky rail this cart is currently riding,
+     * or null when not riding one. Maintained on BOTH sides by the tick HEAD
+     * injection (the client needs it for the pick/interaction box and the
+     * ride-aligned passenger seat). Drives {@link #makeBoundingBox()} and the
+     * per-tick visual override.
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private @Nullable Direction gravityunbound$railBottom = null;
+
     public AbstractMinecartMixin(EntityType<?> type, Level world) {
         super(type, world);
+    }
+
+    /**
+     * While riding a non-DOWN sticky rail, build the bounding box in the RAIL
+     * frame (world-aligned envelope of the box rotated so its local UP is the
+     * rail's up) instead of the cart's gravity frame. Without this, a
+     * plain-gravity cart on a wall rail keeps its vanilla world-frame box —
+     * the position sits only 1/16 off the wall face, so the box was embedded
+     * ~0.43 into the wall: move() clipped every along-track step against the
+     * wall column (carts never rolled) and the pick ray hit the wall before
+     * the cart (carts were nearly unbreakable). The rail-frame box extends
+     * 0.7 along the rail's up (away from the wall) and +-0.49 in the track
+     * plane, entirely outside the mounting wall. (Not riding: defer to
+     * {@code Entity.makeBoundingBox}, where {@code EntityMixin}'s gravity
+     * handling applies.)
+     */
+    @Override
+    protected AABB makeBoundingBox() {
+        Direction bottom = gravityunbound$railBottom;
+        if (bottom == null || bottom == Direction.DOWN) {
+            return super.makeBoundingBox();
+        }
+        AABB box = this.getDimensions(this.getPose()).makeBoundingBox(0.0, 0.0, 0.0);
+        if (bottom.getAxisDirection() == Direction.AxisDirection.POSITIVE) {
+            // mirror EntityMixin: keep the cell-boundary epsilon on the far side
+            box = box.move(0.0, -1.0E-6, 0.0);
+        }
+        return RotationUtil.boxPlayerToWorld(box, bottom).move(this.position());
     }
 
     @ModifyArg(
@@ -116,6 +178,19 @@ public abstract class AbstractMinecartMixin extends Entity {
      */
     @Override
     protected void positionRider(Entity passenger, Entity.MoveFunction moveFunction) {
+        // riding a non-DOWN sticky rail: the seat offset follows the RAIL's
+        // up (the cart's pinned visual frame), regardless of the cart's own
+        // gravity — a plain-gravity cart on a wall rail is comp.isDefault(),
+        // but its rider must still sit off the track bed, not world-up
+        Direction railBottom = gravityunbound$railBottom;
+        if (railBottom != null && railBottom != Direction.DOWN) {
+            if (this.hasPassenger(passenger)) {
+                double dy = this.getPassengersRidingOffset() + passenger.getMyRidingOffset();
+                Vec3 offset = RotationUtil.vecEntityToWorld(new Vec3(0.0, dy, 0.0), railBottom);
+                moveFunction.accept(passenger, this.getX() + offset.x, this.getY() + offset.y, this.getZ() + offset.z);
+            }
+            return;
+        }
         GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(this);
         if (comp == null || comp.isDefault()) {
             super.positionRider(passenger, moveFunction);
@@ -138,26 +213,61 @@ public abstract class AbstractMinecartMixin extends Entity {
         // so EntityMixin's Entity.tick HEAD injection — the only driver of
         // the gravity capability's per-tick update — never fires for
         // minecarts. Drive it here on both sides (like EntityMixin does for
-        // everything else).
-        this.getCapability(net.camacraft.gravityunbound.capabilities.GravityCapabilities.GRAVITY)
-            .ifPresent(net.camacraft.gravityunbound.capabilities.IGravityCapability::tick);
+        // everything else). Riding detection runs BEFORE the capability tick
+        // so the visual override set for a ridden tick is consumed by THIS
+        // tick's advanceVisualRotation (it is a one-shot, consumed once per
+        // capability tick).
+        AbstractMinecart self = (AbstractMinecart) (Object) this;
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(self);
+        if (comp == null) {
+            gravityunbound$railBottom = null;
+            this.getCapability(net.camacraft.gravityunbound.capabilities.GravityCapabilities.GRAVITY)
+                .ifPresent(net.camacraft.gravityunbound.capabilities.IGravityCapability::tick);
+            return;
+        }
+
+        StickyRailMinecartLogic.DetectResult result = self.canUseRail()
+            ? StickyRailMinecartLogic.decide(this.level(), this.position(), comp.getCurrGravityDirection())
+            : StickyRailMinecartLogic.DetectResult.VANILLA;
+
+        if (result.decision() == StickyRailMinecartLogic.Decision.RIDE) {
+            Direction bottom = result.hit().bottom();
+            // Pin the VISUAL frame to the rail bottom's canonical cardinal
+            // frame (render/pick alignment only; gravity stays the cart's
+            // own). Every ridden tick, both sides — the override is consumed
+            // once per capability tick. The canonical frame (not the rail's
+            // spin-inclusive Rotation24 quaternion) keeps neighboring rails
+            // of different SPIN in ONE shared frame, leaves the in-plane
+            // heading to yaw, and is recognized by the RotationUtil helpers
+            // for exact cardinal math.
+            //
+            // dm continuity: the override consumption intentionally skips the
+            // chase's world-velocity re-expression ("deltaMovement semantics
+            // stay with the caller"), but EntityMixin interprets move()'s dm
+            // in the settled-cardinal/visual frame — which this override
+            // CHANGES. Re-express dm across the change ourselves: capture the
+            // world dm in the pre-tick frame, restore it in the post-tick
+            // frame. On steady ridden ticks both frames are the same
+            // canonical instance and the round trip is exact cardinal math
+            // (bit-for-bit identity).
+            Vec3 dmWorld = StickyRailMinecartLogic.cartLocalToWorld(comp, this.getDeltaMovement());
+            comp.setExternalVisualOverride(RotationUtil.getWorldRotationQuaternion(bottom));
+            gravityunbound$railBottom = bottom;
+            comp.tick();
+            this.setDeltaMovement(StickyRailMinecartLogic.worldToCartLocal(comp, dmWorld));
+        } else {
+            // not riding: drop the rail box/seat frame; the capability's own
+            // chase re-expresses dm when the frame moves off the rail pin
+            gravityunbound$railBottom = null;
+            comp.tick();
+        }
 
         // the client branch of the vanilla tick only lerps toward server
-        // state — leave it alone (carts are server-controlled)
+        // state — leave it alone (carts are server-controlled); the ride
+        // state above still ran so the client box/visual frame track the rail
         if (this.level().isClientSide) {
             return;
         }
-        AbstractMinecart self = (AbstractMinecart) (Object) this;
-        if (!self.canUseRail()) {
-            return;
-        }
-        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(self);
-        if (comp == null) {
-            return;
-        }
-        StickyRailMinecartLogic.DetectResult result = StickyRailMinecartLogic.decide(
-            this.level(), this.position(), comp.getCurrGravityDirection()
-        );
         if (result.decision() == StickyRailMinecartLogic.Decision.VANILLA) {
             return;
         }
@@ -436,19 +546,25 @@ public abstract class AbstractMinecartMixin extends Entity {
             this.setDeltaMovement(StickyRailMinecartLogic.railToCart(comp, slowRail, bottom));
         }
 
-        // re-seat on the track plane; trade slope height for speed (vanilla)
+        // re-seat on the track plane (vanilla's final height: rail cell
+        // + 0.0625 along the rail's up, from railTrackPos); trade slope
+        // height for speed only when the tick-start track position resolved
+        // too (vanilla gates both on it, but seating must not be skipped on
+        // the attach tick or the cart spends it sunk to the cell bottom)
         Vec3 localNow = StickyRailMinecartLogic.worldPosToRail(this.position(), center, bottom);
         Vec3 trackPosNow = StickyRailMinecartLogic.railTrackPos(
             this.level(), localNow.x, localNow.y, localNow.z, center, bottom
         );
-        if (trackPosNow != null && vec3 != null) {
-            double d17 = (vec3.y - trackPosNow.y) * 0.05;
-            Vec3 vec34 = StickyRailMinecartLogic.cartToRail(comp, this.getDeltaMovement(), bottom);
-            double d18 = vec34.horizontalDistance();
-            if (d18 > 0.0) {
-                this.setDeltaMovement(StickyRailMinecartLogic.railToCart(
-                    comp, vec34.multiply((d18 + d17) / d18, 1.0, (d18 + d17) / d18), bottom
-                ));
+        if (trackPosNow != null) {
+            if (vec3 != null) {
+                double d17 = (vec3.y - trackPosNow.y) * 0.05;
+                Vec3 vec34 = StickyRailMinecartLogic.cartToRail(comp, this.getDeltaMovement(), bottom);
+                double d18 = vec34.horizontalDistance();
+                if (d18 > 0.0) {
+                    this.setDeltaMovement(StickyRailMinecartLogic.railToCart(
+                        comp, vec34.multiply((d18 + d17) / d18, 1.0, (d18 + d17) / d18), bottom
+                    ));
+                }
             }
             gravityunbound$setPosFromRail(localNow.x, trackPosNow.y, localNow.z, center, bottom);
         }

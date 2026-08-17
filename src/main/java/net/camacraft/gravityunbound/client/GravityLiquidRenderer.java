@@ -149,10 +149,12 @@ public final class GravityLiquidRenderer {
 
         // Frame checks for the 6 face neighbors: one fluidDownAt query each
         // (skipped when the neighbor holds no fluid — an empty cell behaves
-        // identically in either frame), cached for the whole call. Per the
-        // class doc: CULLING sees cross-frame fluid as empty (the ...Eff
-        // states below); HEIGHT SHAPING sees it as a full column (the raw
-        // states plus these flags, further down).
+        // identically in either frame), cached for the whole call. Both
+        // CULLING and HEIGHT SHAPING see cross-frame fluid as EMPTY: each
+        // frame renders its own closed vanilla cliff edge at the boundary.
+        // (The old "shaping sees a full column" policy pulled boundary
+        // water up to full height — the bulging, wrong-looking edges on
+        // wrapped cubes.)
         boolean downSameFrame = downFluid.isEmpty() || sameFrame(level, down, downPos);
         boolean upSameFrame = upFluid.isEmpty() || sameFrame(level, down, upPos);
         boolean northSameFrame = northFluid.isEmpty() || sameFrame(level, down, northPos);
@@ -192,11 +194,9 @@ public final class GravityLiquidRenderer {
         float shadeUp = level.getShade(Direction.UP, true);
         Fluid fluid = fluidState.getType();
         // getHeight specialized to the cell itself (the cell's fluid always
-        // matches its own type). HEIGHT SHAPING: same-type fluid "above" (in
-        // this cell's frame) makes this a full column even when cross-frame —
-        // a stream entering the field keeps its full shape through the
-        // boundary elbow instead of truncating to its own partial height.
-        float ownHeight = fluid.isSame(upFluid.getType()) ? 1.0F : fluidState.getOwnHeight();
+        // matches its own type); the above-check uses the frame-filtered
+        // state, so only a SAME-frame column makes this cell full height
+        float ownHeight = fluid.isSame(upFluidEff.getType()) ? 1.0F : fluidState.getOwnHeight();
         float hNE;
         float hNW;
         float hSE;
@@ -491,8 +491,7 @@ public final class GravityLiquidRenderer {
 
     // ------------------------------------------------------------------
     // heights (vanilla corner averaging; "above" mapped through the basis;
-    // HEIGHT SHAPING: cross-frame same-type fluid counts as a full column
-    // — see the class doc)
+    // cross-frame same-type fluid shapes as EMPTY — the cliff-edge look)
     // ------------------------------------------------------------------
 
     private static float calculateAverageHeight(
@@ -543,14 +542,18 @@ public final class GravityLiquidRenderer {
     ) {
         if (fluid.isSame(fluidState.getType())) {
             if (!posSameFrame) {
-                // cross-frame column: its level lives on another axis; count
-                // it as full so corners ramp up to meet it at the boundary
-                return 1.0F;
+                // cross-frame fluid: its level lives on another axis — shape
+                // as if the cell were passable air, giving this frame's water
+                // a normal vanilla cliff edge at the boundary
+                return 0.0F;
             }
-            // vanilla above-check, deliberately frame-free: same-type fluid
-            // above counts as full even when cross-frame (shaping errs taller)
-            BlockState above = level.getBlockState(pos.relative(down.getOpposite()));
-            return fluid.isSame(above.getFluidState().getType()) ? 1.0F : fluidState.getOwnHeight();
+            // frame-aware above-check: only a SAME-frame column counts full
+            BlockPos abovePos = pos.relative(down.getOpposite());
+            BlockState above = level.getBlockState(abovePos);
+            FluidState aboveFluid = above.getFluidState();
+            boolean fullColumn = fluid.isSame(aboveFluid.getType())
+                && (aboveFluid.isEmpty() || sameFrame(level, down, abovePos));
+            return fullColumn ? 1.0F : fluidState.getOwnHeight();
         } else {
             return !blockState.isSolid() ? 0.0F : -1.0F;
         }

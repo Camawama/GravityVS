@@ -710,6 +710,29 @@ public class GravityCapabilityImpl implements IGravityCapability {
             tangentSpeed = 0.1;
         }
 
+        // RAMP CONSENSUS: standing (collision-grounded) on a plane that
+        // disagrees with the held face for several consecutive ticks — a
+        // stair ramp bending from one cube face toward the next produces
+        // exactly this — re-adopt the plane actually being stood on, under
+        // the same relative endorsement gate as the other adoptions. The
+        // held-face probe below would otherwise keep confirming the old
+        // face forever ("walking the stair ramp keeps snapping wrong").
+        if (held && capsuleGrounded && capsuleGroundNormal != null) {
+            if (capsuleGroundNormal.dot(heldNormal) < 0.8
+                && capsuleGroundNormal.dot(fieldUp) > 0.2
+                && capsuleGroundNormal.dot(fieldUp) > 0.5 * heldNormal.dot(fieldUp)
+            ) {
+                if (++contactDisagreeTicks >= 4) {
+                    contactDisagreeTicks = 0;
+                    adoptGroundNormal(capsuleGroundNormal);
+                    return;
+                }
+            }
+            else {
+                contactDisagreeTicks = 0;
+            }
+        }
+
         Vec3 normal = probeSurfaceNormal(feet.subtract(probeDown.scale(0.2)), probeDown, 0.2 + GROUND_PROBE_DEPTH);
         if (normal != null && normal.dot(fieldUp) > SUPPORT_KEEP_DOT) {
             adoptGroundNormal(normal);
@@ -1128,6 +1151,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
         prevVisualRotation.set(visualRotation);
         Quaternionf frameBefore = new Quaternionf(visualRotation);
 
+        // EXTERNAL VISUAL OVERRIDE (rail-constrained vehicles): a minecart on
+        // a rotated sticky rail is mechanically aligned to the TRACK BED even
+        // though its gravity stays its own — the rail logic sets this every
+        // ridden tick. Render-frame only: deltaMovement semantics stay with
+        // the caller (the ride math works in explicit rail coordinates), so
+        // the chase's world-velocity re-expression must not run.
+        if (externalVisualOverride != null) {
+            visualTarget.set(externalVisualOverride);
+            visualRotation.set(externalVisualOverride);
+            lastChaseTarget.set(externalVisualOverride);
+            externalVisualOverride = null;
+            return;
+        }
+
         // Non-living remotes prefer the LOCALLY computed target whenever
         // local field effects are fresh: the client applies fields to them
         // itself (see the field BEs), and the synced target lags a tick or
@@ -1226,6 +1263,26 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
 
         normalizeTwist();
+
+        // Rotating the frame rotates the CAPSULE in place — a rotation is not
+        // a move, so nothing re-resolves contacts until the next move tick,
+        // and near walls the head could spend a frame inside a block (camera
+        // clipping, hitbox tip phasing). After a significant chase step,
+        // depenetrate immediately at the current position.
+        float stepMoved = angleBetween(frameBefore, visualRotation);
+        if (stepMoved > (float) Math.toRadians(1.5)
+            && useCapsuleCollision()
+            && entity.level().isClientSide() && entity.isControlledByLocalInstance()
+        ) {
+            net.camacraft.gravityunbound.util.CapsuleCollider.Result resolved =
+                net.camacraft.gravityunbound.util.CapsuleCollider.collide(
+                    entity, getUpVector(), getEffectiveUpVector(), Vec3.ZERO, false
+                );
+            if (resolved.collidedMovement.lengthSqr() > 1.0E-10) {
+                Vec3 nudged = entity.position().add(resolved.collidedMovement);
+                entity.setPos(nudged.x, nudged.y, nudged.z);
+            }
+        }
     }
 
     /**
@@ -1560,6 +1617,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private @Nullable Vec3 lastFieldVector = null;
     // consecutive ticks the field consisted of secondary bleeds only
     private int secondaryOnlySustainTicks = 0;
+    // one-tick visual-frame override from rail-constrained vehicles
+    private @Nullable Quaternionf externalVisualOverride = null;
+    // consecutive ticks the collision ground plane disagreed with the held face
+    private int contactDisagreeTicks = 0;
+
+    /** See the consumption site in {@link #advanceVisualRotation()}. */
+    public void setExternalVisualOverride(Quaternionf frame) {
+        if (externalVisualOverride == null) {
+            externalVisualOverride = new Quaternionf(frame);
+        }
+        else {
+            externalVisualOverride.set(frame);
+        }
+    }
 
     private void resolveGravityTarget() {
         if (tempEffects.isEmpty()) {
