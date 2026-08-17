@@ -202,7 +202,29 @@ public abstract class EntityMixin {
         //   tangential movement — the pin stripped it every tick, freezing
         //   grounded players solid inside flowing water (fluid drag already
         //   damps the tilted-gravity creep the pin exists to remove).
+        // SNEAK EDGE-GUARD: vanilla's maybeBackOffFromEdge is world-down
+        // based and is cancelled for capsule players, which removed the
+        // "crouching stops you at the edge" safety entirely. Reimplemented
+        // here in the FRAME's tangent plane: while sneaking and grounded,
+        // shrink the tangential movement (vanilla's 0.05 decrements, per
+        // local axis, then both) until the capsule would still have ground
+        // within step height below the destination.
+        if (self instanceof Player sneakPlayer && sneakPlayer.isShiftKeyDown()
+            && comp.capsuleGrounded
+            && !sneakPlayer.getAbilities().flying
+            && movement.dot(up) <= 0.0
+        ) {
+            movement = gravityunbound$capsuleBackOffFromEdge(self, comp, up, movement);
+        }
+
+        // - only on genuinely TILTED ground: the pin exists to stop the
+        //   downhill creep a sphere stack has on a slope. On ground that is
+        //   flat relative to the frame there is no creep — and the pin was
+        //   eating turning momentum and diagonal movement there instead
+        //   ("catches on nothing", jitter when walking diagonally, and the
+        //   molasses at concave plating seams).
         if (comp.capsuleGrounded && comp.capsuleGroundNormal != null
+            && comp.capsuleGroundNormal.dot(up) < 0.999
             && self.level().isClientSide() && self.isControlledByLocalInstance()
             && self instanceof net.minecraft.world.entity.LivingEntity living
             && movement.dot(up) <= 0.01
@@ -314,6 +336,55 @@ public abstract class EntityMixin {
     {
         Entity entity = Entity.class.cast(this);
         entity.getCapability(GravityCapabilities.GRAVITY).ifPresent(IGravityCapability::tick);
+    }
+
+    /**
+     * Frame-aware port of vanilla's sneak edge-guard. Movement is expressed
+     * in the visual frame's tangent plane; each local axis (then both) is
+     * shrunk in 0.05 steps until the capsule would still find ground within
+     * step height below the destination — mirroring vanilla's
+     * {@code maybeBackOffFromEdge} structure exactly, with the capsule fit
+     * test standing in for {@code noCollision(box.move(x, -step, z))}.
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private Vec3 gravityunbound$capsuleBackOffFromEdge(Entity self, GravityCapabilityImpl comp, Vec3 up, Vec3 movement) {
+        org.joml.Quaternionf frame = comp.getVisualRotation();
+        Vec3 local = RotationUtil.vecWorldToPlayer(movement, frame);
+        double dx = local.x;
+        double dz = local.z;
+
+        while (dx != 0.0 && gravityunbound$edgeUnsupported(self, comp, up, frame, dx, local.y, 0.0)) {
+            dx = gravityunbound$shrinkToward(dx);
+        }
+        while (dz != 0.0 && gravityunbound$edgeUnsupported(self, comp, up, frame, 0.0, local.y, dz)) {
+            dz = gravityunbound$shrinkToward(dz);
+        }
+        while (dx != 0.0 && dz != 0.0 && gravityunbound$edgeUnsupported(self, comp, up, frame, dx, local.y, dz)) {
+            dx = gravityunbound$shrinkToward(dx);
+            dz = gravityunbound$shrinkToward(dz);
+        }
+        return RotationUtil.vecPlayerToWorld(new Vec3(dx, local.y, dz), frame);
+    }
+
+    @org.spongepowered.asm.mixin.Unique
+    private static double gravityunbound$shrinkToward(double v) {
+        if (v < 0.05 && v >= -0.05) {
+            return 0.0;
+        }
+        return v > 0.0 ? v - 0.05 : v + 0.05;
+    }
+
+    /** True when the destination has NO ground within step height below. */
+    @org.spongepowered.asm.mixin.Unique
+    private boolean gravityunbound$edgeUnsupported(
+        Entity self, GravityCapabilityImpl comp, Vec3 up, org.joml.Quaternionf frame,
+        double localX, double localY, double localZ
+    ) {
+        Vec3 offset = RotationUtil.vecPlayerToWorld(new Vec3(localX, localY, localZ), frame);
+        Vec3 lowered = self.position().add(offset).subtract(up.scale(0.6));
+        EntityDimensions dim = self.getDimensions(self.getPose());
+        // fits == true means the lowered capsule floats in open air: no support
+        return net.camacraft.gravityunbound.util.CapsuleCollider.fits(self, lowered, up, dim.width, dim.height);
     }
 
     @WrapOperation(method = "Lnet/minecraft/world/entity/Entity;makeBoundingBox()Lnet/minecraft/world/phys/AABB;", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/EntityDimensions;makeBoundingBox(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/AABB;"))

@@ -206,7 +206,15 @@ public class GravityNormalizerBlockEntity extends BlockEntity
             if (entity.isRemoved()) {
                 continue;
             }
-            if (world.isClientSide() && !entity.isControlledByLocalInstance() && !GCUtil.isClientPlayer(entity)) {
+            // Remote LIVING entities are server-authoritative (frames arrive
+            // via sync packets). NON-living remotes (items, XP orbs, TNT,
+            // minecarts) are client-PREDICTED physics objects: the client
+            // must compute their frames from its own local field sources or
+            // its prediction runs in a stale frame and every server position
+            // packet reads as a rubber-band.
+            if (world.isClientSide() && !entity.isControlledByLocalInstance()
+                && !GCUtil.isClientPlayer(entity)
+                && entity instanceof net.minecraft.world.entity.LivingEntity) {
                 continue;
             }
 

@@ -14,6 +14,9 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtUtils;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
@@ -27,22 +30,28 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelReader;
 import net.minecraft.world.level.block.BaseEntityBlock;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.SoundType;
+import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.StateDefinition;
+import net.minecraft.world.level.block.state.properties.BlockSetType;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.DirectionProperty;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.block.state.properties.IntegerProperty;
+import net.minecraft.world.level.gameevent.GameEvent;
 import net.minecraft.world.level.material.MapColor;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.shapes.CollisionContext;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraftforge.client.extensions.common.IClientBlockExtensions;
+import net.minecraftforge.fml.util.ObfuscationReflectionHelper;
 
 /**
  * Sticky Mimic — the Gravity Block Framework's "sticky ANY block"
@@ -157,6 +166,22 @@ public class StickyMimicBlock extends BaseEntityBlock {
         super.setPlacedBy(level, pos, state, placer, stack);
         if (!(level.getBlockEntity(pos) instanceof StickyMimicBlockEntity mimic)) {
             return;
+        }
+        // CLIENT: BlockItem.place only merges the stack's BlockEntityTag into
+        // the BE on the SERVER (updateCustomBlockEntityTag bails when
+        // getServer() is null), so the predicted client BE is still empty
+        // here. Prefill it from the stack so the place-sound lookup that runs
+        // right after this (BlockItem.place ->
+        // state.getSoundType(level, pos, player) -> this block's override)
+        // hears the CAPTURED block for the placing player too — not the
+        // shell's default stone — and the mimic renders on its first frame
+        // instead of after the BE sync.
+        if (level.isClientSide && mimic.getMimickedState().isAir()) {
+            BlockState fromStack = capturedStateFromStack(stack, level);
+            if (fromStack != null) {
+                // client-side the "sync" half is a no-op; this just stores
+                mimic.setMimickedStateAndSync(fromStack);
+            }
         }
         BlockState captured = mimic.getMimickedState();
         if (captured == null || !captured.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)) {
@@ -336,8 +361,8 @@ public class StickyMimicBlock extends BaseEntityBlock {
         if (level.getBlockEntity(pos) instanceof StickyMimicBlockEntity mimic) {
             BlockState mimicked = mimic.getMimickedState();
             if (mimicked != null && mimicked.hasProperty(BlockStateProperties.OPEN)) {
+                boolean open = !mimicked.getValue(BlockStateProperties.OPEN);
                 if (!level.isClientSide) {
-                    boolean open = !mimicked.getValue(BlockStateProperties.OPEN);
                     mimic.setMimickedStateAndSync(mimicked.setValue(BlockStateProperties.OPEN, open));
                     // a two-tall pair (door) opens/closes as one — the partner
                     // is SET (not cycled) so desynced halves re-converge
@@ -347,10 +372,61 @@ public class StickyMimicBlock extends BaseEntityBlock {
                             partner.getMimickedState().setValue(BlockStateProperties.OPEN, open));
                     }
                 }
+                // the captured block's own open/close sound + sculk game
+                // event, mirrored from DoorBlock/TrapDoorBlock/FenceGateBlock
+                // .use(): both run on BOTH logical sides like vanilla —
+                // playSound(player, ...) skips the interacting player on the
+                // server, whose own client plays it locally — and ONCE, at the
+                // clicked half only, for a two-tall door pair
+                SoundEvent sound = openCloseSound(mimicked.getBlock(), open);
+                if (sound != null) {
+                    level.playSound(player, pos, sound, SoundSource.BLOCKS,
+                        1.0F, level.getRandom().nextFloat() * 0.1F + 0.9F);
+                }
+                level.gameEvent(player, open ? GameEvent.BLOCK_OPEN : GameEvent.BLOCK_CLOSE, pos);
                 return InteractionResult.sidedSuccess(level.isClientSide);
             }
         }
         return InteractionResult.PASS;
+    }
+
+    /**
+     * The captured block's open/close {@link SoundEvent}, resolved the way
+     * the block itself would in its {@code use()}: {@link DoorBlock} through
+     * its public {@link DoorBlock#type() BlockSetType} accessor;
+     * {@link TrapDoorBlock} through its {@code BlockSetType} too, but that
+     * field is private with no accessor in 1.20.1 (SRG {@code f_271458_}), so
+     * it is read reflectively; {@link FenceGateBlock} through the private
+     * {@code openSound}/{@code closeSound} fields Forge PATCHES IN (they
+     * replace vanilla's {@code WoodType} field, and being Forge-added they
+     * keep their plain names in every environment). Reflection failures fall
+     * back to the classic oak/wood sounds; {@code null} for OPEN-property
+     * blocks that aren't doors, trapdoors or fence gates (no vanilla sound to
+     * mirror — modded captures stay silent rather than guess wrong).
+     */
+    @Nullable
+    private static SoundEvent openCloseSound(Block block, boolean open) {
+        if (block instanceof DoorBlock door) {
+            return open ? door.type().doorOpen() : door.type().doorClose();
+        }
+        if (block instanceof TrapDoorBlock trapdoor) {
+            try {
+                BlockSetType type = ObfuscationReflectionHelper.getPrivateValue(
+                    TrapDoorBlock.class, trapdoor, "f_271458_" /* type */);
+                return open ? type.trapdoorOpen() : type.trapdoorClose();
+            } catch (Exception e) {
+                return open ? SoundEvents.WOODEN_TRAPDOOR_OPEN : SoundEvents.WOODEN_TRAPDOOR_CLOSE;
+            }
+        }
+        if (block instanceof FenceGateBlock gate) {
+            try {
+                return ObfuscationReflectionHelper.getPrivateValue(
+                    FenceGateBlock.class, gate, open ? "openSound" : "closeSound");
+            } catch (Exception e) {
+                return open ? SoundEvents.FENCE_GATE_OPEN : SoundEvents.FENCE_GATE_CLOSE;
+            }
+        }
+        return null;
     }
 
     @Nullable

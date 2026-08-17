@@ -1,5 +1,72 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-17 (round 29: feel, snap, rails v2, desync — 12-finding pass)
+
+- **Capsule feel on flat ground**: all anti-slide pins/brakes now engage
+  ONLY on genuinely tilted ground (they exist to stop slope creep; on
+  frame-flat ground they were eating turning momentum and diagonal
+  movement — the "catches on nothing", jitter, and the molasses at
+  concave plating seams).
+- **Sneak edge-guard restored**: frame-aware reimplementation of vanilla's
+  crouch-at-the-edge protection (the world-down original is bypassed in
+  capsule mode). Shrinks tangential movement per local axis until the
+  capsule still finds ground within step height below.
+- **Surface snap professionalized**:
+  - snap-off is now truly snap-free for players — pure smooth radial
+    (the grounded-cardinal substitution from round 27 was the "still
+    snaps when I touch a face, unsnaps when I jump" behavior; mobs keep
+    it — they cannot manage radial drag);
+  - RELATIVE endorsement gates: a candidate face must be field-endorsed
+    at least half as strongly as the held one — stair risers and door
+    faces under a core's tilted radial field no longer capture the frame;
+  - anti-flap: a just-released face is only re-adopted by actually
+    standing on it (slow edge crossings no longer snap back and forth);
+  - creative flight never surface-adopts (flying between plate groups
+    kept snapping the frame onto faces, including the 45° lock);
+  - the secondary-bleed sustain is BOUNDED (12 ticks): walking off a
+    plated region no longer keeps pulling until well outside the field.
+- **Mob jump spam fixed**: vanilla MoveControl decides "path point is
+  above me → jump" in world-Y; walking along a wall changes world-Y
+  constantly, so mobs hopped nonstop. The jump decision is now evaluated
+  in the mob's local frame (new MoveControlMixin). Wander-goal target
+  selection is still world-biased (vanilla LandRandomPos) — mobs may
+  still prefer strolling toward world-valid ground; deeper AI work noted
+  as future.
+- **Item / XP-orb rubber-banding fixed**: non-living remote entities are
+  client-predicted physics objects, but the client never applied field
+  effects to them — their prediction ran in a stale frame and every
+  server packet was a rubber-band. Clients now apply fields to non-living
+  entities locally, their frames snap instantly (no camera), and the
+  locally computed target wins over the lagging sync while field effects
+  are fresh.
+- **Sticky rails v2**:
+  - StickyRailBlock now EXTENDS BaseRailBlock (+ minecraft:rails tag):
+    minecart placement by right-click works, and DOWN-oriented sticky
+    rails are fully native rails — two-way interconnection with vanilla
+    rails, vanilla movement, vanilla everything;
+  - the gravity PIN is gone: carts keep their own gravity, and on-track
+    acceleration is the cart's gravity vector projected onto the track
+    (vanilla's slope constant, exactly vanilla for plain gravity on
+    ascending shapes). A wall rail under normal gravity holds a cart at
+    rest on a horizontal track and lets it roll where the track runs
+    along gravity — the oscillation is gone;
+  - rider seating rotated into the cart's frame (no more raised/offset
+    riding); cart yaw no longer mirror-flips on UP-frame rails (the yaw
+    used the entity-convention reflection while rendering used the
+    visual convention);
+  - within-frame ascending SLOPES are fully wired (connection promotion,
+    support checks, movement); the concave cross-face link (floor rail →
+    wall rail around an inside corner) is deferred — it needs a
+    cross-frame handoff in both connection search and movement and was
+    judged too unstable to ship blind.
+- **Mimic sounds**: doors/trapdoors/fence gates open and close with their
+  exact per-material vanilla sounds + sculk game events; the placing
+  player now hears the captured block's place sound (client-side BE
+  prefill — also makes mimics render on the first frame); step/break/hit
+  already delegated to the captured block.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-16 (round 28: Gravity Unbound — rename, rails, refinement)
 
 - **RENAMED: the mod is now "Gravity Unbound"** — mod id `gravityunbound`,

@@ -13,26 +13,34 @@ import net.minecraft.world.level.block.state.properties.RailShape;
 
 /**
  * Local-frame port of vanilla {@code net.minecraft.world.level.block.RailState}
- * (1.20.1) for {@link StickyRailBlock}: the neighbor discovery and shape
- * auto-connection logic, with every "north/south/east/west" evaluated in THIS
+ * (1.20.1) for NON-DOWN {@link StickyRailBlock}s (DOWN rails run the real
+ * vanilla {@code RailState}): the neighbor discovery and shape auto-connection
+ * logic, with every "north/south/east/west/above/below" evaluated in THIS
  * rail's LOCAL frame ({@code Rotation24.localToWorld(local, bottom, spin)})
  * and every connection stored/compared as a real GRID position. Because
  * positions — not local directions — are what rails exchange, two rails with
  * the same BOTTOM but different SPIN connect correctly: each interprets the
  * shared grid offset in its own frame.
  *
- * Deviations from vanilla, all deliberate for this milestone:
+ * <p>Slopes ARE supported within one frame ({@code canMakeSlopes} = true,
+ * matching the flexible vanilla rail): ascending shapes climb along the
+ * rail's local UP — away from the mounting surface — and the above/below
+ * probing of vanilla's {@code hasRail}/{@code getRail} is ported along the
+ * local vertical axis.
+ *
+ * <p>Deviations from vanilla, deliberate:
  * <ul>
  *   <li>Only sticky rails with the SAME BOTTOM count as neighbors (one
- *       shared orientation per track; cross-frame linking around cube edges
- *       is the next milestone — see {@link StickyRailBlock}).</li>
- *   <li>No slopes: {@code canMakeSlopes} is hard false, the above/below rail
- *       probing of vanilla's {@code hasRail}/{@code getRail} is omitted
- *       (with slopes off, rails one cell off the surface plane are a
- *       different track), and ascending promotion is skipped.</li>
+ *       shared orientation per track). Cross-frame linking around cube
+ *       edges/concave corners is deferred — a floor rail meeting a wall rail
+ *       at an inside corner does not yet bridge via an ascending shape.</li>
  *   <li>All shapes a flexible rail can take are valid (vanilla's Forge
  *       {@code isValidRailShape} hook always passes here).</li>
  * </ul>
+ *
+ * <p>All {@code level.setBlock} writes are wrapped in
+ * {@link StickyRailBlock#LOCAL_UPDATE_DEPTH} so {@code onPlace} can tell them
+ * apart from foreign (world-frame) writes and self-heal only the latter.
  */
 public class StickyRailState {
 
@@ -43,6 +51,8 @@ public class StickyRailState {
     private final Direction bottom;
     /** Vanilla: false for the plain rail (flexible, can curve). */
     private final boolean isStraight = false;
+    /** Vanilla Forge hook default: flexible rails can make slopes. */
+    private final boolean canMakeSlopes = true;
     private final List<BlockPos> connections = new ArrayList<>();
 
     public StickyRailState(Level level, BlockPos pos, BlockState state) {
@@ -65,6 +75,16 @@ public class StickyRailState {
         return StickyRailBlock.localNeighbor(this.pos, this.state, localDir);
     }
 
+    /** {@code base} shifted one cell along THIS rail's local UP. */
+    private BlockPos aboveLocal(BlockPos base) {
+        return base.relative(this.bottom.getOpposite());
+    }
+
+    /** {@code base} shifted one cell along THIS rail's local DOWN. */
+    private BlockPos belowLocal(BlockPos base) {
+        return base.relative(this.bottom);
+    }
+
     private boolean isSameFrameRailAt(BlockPos checkPos) {
         return StickyRailBlock.isSameFrameRail(this.level.getBlockState(checkPos), this.bottom);
     }
@@ -72,8 +92,7 @@ public class StickyRailState {
     /**
      * Vanilla compares connections by X and Z only (ignoring the vertical for
      * slopes). The local-frame equivalent ignores the coordinate along the
-     * BOTTOM axis. Slopes are off this milestone, but the port keeps the
-     * vanilla comparison so slope support can slot in later.
+     * BOTTOM axis.
      */
     private boolean matchesIgnoringVertical(BlockPos a, BlockPos b) {
         return switch (this.bottom.getAxis()) {
@@ -81,6 +100,17 @@ public class StickyRailState {
             case Y -> a.getX() == b.getX() && a.getZ() == b.getZ();
             case Z -> a.getX() == b.getX() && a.getY() == b.getY();
         };
+    }
+
+    /** Local-guarded {@code setBlock} (see class javadoc). */
+    private void writeState() {
+        int[] depth = StickyRailBlock.LOCAL_UPDATE_DEPTH.get();
+        depth[0]++;
+        try {
+            this.level.setBlock(this.pos, this.state, 3);
+        } finally {
+            depth[0]--;
+        }
     }
 
     // ---- vanilla RailState logic, transliterated ----
@@ -95,6 +125,22 @@ public class StickyRailState {
             case EAST_WEST -> {
                 this.connections.add(this.local(Direction.WEST));
                 this.connections.add(this.local(Direction.EAST));
+            }
+            case ASCENDING_EAST -> {
+                this.connections.add(this.local(Direction.WEST));
+                this.connections.add(this.aboveLocal(this.local(Direction.EAST)));
+            }
+            case ASCENDING_WEST -> {
+                this.connections.add(this.aboveLocal(this.local(Direction.WEST)));
+                this.connections.add(this.local(Direction.EAST));
+            }
+            case ASCENDING_NORTH -> {
+                this.connections.add(this.aboveLocal(this.local(Direction.NORTH)));
+                this.connections.add(this.local(Direction.SOUTH));
+            }
+            case ASCENDING_SOUTH -> {
+                this.connections.add(this.local(Direction.NORTH));
+                this.connections.add(this.aboveLocal(this.local(Direction.SOUTH)));
             }
             case SOUTH_EAST -> {
                 this.connections.add(this.local(Direction.EAST));
@@ -112,9 +158,6 @@ public class StickyRailState {
                 this.connections.add(this.local(Direction.EAST));
                 this.connections.add(this.local(Direction.NORTH));
             }
-            default -> {
-                // ascending shapes are excluded from the SHAPE property
-            }
         }
     }
 
@@ -129,9 +172,11 @@ public class StickyRailState {
         }
     }
 
+    /** Vanilla probes the cell and one local-above/local-below for slopes. */
     private boolean hasRail(BlockPos checkPos) {
-        // vanilla also probes above/below for slopes; same-plane only here
-        return this.isSameFrameRailAt(checkPos);
+        return this.isSameFrameRailAt(checkPos)
+            || this.isSameFrameRailAt(this.aboveLocal(checkPos))
+            || this.isSameFrameRailAt(this.belowLocal(checkPos));
     }
 
     @Nullable
@@ -139,6 +184,16 @@ public class StickyRailState {
         BlockState checkState = this.level.getBlockState(checkPos);
         if (StickyRailBlock.isSameFrameRail(checkState, this.bottom)) {
             return new StickyRailState(this.level, checkPos, checkState);
+        }
+        BlockPos probe = this.aboveLocal(checkPos);
+        checkState = this.level.getBlockState(probe);
+        if (StickyRailBlock.isSameFrameRail(checkState, this.bottom)) {
+            return new StickyRailState(this.level, probe, checkState);
+        }
+        probe = this.belowLocal(checkPos);
+        checkState = this.level.getBlockState(probe);
+        if (StickyRailBlock.isSameFrameRail(checkState, this.bottom)) {
+            return new StickyRailState(this.level, probe, checkState);
         }
         return null;
     }
@@ -201,13 +256,27 @@ public class StickyRailState {
                 shape = RailShape.NORTH_EAST;
             }
         }
-        // (vanilla promotes NORTH_SOUTH/EAST_WEST to ascending here when a
-        // rail sits one cell up — slopes are off this milestone)
+        if (shape == RailShape.NORTH_SOUTH && this.canMakeSlopes) {
+            if (this.isSameFrameRailAt(this.aboveLocal(northPos))) {
+                shape = RailShape.ASCENDING_NORTH;
+            }
+            if (this.isSameFrameRailAt(this.aboveLocal(southPos))) {
+                shape = RailShape.ASCENDING_SOUTH;
+            }
+        }
+        if (shape == RailShape.EAST_WEST && this.canMakeSlopes) {
+            if (this.isSameFrameRailAt(this.aboveLocal(eastPos))) {
+                shape = RailShape.ASCENDING_EAST;
+            }
+            if (this.isSameFrameRailAt(this.aboveLocal(westPos))) {
+                shape = RailShape.ASCENDING_WEST;
+            }
+        }
         if (shape == null) {
             shape = RailShape.NORTH_SOUTH;
         }
         this.state = this.state.setValue(StickyRailBlock.SHAPE, shape);
-        this.level.setBlock(this.pos, this.state, 3);
+        this.writeState();
     }
 
     private boolean hasNeighborRail(BlockPos neighborPos) {
@@ -307,7 +376,22 @@ public class StickyRailState {
             }
         }
 
-        // (vanilla ascending promotion skipped — slopes off this milestone)
+        if (shape == RailShape.NORTH_SOUTH && this.canMakeSlopes) {
+            if (this.isSameFrameRailAt(this.aboveLocal(northPos))) {
+                shape = RailShape.ASCENDING_NORTH;
+            }
+            if (this.isSameFrameRailAt(this.aboveLocal(southPos))) {
+                shape = RailShape.ASCENDING_SOUTH;
+            }
+        }
+        if (shape == RailShape.EAST_WEST && this.canMakeSlopes) {
+            if (this.isSameFrameRailAt(this.aboveLocal(eastPos))) {
+                shape = RailShape.ASCENDING_EAST;
+            }
+            if (this.isSameFrameRailAt(this.aboveLocal(westPos))) {
+                shape = RailShape.ASCENDING_WEST;
+            }
+        }
 
         if (shape == null) {
             shape = currentShape;
@@ -316,7 +400,7 @@ public class StickyRailState {
         this.updateConnections(shape);
         this.state = this.state.setValue(StickyRailBlock.SHAPE, shape);
         if (alwaysPlace || this.level.getBlockState(this.pos) != this.state) {
-            this.level.setBlock(this.pos, this.state, 3);
+            this.writeState();
             for (int i = 0; i < this.connections.size(); ++i) {
                 StickyRailState railState = this.getRail(this.connections.get(i));
                 if (railState != null) {

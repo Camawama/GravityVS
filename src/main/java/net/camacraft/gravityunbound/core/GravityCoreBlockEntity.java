@@ -173,7 +173,15 @@ public class GravityCoreBlockEntity extends BlockEntity
             if (entity.isRemoved()) {
                 continue;
             }
-            if (world.isClientSide() && !entity.isControlledByLocalInstance() && !GCUtil.isClientPlayer(entity)) {
+            // Remote LIVING entities are server-authoritative (frames arrive
+            // via sync packets). NON-living remotes (items, XP orbs, TNT,
+            // minecarts) are client-PREDICTED physics objects: the client
+            // must compute their frames from its own local field sources or
+            // its prediction runs in a stale frame and every server position
+            // packet reads as a rubber-band.
+            if (world.isClientSide() && !entity.isControlledByLocalInstance()
+                && !GCUtil.isClientPlayer(entity)
+                && entity instanceof net.minecraft.world.entity.LivingEntity) {
                 continue;
             }
 
@@ -206,12 +214,13 @@ public class GravityCoreBlockEntity extends BlockEntity
             // onto the next face. Players with snap enabled keep radial
             // everywhere — their alignment machinery already resolves the
             // face normal and drives the planet-walk transitions.
-            boolean alignedPlayer = surfaceSnap && entity instanceof net.minecraft.world.entity.player.Player;
-            if (!alignedPlayer && comp.isGroundedInFrame()) {
-                // (vanilla onGround() is world-down based and stays false for
-                // capsule entities standing on rotated faces — using it left
-                // snap-off players and mobs under the radial pull while
-                // standing, i.e. still dragged to the face center)
+            // MOBS get the sector cardinal while grounded (they cannot manage
+            // the radial pull's tangential drag). PLAYERS never do: with snap
+            // ON, alignment resolves the face; with snap OFF the user's spec
+            // is NO snapping of any kind — pure smooth radial — and the
+            // tilted-ground pins absorb the standing creep instead.
+            if (!(entity instanceof net.minecraft.world.entity.player.Player)
+                && comp.isGroundedInFrame()) {
                 direction = cardinalDirection(direction);
             }
 

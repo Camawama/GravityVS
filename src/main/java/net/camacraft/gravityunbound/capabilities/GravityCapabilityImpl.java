@@ -589,6 +589,17 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return;
         }
 
+        // creative flight never surface-adopts: pilots follow the raw field
+        // (flying past faces kept snapping the frame onto them, including a
+        // hard 45-degree lock between two plate groups)
+        if (entity instanceof Player flyingPlayer && flyingPlayer.getAbilities().flying) {
+            lastGroundNormal = null;
+            groundNormalGraceTicks = 0;
+            recentReleasedNormal = null;
+            recentReleasedTicks = 0;
+            return;
+        }
+
         // per-block snap toggle: the dominant source forbids planet-walk
         // surface alignment — drop any held surface and let the frame follow
         // the raw field vector only
@@ -730,9 +741,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 // Unplated walls still contribute nothing and never pass.
                 if (wall != null
                     && wall.dot(fieldUp) > 0.2
+                    && wall.dot(fieldUp) > 0.5 * heldNormal.dot(fieldUp)
                     && wall.dot(heldNormal) < 0.7
                     && wall.dot(probeDir) < -0.5
                 ) {
+                    // relative endorsement: under a core's radial field EVERY
+                    // surface has some field component, so an absolute gate
+                    // adopted stair risers and door faces; a genuine concave
+                    // planet face is endorsed comparably to the held one
                     adoptGroundNormal(wall);
                 }
             }
@@ -773,6 +789,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             Vec3 wrap = probeSurfaceNormal(feet.subtract(heldNormal.scale(0.15)), tangentDir.scale(-1), 0.75);
             if (wrap != null
                 && wrap.dot(fieldUp) > 0.35
+                && wrap.dot(fieldUp) > 0.5 * heldNormal.dot(fieldUp)
                 && wrap.dot(heldNormal) < 0.7
                 && wrap.dot(tangentDir) > 0.1
             ) {
@@ -826,6 +843,15 @@ public class GravityCapabilityImpl implements IGravityCapability {
      * overwhelmingly common case) never starts a commitment window.
      */
     private void adoptGroundNormal(Vec3 normal) {
+        // anti-flap: hovering at a convex edge, the hold releases and the
+        // probes immediately re-find the face just left — adopt/release
+        // cycled every few ticks ("snaps back and forth rapidly when moving
+        // slowly between two faces"). Returning to a recently-released face
+        // requires actually STANDING on it again.
+        if (recentReleasedTicks > 0 && recentReleasedNormal != null
+            && recentReleasedNormal.dot(normal) > 0.95 && !capsuleGrounded) {
+            return;
+        }
         if (lastGroundNormal != null && lastGroundNormal.dot(normal) < 0.99) {
             if (surfaceChangeCooldown > 0) {
                 // mid-transition: keep the committed face, just keep it alive
@@ -1054,6 +1080,13 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return;
         }
 
+        // only on genuinely TILTED ground: on frame-flat ground there is no
+        // gravity creep to brake, and braking there deadened normal walking
+        // (turning/diagonal movement felt caught and jittery)
+        if (capsuleGroundNormal != null && capsuleGroundNormal.dot(getUpVector()) > 0.999) {
+            return;
+        }
+
         // mid-transition the brake would eat genuine transition momentum
         if (isSurfaceTransitioning()) {
             return;
@@ -1095,7 +1128,12 @@ public class GravityCapabilityImpl implements IGravityCapability {
         prevVisualRotation.set(visualRotation);
         Quaternionf frameBefore = new Quaternionf(visualRotation);
 
-        if (syncedVisualTarget != null && shouldAcceptServerSync()) {
+        // Non-living remotes prefer the LOCALLY computed target whenever
+        // local field effects are fresh: the client applies fields to them
+        // itself (see the field BEs), and the synced target lags a tick or
+        // two — mixing the two frames is exactly the item/orb rubber-band.
+        boolean preferLocal = !(entity instanceof LivingEntity) && fieldGraceTicks > 0;
+        if (syncedVisualTarget != null && shouldAcceptServerSync() && !preferLocal) {
             visualTarget.set(syncedVisualTarget);
         }
         else {
@@ -1113,6 +1151,18 @@ public class GravityCapabilityImpl implements IGravityCapability {
             visualRotation.set(visualTarget);
             lastChaseTarget.set(visualTarget);
             return;
+        }
+
+        if (!(entity instanceof LivingEntity)) {
+            // Other non-living entities (items, orbs, TNT, minecarts) have no
+            // camera either: snap instantly so client and server frames are
+            // equal given equal positions — the smooth chase's timing can
+            // never match across sides and the mismatch surfaced as endless
+            // small rubber-bands on drifting items. Unlike projectiles their
+            // deltaMovement IS local, so fall through to the world-velocity
+            // re-expression below (one exact step per target change).
+            lastChaseTarget.set(visualTarget);
+            visualRotation.set(visualTarget);
         }
 
         // target stability: once the target stops moving, converge decisively
@@ -1474,9 +1524,18 @@ public class GravityCapabilityImpl implements IGravityCapability {
             boolean surfaceWalking = lastGroundNormal != null
                 || recentReleasedTicks > 0
                 || surfaceChangeCooldown > 0;
-            if (!surfaceWalking) {
+            // BOUNDED: the pocket between two faces is crossed in a few
+            // ticks. Walking along a surface OUT of the plated region kept
+            // qualifying as surface-walking, so the bleed pull followed the
+            // player meters past the field ("walked off the plating and was
+            // still pulled upward until well away"). Sustain briefly, then
+            // treat as no field.
+            if (!surfaceWalking || ++secondaryOnlySustainTicks > 12) {
                 tempEffects.clear();
             }
+        }
+        else {
+            secondaryOnlySustainTicks = 0;
         }
 
         boolean hadFieldEffects = !tempEffects.isEmpty();
@@ -1499,6 +1558,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
 
     private @Nullable Vec3 lastFieldVector = null;
+    // consecutive ticks the field consisted of secondary bleeds only
+    private int secondaryOnlySustainTicks = 0;
 
     private void resolveGravityTarget() {
         if (tempEffects.isEmpty()) {

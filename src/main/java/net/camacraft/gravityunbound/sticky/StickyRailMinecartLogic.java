@@ -7,16 +7,16 @@ import org.jetbrains.annotations.Nullable;
 
 import com.mojang.datafixers.util.Pair;
 
-import net.camacraft.gravityunbound.api.RotationParameters;
 import net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl;
 import net.camacraft.gravityunbound.util.RotationUtil;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Vec3i;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.util.Mth;
-import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.BaseRailBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.RailShape;
 import net.minecraft.world.phys.Vec3;
@@ -27,13 +27,22 @@ import net.minecraft.world.phys.Vec3;
  * {@code mixin.AbstractMinecartMixin} (which owns the parts that need
  * protected {@code AbstractMinecart} access).
  *
+ * <p><b>Physics model (no gravity pin).</b> The cart KEEPS ITS OWN gravity —
+ * whatever fields or normal gravity give it — and the rail CONSTRAINS it:
+ * the position clamp onto the track chord holds the cart laterally, and the
+ * only accelerating influence of gravity on a riding cart is its projection
+ * onto the track line ({@code slopeAdjustment * (gravityUnit . trackDir)},
+ * the generalization of vanilla's hardcoded per-slope thrust — see the mixin).
+ * A cart on a wall rail under normal world gravity sits still on a
+ * world-horizontal track (gravity perpendicular to the track) and rolls along
+ * a track that has a component along gravity.
+ *
  * <p><b>Coordinate systems.</b> Three frames are involved:
  * <ul>
  *   <li><b>World</b> — absolute grid coordinates.</li>
  *   <li><b>Rail frame</b> — the cardinal frame whose local DOWN is the rail's
  *       BOTTOM, using the mod's ENTITY convention
- *       ({@link RotationUtil#vecWorldToEntity}) — the exact signed-permutation
- *       math non-player entities move in when settled. Positions map through
+ *       ({@link RotationUtil#vecWorldToEntity}). Positions map through
  *       {@link #worldPosToRail}/{@link #railPosToWorld}, a rotation about the
  *       rail cell's center: quarter turns about a cell center map the block
  *       lattice onto itself, so the rail's own cell keeps its integer
@@ -42,9 +51,8 @@ import net.minecraft.world.phys.Vec3;
  *       in (this mod keeps minecart dm LOCAL; {@code Entity.move} transforms
  *       it). Mirrors {@code EntityMixin}'s convention exactly: the entity
  *       convention at the settled cardinal, else the visual-rotation frame.
- *       Once the gravity pin has settled on the rail's bottom, cart-local ==
- *       rail frame and all conversions here are BIT-EXACT identities (signed
- *       permutations are exact in doubles).</li>
+ *       With the gravity pin gone this is NOT generally the rail frame — all
+ *       track math converts cart-local &lt;-&gt; rail frame explicitly.</li>
  * </ul>
  *
  * <p>The {@link RailShape} of a rail is interpreted in that rail's OWN
@@ -55,28 +63,37 @@ import net.minecraft.world.phys.Vec3;
  */
 public final class StickyRailMinecartLogic {
 
-    /**
-     * Priority of the on-rail gravity pin: far above plating fields
-     * (~1000 minus distance) and outside their 5.0 blend range, so no field
-     * can bend a cart off its track.
-     */
-    public static final double PIN_PRIORITY = 10000.0;
-
-    /**
-     * rotateVelocity=false like the other field sources: crossing onto a
-     * rail conserves world momentum and gravity only redirects future
-     * acceleration; the rotation time applies to the discrete frame flip.
-     */
-    private static final RotationParameters PIN_ROTATION_PARAMS = new RotationParameters(false, true, 300);
-
     /** The sticky rail a cart is on. */
     public record RailHit(BlockPos pos, BlockState state, Direction bottom) {}
 
+    /** What the minecart tick should do this tick (see {@link #decide}). */
+    public enum Decision {
+        /** No sticky involvement — let the vanilla tick run untouched. */
+        VANILLA,
+        /** Ride {@code hit} with the local-frame track port. */
+        RIDE,
+        /**
+         * Vanilla's world-frame detection would misread a NON-DOWN sticky
+         * rail as a flat rail: cancel the vanilla tick and run the ported
+         * off-track branch instead.
+         */
+        OFF_TRACK
+    }
+
+    /** A {@link Decision} plus the rail it applies to (RIDE only). */
+    public record DetectResult(Decision decision, @Nullable RailHit hit) {
+        static final DetectResult VANILLA = new DetectResult(Decision.VANILLA, null);
+        static final DetectResult OFF_TRACK = new DetectResult(Decision.OFF_TRACK, null);
+
+        static DetectResult ride(BlockPos pos, BlockState state) {
+            return new DetectResult(Decision.RIDE, new RailHit(pos, state, state.getValue(StickyRailBlock.BOTTOM)));
+        }
+    }
+
     /**
      * Vanilla {@code AbstractMinecart.EXITS}: the two cell offsets a cart can
-     * leave each rail shape through, in the RAIL's local frame. The vertical
-     * component (-1 on the low end of ascending shapes) is carried so slope
-     * support can slot in later; the flat shapes never set it.
+     * leave each rail shape through, in the RAIL's local frame (the vertical
+     * component is -1 on the low end of ascending shapes).
      */
     private static final Map<RailShape, Pair<Vec3i, Vec3i>> EXITS = new EnumMap<>(RailShape.class);
 
@@ -102,46 +119,93 @@ public final class StickyRailMinecartLogic {
     }
 
     // ------------------------------------------------------------------
-    // rail lookup
+    // rail detection
     // ------------------------------------------------------------------
 
     /**
-     * The sticky rail the cart is riding: the cell one step toward
-     * {@code gravityDown} first (the local-frame port of vanilla's "the block
-     * below is a rail" step-down — a cart sits a hair above the rail plane
-     * and can drift into the next cell up), then the cart's own cell (this is
-     * also how a cart first ATTACHES to a rail of a different frame: overlap
-     * its cell and the pin takes over). Null when neither holds a sticky
-     * rail.
+     * Decides how this server tick should treat the cart with respect to
+     * sticky rails. Mirrors the vanilla detection order first (step down when
+     * the world-below cell is tagged {@code minecraft:rails}, else the cart's
+     * own cell) so DOWN sticky rails and vanilla rails keep exact vanilla
+     * behavior, then adds the rotated-frame attach rules:
+     * <ul>
+     *   <li>own cell holds a non-DOWN sticky rail — ride it (this is also how
+     *       a cart of any gravity first attaches: overlap the rail cell);</li>
+     *   <li>the cell one step toward the CART's cardinal gravity holds a
+     *       sticky rail whose BOTTOM is that direction — the rotated
+     *       "falling onto the rail below" step-down, full-cell like
+     *       vanilla's;</li>
+     *   <li>the cell one step in direction {@code d} holds a sticky rail with
+     *       {@code BOTTOM == d} and the cart hugs its track plane (within
+     *       half a block of the cell boundary) — keeps carts attached while
+     *       climbing an ascending rail into the local-above cell, without
+     *       letting a wall rail snatch carts a full block off its plane.</li>
+     * </ul>
+     * {@code OFF_TRACK} is returned when vanilla's world-frame detection
+     * would misread a non-DOWN sticky rail as an ordinary flat rail (it IS a
+     * {@code BaseRailBlock} in the rails tag) and none of the attach rules
+     * apply — the mixin then runs the ported off-track branch instead of
+     * letting vanilla run world-frame track math on a rotated rail.
      */
-    @Nullable
-    public static RailHit findStickyRail(Level level, Vec3 cartPos, Direction gravityDown) {
+    public static DetectResult decide(Level level, Vec3 cartPos, Direction cartGravityDown) {
         BlockPos cell = BlockPos.containing(cartPos);
-        BlockPos stepped = cell.relative(gravityDown);
-        BlockState state = level.getBlockState(stepped);
-        if (StickyRailBlock.isStickyRail(state)) {
-            return new RailHit(stepped, state, state.getValue(StickyRailBlock.BOTTOM));
-        }
-        state = level.getBlockState(cell);
-        if (StickyRailBlock.isStickyRail(state)) {
-            return new RailHit(cell, state, state.getValue(StickyRailBlock.BOTTOM));
-        }
-        return null;
-    }
+        BlockPos below = cell.below();
+        BlockState belowState = level.getBlockState(below);
+        boolean steppedDown = belowState.is(BlockTags.RAILS);
+        BlockPos stepped = steppedDown ? below : cell;
+        BlockState steppedState = steppedDown ? belowState : level.getBlockState(cell);
 
-    /**
-     * Pins the cart's gravity to the rail's frame for this tick: a
-     * high-priority primary direction effect along the rail's local-down
-     * world vector, with surface alignment off (the raw rail direction is the
-     * whole point — no planet-walk snapping). Re-applied every on-rail tick,
-     * ages out through the capability's normal field machinery when the cart
-     * leaves the track.
-     */
-    public static void applyGravityPin(GravityCapabilityImpl comp, Direction bottom) {
-        comp.applyGravityDirectionEffect(
-            Vec3.atLowerCornerOf(bottom.getNormal()),
-            PIN_ROTATION_PARAMS, PIN_PRIORITY, false, 1.0, false
-        );
+        if (steppedState.getBlock() instanceof StickyRailBlock) {
+            Direction bottom = steppedState.getValue(StickyRailBlock.BOTTOM);
+            if (bottom == Direction.DOWN) {
+                return DetectResult.VANILLA; // a real vanilla rail
+            }
+            if (stepped.equals(cell)) {
+                return DetectResult.ride(cell, steppedState);
+            }
+            // vanilla stepped down onto a rotated rail it would misread; if
+            // the cart's own cell holds a rotated rail, prefer riding that
+            BlockState cellState = level.getBlockState(cell);
+            if (cellState.getBlock() instanceof StickyRailBlock
+                && cellState.getValue(StickyRailBlock.BOTTOM) != Direction.DOWN) {
+                return DetectResult.ride(cell, cellState);
+            }
+            return DetectResult.OFF_TRACK;
+        }
+        if (BaseRailBlock.isRail(steppedState)) {
+            return DetectResult.VANILLA; // an actual vanilla rail; vanilla handles
+        }
+
+        // rotated step-down: falling (by the cart's own gravity) onto a rail
+        // mounted on the surface the cart is falling toward
+        if (cartGravityDown != Direction.DOWN) {
+            BlockPos gravityCell = cell.relative(cartGravityDown);
+            BlockState gravityState = level.getBlockState(gravityCell);
+            if (StickyRailBlock.isSameFrameRail(gravityState, cartGravityDown)) {
+                return DetectResult.ride(gravityCell, gravityState);
+            }
+        }
+
+        // plane-hug: adjacent rail whose local UP points at the cart's cell,
+        // with the cart within half a block of the track plane (covers the
+        // top of an ascending climb, where the cart briefly enters the
+        // local-above cell while hugging the plane)
+        for (Direction d : Direction.values()) {
+            if (d == Direction.DOWN || d == cartGravityDown) {
+                continue;
+            }
+            BlockPos neighbor = cell.relative(d);
+            BlockState neighborState = level.getBlockState(neighbor);
+            if (!StickyRailBlock.isSameFrameRail(neighborState, d)) {
+                continue;
+            }
+            Vec3 railLocal = worldPosToRail(cartPos, Vec3.atCenterOf(neighbor), d);
+            if (railLocal.y - neighbor.getY() <= 1.5) {
+                return DetectResult.ride(neighbor, neighborState);
+            }
+        }
+
+        return DetectResult.VANILLA;
     }
 
     // ------------------------------------------------------------------
@@ -170,14 +234,39 @@ public final class StickyRailMinecartLogic {
         return RotationUtil.vecWorldToPlayer(v, comp.getVisualRotation());
     }
 
-    /** Cart-local vector -> rail frame (identity once the pin has settled). */
+    /**
+     * World -> the cart's VISUAL/render frame (player convention). This — not
+     * {@link #worldToCartLocal}'s entity convention — is the frame the render
+     * dispatcher poses the cart in, so YAW must be computed here. (The two
+     * conventions differ for UP gravity, where the entity convention is a
+     * reflection; deriving yaw from it mirrored the cart on ceiling tracks.)
+     */
+    public static Vec3 worldToCartVisual(GravityCapabilityImpl comp, Vec3 v) {
+        return RotationUtil.vecWorldToPlayer(v, comp.getVisualRotation());
+    }
+
+    /** Cart-local vector -> rail frame. */
     public static Vec3 cartToRail(GravityCapabilityImpl comp, Vec3 v, Direction bottom) {
         return RotationUtil.vecWorldToEntity(cartLocalToWorld(comp, v), bottom);
     }
 
-    /** Rail-frame vector -> cart-local (identity once the pin has settled). */
+    /** Rail-frame vector -> cart-local. */
     public static Vec3 railToCart(GravityCapabilityImpl comp, Vec3 v, Direction bottom) {
         return worldToCartLocal(comp, RotationUtil.vecEntityToWorld(v, bottom));
+    }
+
+    /**
+     * The cart's own gravity direction as a world-frame UNIT vector: the true
+     * (possibly arbitrary-angle) field vector when one is active, else the
+     * cardinal physics direction. This is what the rail projects — the cart
+     * keeps its own gravity; the rail only constrains it.
+     */
+    public static Vec3 cartGravityUnit(GravityCapabilityImpl comp) {
+        Vec3 target = comp.getTargetGravityVector();
+        if (target.lengthSqr() > 1.0E-8) {
+            return target.normalize();
+        }
+        return comp.getCurrGravityDirectionVec();
     }
 
     /**
