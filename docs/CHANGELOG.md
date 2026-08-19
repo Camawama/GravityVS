@@ -1,5 +1,23 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-18 (round 35: ship frame feed-forward)
+
+- **Perfect frame lock on moving/rotating Valkyrien Skies ships.** The
+  player's gravity frame followed the ship-mounted field with a
+  proportional chase — which, against a continuously rotating target, has
+  a constant tracking lag proportional to the rotation rate: the camera
+  sat visibly tilted relative to the deck, and gravity pulled along the
+  lagged direction, sliding the player off ("slipping off the ship").
+  New FEED-FORWARD: each tick, the ship's own exact rotation delta
+  (previous → current tick transform) is composed directly onto the
+  player's frame and the held surface normals, so the chase only handles
+  residual error — zero steady-state lag at any rotation rate, on both
+  client and server. Only the swing component touches the frame (the
+  ship-yaw twist is already delivered to the camera by VS's dragger —
+  applying both would turn it twice); a rider's world velocity correctly
+  rotates with the ship. Upright players on level decks remain bit-exact
+  vanilla (the carry only engages for active frames).
+
 ## Unreleased (2.0.0-dev) — 2026-08-18 (round 34: GUI overhaul restored)
 
 NOTE: the user reverted most of rounds 29-33 in-tree (kept: namespace

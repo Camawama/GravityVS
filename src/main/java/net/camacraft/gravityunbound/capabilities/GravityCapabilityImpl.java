@@ -318,6 +318,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
 
         applyShipIdleAnchor();
+        applyShipFrameFeedForward();
         updateGravityStatus();
         applyGravityChange();
         applyGravityStrengthAttribute();
@@ -429,6 +430,90 @@ public class GravityCapabilityImpl implements IGravityCapability {
         visualTarget.set(target);
         noAnimation = true;
         needsSync = true;
+    }
+
+    // world-space swing rotation the ship performed this tick, to be
+    // composed onto the visual frame inside advanceVisualRotation (after
+    // the prev-frame capture, so render interpolation sweeps with the ship)
+    @Nullable
+    private Quaternionf pendingShipSwing = null;
+
+    /**
+     * SHIP FRAME FEED-FORWARD. The chase in {@link #advanceVisualRotation()}
+     * is a proportional controller: it closes a FRACTION of the gap to the
+     * target each tick. Against a target that rotates continuously — plating
+     * on a turning Valkyrien Skies ship — a proportional controller has a
+     * constant steady-state tracking error proportional to the rotation
+     * rate: the frame (and camera) sat visibly tilted relative to the deck,
+     * and gravity pulled along the lagged direction, whose tangential
+     * component slid the player off ("slipping off the ship").
+     *
+     * Feed-forward removes the tracking error at the source: each tick the
+     * ship's OWN rotation delta (previous tick transform → current, both
+     * known exactly) is composed directly onto the frame and the held
+     * surface normals, so the chase only ever handles residual error (which
+     * is zero at steady state — perfect lock at any rotation rate).
+     *
+     * Only the SWING component (rotation of the frame's up axis) is applied
+     * to the frame: the TWIST component (ship yaw about the frame's own up)
+     * is already delivered to the entity's yaw by Valkyrien Skies' dragger
+     * (see compat.VSEntityDraggerMixin) — applying it here too would turn
+     * the camera twice. The physical surface normals rotate by the FULL
+     * delta (a wall's normal does rotate under ship yaw).
+     */
+    private void applyShipFrameFeedForward() {
+        org.valkyrienskies.core.api.ships.Ship ship =
+            capsuleGrounded && capsuleGroundShip != null ? capsuleGroundShip
+                : (lastGroundNormal != null ? lastGroundShip : null);
+        if (ship == null || isVisuallyDefault()) {
+            pendingShipSwing = null;
+            return;
+        }
+
+        org.joml.Quaterniond now =
+            new org.joml.Quaterniond(ship.getTransform().getShipToWorldRotation());
+        org.joml.Quaterniond prev =
+            new org.joml.Quaterniond(ship.getPrevTickTransform().getShipToWorldRotation());
+        org.joml.Quaterniond delta = now.mul(prev.conjugate(), new org.joml.Quaterniond()).normalize();
+        if (delta.w < 0) {
+            delta.set(-delta.x, -delta.y, -delta.z, -delta.w);
+        }
+        if (delta.w > 0.99999999) {
+            // < ~0.016 deg/tick: stationary ship, nothing to carry
+            pendingShipSwing = null;
+            return;
+        }
+
+        // physical surfaces rotate by the full delta
+        if (lastGroundNormal != null) {
+            lastGroundNormal = gravityunbound$rotate(delta, lastGroundNormal);
+        }
+        if (recentReleasedNormal != null) {
+            recentReleasedNormal = gravityunbound$rotate(delta, recentReleasedNormal);
+        }
+        if (capsuleGroundNormal != null) {
+            capsuleGroundNormal = gravityunbound$rotate(delta, capsuleGroundNormal);
+        }
+
+        // swing-twist decomposition of the delta about the frame's up axis
+        Vec3 up = getUpVector();
+        double dot = delta.x * up.x + delta.y * up.y + delta.z * up.z;
+        org.joml.Quaterniond twist =
+            new org.joml.Quaterniond(up.x * dot, up.y * dot, up.z * dot, delta.w);
+        if (twist.lengthSquared() < 1.0E-12) {
+            twist.identity();
+        }
+        else {
+            twist.normalize();
+        }
+        org.joml.Quaterniond swing = delta.mul(twist.conjugate(), new org.joml.Quaterniond()).normalize();
+        pendingShipSwing = new Quaternionf(
+            (float) swing.x, (float) swing.y, (float) swing.z, (float) swing.w);
+    }
+
+    private static Vec3 gravityunbound$rotate(org.joml.Quaterniond rotation, Vec3 v) {
+        org.joml.Vector3d out = rotation.transform(new org.joml.Vector3d(v.x, v.y, v.z));
+        return new Vec3(out.x, out.y, out.z);
     }
 
     /**
@@ -1149,6 +1234,26 @@ public class GravityCapabilityImpl implements IGravityCapability {
      */
     private void advanceVisualRotation() {
         prevVisualRotation.set(visualRotation);
+
+        // ship feed-forward: compose the ship's swing onto the frame AFTER
+        // the prev capture (render interpolation then sweeps the same arc
+        // the ship's own render interpolation does) and BEFORE frameBefore
+        // (the chase's world-velocity re-expression must NOT treat the
+        // carry as frame motion — a rider's world velocity rotates WITH the
+        // ship, which is exactly what leaving local deltaMovement untouched
+        // does). Convention: the frame quaternion maps world -> player, so
+        // a world rotation S composes as frame * S^-1.
+        if (pendingShipSwing != null) {
+            Quaternionf conjSwing = new Quaternionf(pendingShipSwing).conjugate();
+            visualRotation.mul(conjSwing).normalize();
+            visualTarget.mul(conjSwing).normalize();
+            lastChaseTarget.mul(conjSwing).normalize();
+            if (syncedVisualTarget != null) {
+                syncedVisualTarget.mul(conjSwing).normalize();
+            }
+            pendingShipSwing = null;
+        }
+
         Quaternionf frameBefore = new Quaternionf(visualRotation);
 
         // EXTERNAL VISUAL OVERRIDE (rail-constrained vehicles): a minecart on
