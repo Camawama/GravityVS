@@ -1,5 +1,23 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-18 (round 34: GUI overhaul restored)
+
+NOTE: the user reverted most of rounds 29-33 in-tree (kept: namespace
+rename, mimic sounds, capsule feel fixes, per-tick projectile sync).
+Entries below this note describe work that may no longer be present.
+New workflow: one issue per round.
+
+- **Settings GUI overhaul re-applied** (was reverted together with the
+  unwanted changes): labeled sections — Field / Gravity / Ship & Visuals
+  — with gray headers and separator lines; 260px column so preset labels
+  render fully; gravity-acceleration presets (Overworld 0.08, Moon
+  0.0133, Zero-G 0, Jupiter 0.2); "Done" renamed "Apply"; "Apply to
+  Connected Plates" is now "Copy to Connected Plates" — a button that
+  applies the on-screen values to the whole connected group IMMEDIATELY
+  (with "Copied!" feedback) without closing the screen; connected-copy
+  flood-fill cap raised 256 → 4096.
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-17 (round 30: sync cadence, cliff-edge water, ramps, TNT)
 
 - **Universal in-field smoothness (arrows/items/orbs/tridents)**: entities

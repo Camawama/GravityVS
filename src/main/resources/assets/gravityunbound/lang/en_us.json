@@ -133,7 +133,17 @@
   "gravity_changer.gui.surface_snap": "Surface Snapping",
   "gravity_changer.gui.gravity_accel": "Gravity Acceleration",
   "gravity_changer.gui.field_visual": "Field Visualization",
-  "gravity_changer.gui.apply_connected": "Apply to Connected Plates",
+  "gravity_changer.gui.apply_connected": "Copy to Connected Plates",
   "gravity_changer.gui.local_down": "Local Down",
-  "gravity_changer.gui.affects_ships": "Affects Ships"
+  "gravity_changer.gui.affects_ships": "Affects Ships",
+  "gravity_changer.gui.apply": "Apply",
+  "gravity_changer.gui.apply_connected.applied": "Copied!",
+  "gravity_changer.gui.preset.overworld": "Overworld",
+  "gravity_changer.gui.preset.moon": "Moon",
+  "gravity_changer.gui.preset.zero_g": "Zero-G",
+  "gravity_changer.gui.preset.jupiter": "Jupiter",
+  "gravity_changer.gui.section.field": "Field",
+  "gravity_changer.gui.section.gravity": "Gravity",
+  "gravity_changer.gui.section.ship_visuals": "Ship & Visuals",
+  "gravity_changer.gui.section.visuals": "Visuals"
 }

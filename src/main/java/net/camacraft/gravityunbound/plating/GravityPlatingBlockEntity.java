@@ -1001,7 +1001,7 @@ public class GravityPlatingBlockEntity extends BlockEntity
     }
 
     /** Cap on how many plates one "apply to connected" flood-fill may touch. */
-    private static final int CONNECTED_APPLY_CAP = 256;
+    private static final int CONNECTED_APPLY_CAP = 4096;
 
     /**
      * Server-side entry point for the settings GUI (arrives via
