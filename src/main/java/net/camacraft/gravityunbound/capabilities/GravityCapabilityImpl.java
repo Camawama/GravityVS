@@ -87,6 +87,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // after leaving a field, keep its pull for a few ticks (jumping off a plate
     // must not instantly revert gravity mid-air)
     private static final int FIELD_GRACE_TICKS = 6;
+
+    // diagnostics: field effects queued since last heartbeat window
+    private int dbgEffectsQueued = 0;
+    // diagnostics: player position at the start of this tick (for the
+    // render-time comparison in CameraMixin — if VS render-rides the local
+    // player, the camera-time position diverges from the tick position)
+    public Vec3 dbgTickPos = Vec3.ZERO;
+    public volatile float dbgCamVsTickDist = 0;
+
+    // the held surface normal in the ridden ship's OWN coordinates — a
+    // block face's normal is constant in shipyard space, so the drawn
+    // ship's normal is exactly renderRotation * this at any frame time
+    @Nullable
+    private org.joml.Vector3d shipLocalUp = null;
     // after the ground probe stops hitting, keep the surface alignment for a
     // few ticks (jumps and probe flicker must not wobble the frame; the probe
     // re-acquires during a jump's descent, so this only needs to bridge the
@@ -319,11 +333,56 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
         applyShipIdleAnchor();
         applyShipFrameFeedForward();
+        if (entity.tickCount % 40 == 0
+            && (entity instanceof Player)
+            && (dbgEffectsQueued > 0 || lastGroundNormal != null || !isVisuallyDefault())) {
+            Vec3 tUp = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), visualTarget);
+            Vec3 fUp = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), visualRotation);
+            boolean vsDraggable = org.valkyrienskies.mod.common.util.EntityDragger.isDraggable(entity);
+            org.valkyrienskies.mod.common.util.EntityDraggingInformation dbgDrag =
+                ((org.valkyrienskies.mod.common.util.IEntityDraggingInformationProvider) entity).getDraggingInformation();
+            LOGGER.info(
+                "[GravityUnbound] vs-drag[{}]: draggable={} beingDragged={} shipRef={} ticksSince={} camVsTickDist={}",
+                entity.level().isClientSide() ? "C" : "S",
+                vsDraggable, dbgDrag.isEntityBeingDraggedByAShip(),
+                dbgDrag.getLastShipStoodOn() != null, dbgDrag.getTicksSinceStoodOnShip(),
+                String.format(java.util.Locale.ROOT, "%.4f", dbgCamVsTickDist));
+            LOGGER.info(
+                "[GravityUnbound] chain[{}]: fx/t={} grace={} held={} tgtVec={} tgtUp={} frameUp={} gapDeg={} capsule={}",
+                entity.level().isClientSide() ? "C" : "S",
+                dbgEffectsQueued, fieldGraceTicks,
+                lastGroundNormal == null ? "null" : String.format(java.util.Locale.ROOT,
+                    "(%.2f,%.2f,%.2f)", lastGroundNormal.x, lastGroundNormal.y, lastGroundNormal.z),
+                targetGravityVector == null ? "null" : String.format(java.util.Locale.ROOT,
+                    "(%.2f,%.2f,%.2f)", targetGravityVector.x, targetGravityVector.y, targetGravityVector.z),
+                String.format(java.util.Locale.ROOT, "(%.2f,%.2f,%.2f)", tUp.x, tUp.y, tUp.z),
+                String.format(java.util.Locale.ROOT, "(%.2f,%.2f,%.2f)", fUp.x, fUp.y, fUp.z),
+                String.format(java.util.Locale.ROOT, "%.1f",
+                    Math.toDegrees(angleBetween(visualRotation, visualTarget))),
+                useCapsuleCollision());
+        }
+        dbgEffectsQueued = 0;
+        dbgTickPos = entity.position();
         updateGravityStatus();
         applyGravityChange();
         applyGravityStrengthAttribute();
         maybeSnapFreshSpawn();
         updateSurfaceProbe();
+        // maintain the shipyard-space image of the held normal (see
+        // getRenderRotation): measured fact this round — VS render-rides the
+        // body POSITION onto the drawn ship (~0.4 blocks at test spin) while
+        // our frame ROTATION interpolated tick poses; the mismatch on the
+        // 1.62-block eye arm was the camera jitter, and the same rotational
+        // lag was the visible model/hitbox tilt on a position-glued body.
+        if (capsuleGroundShip != null && lastGroundNormal != null) {
+            org.joml.Quaterniond worldToShip = new org.joml.Quaterniond(
+                capsuleGroundShip.getTransform().getShipToWorldRotation()).conjugate();
+            shipLocalUp = worldToShip.transform(new org.joml.Vector3d(
+                lastGroundNormal.x, lastGroundNormal.y, lastGroundNormal.z));
+        }
+        else {
+            shipLocalUp = null;
+        }
         advanceVisualRotation();
         applyTransitionPull();
         applyStaticFriction();
@@ -1330,7 +1389,25 @@ public class GravityCapabilityImpl implements IGravityCapability {
             // any lag between 3 and 15 degrees — a per-tick velocity
             // discontinuity felt as rhythmic stutter whenever the lag crossed
             // a tier boundary (e.g. while circling a gravity core).
-            float proportion = targetStableTicks >= 5
+            // SURFACE GLUE: standing on a held surface whose normal the
+            // target actually points along, track at high gain — the stood-on
+            // face is a clean, physically-anchored signal, and the
+            // proportional lag (rate/gain) was the constant ~25-30 deg tilt
+            // on rotating ships (screenshot evidence). SELF-LIMITING: the
+            // gain rises ONLY while the target agrees with the surface
+            // (dot > 0.95); any flicker toward a stale field vector falls
+            // back to the smooth gains below and gets smeared out exactly
+            // like the stable baseline did. Not 1.0: a touch of smoothing
+            // still absorbs single-tick probe noise.
+            boolean gluedToSurface = false;
+            if (lastGroundNormal != null
+                && (capsuleGrounded || entity.onGround())) {
+                Vec3 targetUpNow = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), visualTarget);
+                gluedToSurface = targetUpNow.dot(lastGroundNormal) > 0.95;
+            }
+            float proportion = gluedToSurface
+                ? 0.9f
+                : targetStableTicks >= 5
                 ? 0.5f
                 : Mth.lerp(Mth.clamp(angle / (float) Math.toRadians(3), 0.0f, 1.0f), 0.08f, 0.35f);
             float maxTurn = VISUAL_TURN_PER_TICK;
@@ -1708,10 +1785,34 @@ public class GravityCapabilityImpl implements IGravityCapability {
             lastFieldVector = targetGravityVector;
         }
         else if (fieldGraceTicks > 0 && lastFieldVector != null) {
-            // just left a field (e.g. jumped off a plate): keep its pull briefly
-            // instead of instantly reverting to base gravity mid-air
-            fieldGraceTicks--;
-            targetGravityVector = lastFieldVector;
+            if (lastGroundNormal != null && (capsuleGrounded || entity.onGround())) {
+                // STANDING ON A HELD SURFACE SUSTAINS ITS FIELD. Field-effect
+                // delivery flickers out for SECONDS on fast-rotating ships
+                // (measured: server fx=0 while the client stayed fed — the
+                // server-side player position lags by packets and maps
+                // outside the swept field column in ship space). The probe
+                // ray under the feet is immune to that timing: while it says
+                // we stand on the surface the field endorsed, hold the grace
+                // open and point the sustained field ONTO that surface — so
+                // it rotates WITH the ship instead of freezing stale (the
+                // ~40 deg target drift in the logs). This is what collapsed
+                // the server to world-down mid-ride: the source of the jump
+                // fling and the periodic camera snap-arounds.
+                fieldGraceTicks = FIELD_GRACE_TICKS;
+                lastFieldVector = lastGroundNormal.scale(-1);
+                targetGravityVector = lastFieldVector;
+            }
+            else {
+                // just left the field with no surface underfoot: keep the
+                // pull briefly (jumps, edge pockets). Grounded WITHOUT a held
+                // surface = walked off onto plain ground: release in 2 ticks
+                // (the "gravity takes a second to update" delay).
+                if ((capsuleGrounded || entity.onGround()) && fieldGraceTicks > 2) {
+                    fieldGraceTicks = 2;
+                }
+                fieldGraceTicks--;
+                targetGravityVector = lastFieldVector;
+            }
         }
 
         snapPhysicsDirection();
@@ -2074,6 +2175,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
         else {
             delayApplyDirEffects.add(effect);
+            dbgEffectsQueued++;
         }
     }
 
@@ -2324,9 +2426,41 @@ public class GravityCapabilityImpl implements IGravityCapability {
      */
     public Quaternionf getRenderRotation(float partialTick, Quaternionf dest) {
         if (prevVisualRotation.equals(visualRotation)) {
-            return dest.set(visualRotation);
+            dest.set(visualRotation);
         }
-        return dest.set(prevVisualRotation).slerp(visualRotation, partialTick).normalize();
+        else {
+            dest.set(prevVisualRotation);
+            if (dest.dot(visualRotation) < 0.0f) {
+                // q and -q are the same rotation; a slerp across hemispheres
+                // sweeps the long way around
+                dest.set(-dest.x, -dest.y, -dest.z, -dest.w);
+            }
+            dest.slerp(visualRotation, partialTick).normalize();
+        }
+
+        // DRAWN-SHIP ALIGNMENT: while riding, VS renders the body at the
+        // drawn ship pose — the frame must rotate to match it, or the eye
+        // offset and model pose lag the deck (parallel transport of the
+        // interpolated frame onto the drawn ship's surface normal; identity
+        // when the drawn pose matches the tick pose, e.g. stationary ships,
+        // and inactive off-ship or on level decks where the normal is up).
+        org.joml.Vector3d localUp = shipLocalUp;
+        if (localUp != null
+            && capsuleGroundShip instanceof org.valkyrienskies.core.api.ships.ClientShip clientShip) {
+            org.joml.Vector3d drawn = new org.joml.Quaterniond(
+                clientShip.getRenderTransform().getShipToWorldRotation())
+                .transform(new org.joml.Vector3d(localUp));
+            Vec3 drawnUp = new Vec3(drawn.x, drawn.y, drawn.z).normalize();
+            Vec3 frameUp = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), dest);
+            double align = frameUp.dot(drawnUp);
+            if (align < 0.999999 && align > 0.5) {
+                Quaternionf arc = QuaternionUtil.getRotationBetween(frameUp, drawnUp);
+                // frame maps world -> player: world rotation S composes as
+                // frame * conj(S)
+                dest.mul(arc.conjugate()).normalize();
+            }
+        }
+        return dest;
     }
 
     /** Fast-path check: PHYSICS gravity is exactly vanilla. */

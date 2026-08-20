@@ -1,22 +1,130 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
-## Unreleased (2.0.0-dev) — 2026-08-18 (round 35: ship frame feed-forward)
+## Unreleased (2.0.0-dev) — 2026-08-19 (round 49: the drawn-ship alignment — measured fix)
 
-- **Perfect frame lock on moving/rotating Valkyrien Skies ships.** The
-  player's gravity frame followed the ship-mounted field with a
-  proportional chase — which, against a continuously rotating target, has
-  a constant tracking lag proportional to the rotation rate: the camera
-  sat visibly tilted relative to the deck, and gravity pulled along the
-  lagged direction, sliding the player off ("slipping off the ship").
-  New FEED-FORWARD: each tick, the ship's own exact rotation delta
-  (previous → current tick transform) is composed directly onto the
-  player's frame and the held surface normals, so the chase only handles
-  residual error — zero steady-state lag at any rotation rate, on both
-  client and server. Only the swing component touches the frame (the
-  ship-yaw twist is already delivered to the camera by VS's dragger —
-  applying both would turn it twice); a rider's world velocity correctly
-  rotates with the ship. Upright players on level decks remain bit-exact
-  vanilla (the carry only engages for active frames).
+- **The vs-drag diagnostics delivered the verdict**: capsule players are
+  FULLY inside VS's pipeline (draggable, actively dragged, both sides),
+  and VS's render-ride measurably carries the local player's POSITION
+  onto the drawn ship every frame (~0.4 blocks at the test spin rate).
+  The fault was split ownership: body position from the drawn ship pose
+  (VS) while the frame's ROTATION interpolated tick poses (ours) — a few
+  degrees of rotational lag on the 1.62-block eye arm was the camera
+  jitter, and the same lag was the visible model/hitbox tilt on a body
+  whose feet were position-glued to the deck.
+- **Fix — drawn-ship alignment**: the held surface normal is maintained
+  in shipyard coordinates each tick; at render time the interpolated
+  frame is parallel-transported onto that normal as the ship is DRAWN
+  (render transform). Identity when the drawn pose matches the tick pose
+  (stationary ships) and inactive off-ship or on level decks; the render
+  slerp is also hemisphere-aligned. This is the round-38 idea returned
+  with its true justification — it originally drowned under the
+  since-fixed target flips and server field starvation.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-19 (round 48: the two-pipelines synthesis)
+
+- The user's observation that DOWN-gravity plating on a ship looks fine
+  while any tilted gravity misaligns identified the architecture-level
+  cause: with down gravity, capsule mode is off and Valkyrien Skies'
+  complete riding stack (collision, dragging, and per-frame RENDER-RIDING
+  — VS teleports draggable entities to render-interpolated ship poses
+  every frame) handles the player end to end. With tilted gravity,
+  capsule mode bypasses VS ship collision and only partially re-enters
+  VS's pipeline — the seams between the two half-engaged pipelines are
+  the jitter and tilt.
+- New vs-drag heartbeat logs whether VS considers the player draggable,
+  whether it is actively dragging, and whether the camera-time position
+  diverges from the tick position (proof of VS render-riding the local
+  player). The three possible outcomes each map to a specific,
+  single-mechanism fix.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-19 (round 47: the starving server — measured root cause of the ship saga)
+
+- **The chain diagnostics found it**: on a fast-rotating ship the SERVER
+  receives zero field effects for seconds at a time (the server-side
+  player position lags the client by packets, mapping outside the swept
+  field column in ship space), the grace expires, and the server's
+  gravity collapses to vanilla world-down MID-RIDE — the cause of the
+  jump fling, the periodic camera snap-arounds, and the upright-player
+  screenshots. The frozen grace vector also drifted ~40° stale during
+  dropouts.
+- **Fix — standing on a held surface sustains its field**: while the
+  under-feet probe says the player stands on the surface the field
+  endorsed, effect dropouts no longer collapse gravity: the grace stays
+  open and the sustained field points onto that surface, rotating WITH
+  the ship (probe-fresh) instead of freezing. Release is untouched when
+  there's no surface underfoot: airborne keeps the full jump grace,
+  grounded on plain ground releases in 2 ticks.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-19 (round 46: chain diagnostics)
+
+- Round 45's surface glue did not resolve the tilt (new screenshot:
+  still near-world-upright on a ~30° deck). Two theories eliminated by
+  code reading: field containment is already ship-space-correct, and a
+  static ~30° error cannot be chase lag. Also discovered the committed
+  baseline still contains the round-35 swing feed-forward (the only
+  ship-experiment piece the user's commits captured).
+- New CHAIN HEARTBEAT (both client [C] and server [S], every 2 seconds
+  when gravity-relevant): effects-received count, grace, held surface
+  normal, raw field target vector, target up, frame up, chase gap, and
+  capsule state — one test run now shows exactly which link between the
+  plating and the player's tilt is failing.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-19 (round 45: surface glue + grounded grace release)
+
+First post-revert round: two small, self-limiting changes, one file.
+
+- **Surface glue (the constant tilt on rotating ships)**: the frame chase
+  tracked at 8-35% gain, whose steady-state lag on a continuously
+  rotating target was the ~25-30° player tilt in the user's screenshot.
+  While standing on a held surface AND the target actually points along
+  that surface's normal, the chase now tracks at 0.9 gain — glued to the
+  deck. Self-limiting by construction: if the target flickers away from
+  the surface (the stale-field flips that wrecked the reverted
+  experiment), the gain instantly falls back to the smooth baseline
+  path, so flicker gets smeared instead of amplified.
+- **Grounded grace release (the walk-off delay)**: the 6-tick field grace
+  is sized for jumps and edge pockets — both airborne. Standing on solid
+  ground with no live field (walked off the plating), it now releases in
+  2 ticks instead of holding the stale pull for the full window — the
+  "gravity takes a second to update" delay, on ships and in world space.
+- Explicitly deferred, one thing at a time: the render-level sub-tick
+  stutter (next round, as its own single mechanism inside VS's update
+  pipeline), and the small residual one-tick-staleness tilt.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-19 (rounds 35-43: ship-sync experiment — REVERTED)
+
+Nine iterations attempted to perfect standing on moving/rotating VS ships
+(tick feed-forward, render locks, camera rides, late tick alignment,
+hemisphere alignment, anchors). Each fixed a real, measured defect — but
+their interactions made the in-game result WORSE than the baseline, and
+the whole uncommitted pile was reverted. What the instrumentation proved,
+kept for the next attempt (see the project memory for full details):
+
+- VS updates client ship transforms AFTER entity ticks (all mid-tick
+  reads are one tick stale) and updates render transforms at frame start.
+- The frame chase is a proportional controller: it inherently lags a
+  continuously rotating target; but making tracking exact AMPLIFIES any
+  noise in the target signal (stale field vectors flickered the target by
+  15-57 degrees on fast spins — the old sluggish chase had been masking
+  it).
+- The field's region sweeps with the ship, so field presence flickers for
+  riders at high spin rates; any ship-riding design must derive its
+  target from ship-constant data (shipyard-space surface normals), not
+  from per-tick world-space field samples.
+
+The next attempt should be ONE mechanism, built inside VS's own update
+pipeline (its dragger/transform events), validated in-game at each step —
+not corrections layered around vanilla's tick/render loop.
 
 ## Unreleased (2.0.0-dev) — 2026-08-18 (round 34: GUI overhaul restored)
 

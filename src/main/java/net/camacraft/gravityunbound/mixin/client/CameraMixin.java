@@ -86,6 +86,11 @@ public abstract class CameraMixin {
         double entityY = Mth.lerp((double) tickDelta, focusedEntity.yo, focusedEntity.getY());
         double entityZ = Mth.lerp((double) tickDelta, focusedEntity.zo, focusedEntity.getZ());
 
+        // diagnostics: how far the camera-time position sits from the tick
+        // position — nonzero means VS's render-ride is moving this entity
+        // between ticks (see the vs-drag heartbeat)
+        comp.dbgCamVsTickDist = (float) new Vec3(entityX, entityY, entityZ).distanceTo(comp.dbgTickPos);
+
         double currentCameraY = Mth.lerp(tickDelta, this.eyeHeightOld, this.eyeHeight);
 
         Vec3 eyeOffset = QuaternionUtil.rotate(
