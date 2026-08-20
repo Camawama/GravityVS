@@ -2414,10 +2414,11 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
     /** Visual frame interpolated between the previous and current tick. */
     public Quaternionf getRenderRotation(float partialTick) {
-        if (prevVisualRotation.equals(visualRotation)) {
-            return visualRotation;
-        }
-        return new Quaternionf(prevVisualRotation).slerp(visualRotation, partialTick).normalize();
+        // must route through the two-arg variant: it carries the drawn-ship
+        // alignment. This overload having its own inline slerp is exactly
+        // why the CAMERA and the capsule debug lagged the (corrected) model
+        // after round 49 — they were the two remaining single-arg callers.
+        return getRenderRotation(partialTick, new Quaternionf());
     }
 
     /**

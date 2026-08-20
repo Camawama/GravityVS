@@ -1,5 +1,18 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-19 (round 50: the single-arg straggler)
+
+- Round 49's drawn-ship alignment confirmed working in-game: the player
+  model rides the moving ship perfectly. The two leftovers — the camera
+  trailing the model (visible in F5) and the F3+B capsule debug spheres
+  not rotating with it — shared one root: both used the one-argument
+  `getRenderRotation` overload, which still had its own uncorrected
+  interpolation; the model uses the two-argument overload that carries
+  the alignment. The single-argument overload now routes through the
+  corrected one, fixing the camera and the debug spheres together.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-19 (round 49: the drawn-ship alignment — measured fix)
 
 - **The vs-drag diagnostics delivered the verdict**: capsule players are
