@@ -1,5 +1,20 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 65: the upstream dossier)
+
+- **New docs/UpstreamIssueReports.md** — bugs whose root cause lives in
+  OTHER mods, with the evidence gathered here and ready-to-paste issue
+  drafts. First entry: the Valkyrien Skies entity-section corruption
+  (the round-62 crash and the 02:46 disconnect share one fingerprint:
+  a player section transfer executing off the server thread tears the
+  section's ClassInstanceMultiMap; VS's afterHandleMovePlayer setPos is
+  in every failing stack, reproduces without lag while riding a moving
+  ship, and all Gravity Unbound move-path hooks were verifiably inert
+  at the failure moments). Status tracked in the file; VS 2.4.11 is
+  current, so it needs a fresh upstream report.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-22 (round 64: the lag hunt, part 2 — profiled)
 
 - **The real profiler capture landed the attribution.** Over a 487 s
