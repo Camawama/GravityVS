@@ -219,9 +219,11 @@ public class GravityCoreBlockEntity extends BlockEntity
             // ON, alignment resolves the face; with snap OFF the user's spec
             // is NO snapping of any kind — pure smooth radial — and the
             // tilted-ground pins absorb the standing creep instead.
+            boolean cardinalized = false;
             if (!(entity instanceof net.minecraft.world.entity.player.Player)
                 && comp.isGroundedInFrame()) {
                 direction = cardinalDirection(direction);
+                cardinalized = true;
             }
 
             // GRADUAL falloff weakens the pull with the SQUARE of distance
@@ -234,17 +236,30 @@ public class GravityCoreBlockEntity extends BlockEntity
                 strengthScale *= Math.min(1.0, 16.0 / distSq);
             }
 
+            // Ship-mounted anchor: a RADIAL direction is position-dependent —
+            // sampling it into ship space once per tick and holding it fed
+            // the render alignment a 20 Hz staircase (the circling jitter).
+            // The ship-space CONSTANT of this field is the core's position:
+            // pass that, and the direction is re-derived live everywhere.
+            // The cardinalized grounded-mob direction IS sector-constant, so
+            // it keeps the rotation-only anchor.
             Vec3 shipLocalDir = null;
+            Vec3 shipLocalPos = null;
             Ship anchorShip = VSGameUtilsKt.getShipManagingPos(world, worldPosition);
             if (anchorShip != null) {
-                org.joml.Vector3d local = new org.joml.Quaterniond(
-                    anchorShip.getTransform().getShipToWorldRotation()).conjugate()
-                    .transform(new org.joml.Vector3d(direction.x, direction.y, direction.z));
-                shipLocalDir = new Vec3(local.x, local.y, local.z);
+                if (cardinalized) {
+                    org.joml.Vector3d local = new org.joml.Quaterniond(
+                        anchorShip.getTransform().getShipToWorldRotation()).conjugate()
+                        .transform(new org.joml.Vector3d(direction.x, direction.y, direction.z));
+                    shipLocalDir = new Vec3(local.x, local.y, local.z);
+                }
+                else {
+                    shipLocalPos = Vec3.atCenterOf(worldPosition);
+                }
             }
             comp.applyGravityDirectionEffect(
                 direction, CORE_ROTATION_PARAMS, CORE_BASE_PRIORITY - distance, false, strengthScale,
-                surfaceSnap, anchorShip, shipLocalDir
+                surfaceSnap, anchorShip, shipLocalDir, shipLocalPos, attracting ? 1.0 : -1.0
             );
         }
     }

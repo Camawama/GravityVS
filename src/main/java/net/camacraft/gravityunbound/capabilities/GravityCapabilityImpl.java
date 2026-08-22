@@ -1854,11 +1854,13 @@ public class GravityCapabilityImpl implements IGravityCapability {
             if (fieldGraceTicks <= 0) {
                 fieldAnchorShip = null;
                 fieldAnchorLocalDown = null;
+                fieldAnchorLocalPos = null;
             }
             return;
         }
         fieldAnchorShip = null;
         fieldAnchorLocalDown = null;
+        fieldAnchorLocalPos = null;
 
         double maxPriority = -Double.MAX_VALUE;
         for (GravityDirEffect effect : tempEffects) {
@@ -1890,6 +1892,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
                     bestAllowSurfaceAlign = effect.allowSurfaceAlign();
                     fieldAnchorShip = effect.sourceShip();
                     fieldAnchorLocalDown = effect.shipLocalDown();
+                    fieldAnchorLocalPos = effect.shipLocalSourcePos();
+                    fieldAnchorRadialSign = effect.radialSign();
                     if (effect.rotationParameters != null) {
                         bestParams = effect.rotationParameters;
                     }
@@ -1924,10 +1928,22 @@ public class GravityCapabilityImpl implements IGravityCapability {
         tempEffects.clear();
 
         // FIELD-SHIP ANCHOR: when the dominant field is ship-mounted, derive
-        // the target from the LIVE ship transform (the shipyard direction is
-        // a block-grid constant) — exact at any moment, grounded or
-        // airborne, immune to the one-tick staleness of the queued effect
-        if (fieldAnchorShip != null && fieldAnchorLocalDown != null) {
+        // the target from the LIVE ship transform — exact at any moment,
+        // grounded or airborne, immune to the one-tick staleness of the
+        // queued effect. RADIAL sources anchor their CENTER (the ship-space
+        // constant) and re-derive the pull from the live entity position;
+        // constant-direction sources (plates, normalizers) anchor the
+        // shipyard direction itself.
+        if (fieldAnchorShip != null && fieldAnchorLocalPos != null) {
+            org.joml.Vector3d center = new org.joml.Vector3d(
+                fieldAnchorLocalPos.x, fieldAnchorLocalPos.y, fieldAnchorLocalPos.z);
+            fieldAnchorShip.getTransform().getShipToWorldMatrix().transformPosition(center);
+            Vec3 toCenter = new Vec3(center.x, center.y, center.z).subtract(entity.position());
+            if (toCenter.lengthSqr() > 1.0E-6) {
+                targetGravityVector = toCenter.normalize().scale(fieldAnchorRadialSign);
+            }
+        }
+        else if (fieldAnchorShip != null && fieldAnchorLocalDown != null) {
             org.joml.Vector3d worldDown = new org.joml.Quaterniond(
                 fieldAnchorShip.getTransform().getShipToWorldRotation())
                 .transform(new org.joml.Vector3d(
@@ -1942,6 +1958,13 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private org.valkyrienskies.core.api.ships.Ship fieldAnchorShip = null;
     @Nullable
     private Vec3 fieldAnchorLocalDown = null;
+    // RADIAL sources (gravity cores): the source CENTER in shipyard
+    // coordinates — the true ship-space constant. The direction toward it is
+    // position-dependent, so it must be re-derived from the live pose and
+    // the live entity position, never sampled and held.
+    @Nullable
+    private Vec3 fieldAnchorLocalPos = null;
+    private double fieldAnchorRadialSign = 1.0;
     // eased 0..1 alignment strength — smooth snap-in and snap-out
     private float shipAlignWeight = 0;
 
@@ -2228,9 +2251,37 @@ public class GravityCapabilityImpl implements IGravityCapability {
         @Nullable org.valkyrienskies.core.api.ships.Ship sourceShip,
         @Nullable Vec3 shipLocalDown
     ) {
+        applyGravityDirectionEffect(
+            direction, rotationParameters, priority, secondary, strengthScale,
+            allowSurfaceAlign, sourceShip, shipLocalDown, null, 1.0);
+    }
+
+    /**
+     * RADIAL ship-aware variant (gravity cores): the ship-space constant of
+     * a radial field is its CENTER, not its direction — the pull direction
+     * depends on where the entity stands, so a direction sampled once per
+     * tick and held is a 20 Hz staircase to the render thread (the ship-core
+     * circling jitter). Passing {@code shipLocalSourcePos} (shipyard
+     * coordinates) lets both the tick target and the per-frame drawn-ship
+     * alignment re-derive the exact radial direction from the live pose and
+     * the live entity position. {@code radialSign} is +1 attracting, -1
+     * repulsing.
+     */
+    public void applyGravityDirectionEffect(
+        @NotNull Vec3 direction,
+        @Nullable RotationParameters rotationParameters,
+        double priority,
+        boolean secondary,
+        double strengthScale,
+        boolean allowSurfaceAlign,
+        @Nullable org.valkyrienskies.core.api.ships.Ship sourceShip,
+        @Nullable Vec3 shipLocalDown,
+        @Nullable Vec3 shipLocalSourcePos,
+        double radialSign
+    ) {
         GravityDirEffect effect = new GravityDirEffect(
             direction, rotationParameters, priority, secondary, strengthScale,
-            allowSurfaceAlign, sourceShip, shipLocalDown
+            allowSurfaceAlign, sourceShip, shipLocalDown, shipLocalSourcePos, radialSign
         );
         if (isFiringUpdateEvent) {
             tempEffects.add(effect);
@@ -2507,10 +2558,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // (works airborne: jumping and flying inside a ship field stay
         // aligned); the grounded surface normal is the fallback. The arc is
         // scaled by the eased weight so engaging and releasing are smooth
-        // instead of instantaneous snaps.
+        // instead of instantaneous snaps. RADIAL anchors (ship cores) carry
+        // the source CENTER: the up must be re-derived here from the drawn
+        // pose AND the interpolated entity position — a direction sampled at
+        // tick rate holds still between ticks and jumps at each boundary,
+        // which the full-strength arc turned into 20 Hz camera stepping
+        // while circling the core.
         org.valkyrienskies.core.api.ships.Ship alignShip = null;
         org.joml.Vector3d localUp = null;
-        if (fieldAnchorShip != null && fieldAnchorLocalDown != null) {
+        Vec3 radialLocalPos = null;
+        if (fieldAnchorShip != null && fieldAnchorLocalPos != null) {
+            alignShip = fieldAnchorShip;
+            radialLocalPos = fieldAnchorLocalPos;
+        }
+        else if (fieldAnchorShip != null && fieldAnchorLocalDown != null) {
             alignShip = fieldAnchorShip;
             localUp = new org.joml.Vector3d(
                 -fieldAnchorLocalDown.x, -fieldAnchorLocalDown.y, -fieldAnchorLocalDown.z);
@@ -2519,12 +2580,27 @@ public class GravityCapabilityImpl implements IGravityCapability {
             alignShip = capsuleGroundShip;
             localUp = shipLocalUp;
         }
-        if (localUp != null && shipAlignWeight > 0.001f
+        if ((localUp != null || radialLocalPos != null) && shipAlignWeight > 0.001f
             && alignShip instanceof org.valkyrienskies.core.api.ships.ClientShip clientShip) {
-            org.joml.Vector3d drawn = new org.joml.Quaterniond(
-                clientShip.getRenderTransform().getShipToWorldRotation())
-                .transform(new org.joml.Vector3d(localUp));
-            Vec3 drawnUp = new Vec3(drawn.x, drawn.y, drawn.z).normalize();
+            Vec3 drawnUp;
+            if (radialLocalPos != null) {
+                org.joml.Vector3d center = new org.joml.Vector3d(
+                    radialLocalPos.x, radialLocalPos.y, radialLocalPos.z);
+                clientShip.getRenderTransform().getShipToWorldMatrix().transformPosition(center);
+                Vec3 toCenter = new Vec3(center.x, center.y, center.z)
+                    .subtract(entity.getPosition(partialTick));
+                if (toCenter.lengthSqr() < 1.0E-6) {
+                    return dest;
+                }
+                // up is opposite the pull: -sign * toward-center
+                drawnUp = toCenter.normalize().scale(-fieldAnchorRadialSign);
+            }
+            else {
+                org.joml.Vector3d drawn = new org.joml.Quaterniond(
+                    clientShip.getRenderTransform().getShipToWorldRotation())
+                    .transform(new org.joml.Vector3d(localUp));
+                drawnUp = new Vec3(drawn.x, drawn.y, drawn.z).normalize();
+            }
             Vec3 frameUp = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), dest);
             double align = frameUp.dot(drawnUp);
             if (align < 0.999999 && align > 0.5) {
@@ -2680,7 +2756,9 @@ public class GravityCapabilityImpl implements IGravityCapability {
         double strengthScale,
         boolean allowSurfaceAlign,
         @Nullable org.valkyrienskies.core.api.ships.Ship sourceShip,
-        @Nullable Vec3 shipLocalDown
+        @Nullable Vec3 shipLocalDown,
+        @Nullable Vec3 shipLocalSourcePos,
+        double radialSign
     ) {
     }
 }

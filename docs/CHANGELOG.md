@@ -1,5 +1,29 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 52: the radial anchor)
+
+- **Fixed the circling jitter around ship-mounted gravity cores** (round
+  51 regression). The field-ship anchor assumed a ship field's direction
+  is a block-grid constant — true for plates and normalizers, false for
+  a core: its pull is RADIAL, recomputed from the entity's position
+  every tick. The core was sampling that direction into shipyard space
+  once per tick and the render-time drawn-ship alignment then snapped
+  the camera's up to it at full strength every frame — a target that
+  holds still between ticks and jumps at each tick boundary, i.e. a
+  20 Hz staircase. Worldspace cores never set the anchor, which is why
+  they stayed smooth.
+- **Fix — anchor the center, not the direction**: a radial field's true
+  ship-space constant is the CORE'S POSITION. Core effects now carry the
+  source center in shipyard coordinates (plus the attract/repulse sign);
+  the tick target re-derives the pull from the live ship transform and
+  live entity position, and the drawn-ship alignment re-derives it per
+  frame from the RENDER transform and the INTERPOLATED entity position —
+  smooth at frame rate, exact on moving ships. The cardinalized
+  grounded-mob direction is sector-constant and keeps the rotation-only
+  anchor; plates and normalizers are untouched.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-19 (round 51: the field-ship anchor)
 
 - **Alignment now belongs to the FIELD, not to ground contact.** A
