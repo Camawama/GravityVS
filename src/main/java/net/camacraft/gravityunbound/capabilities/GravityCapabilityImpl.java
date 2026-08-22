@@ -364,6 +364,15 @@ public class GravityCapabilityImpl implements IGravityCapability {
         dbgEffectsQueued = 0;
         dbgTickPos = entity.position();
         updateGravityStatus();
+        {
+            // smooth engage/disengage of the ship alignment (the binary
+            // grounded-only gate snapped instantly on landing and released
+            // instantly on jumping)
+            float targetWeight = (fieldAnchorShip != null
+                || (capsuleGroundShip != null && lastGroundNormal != null)) ? 1.0f : 0.0f;
+            float stepW = Mth.clamp(targetWeight - shipAlignWeight, -0.12f, 0.12f);
+            shipAlignWeight += stepW;
+        }
         applyGravityChange();
         applyGravityStrengthAttribute();
         maybeSnapFreshSpawn();
@@ -1399,8 +1408,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
             // back to the smooth gains below and gets smeared out exactly
             // like the stable baseline did. Not 1.0: a touch of smoothing
             // still absorbs single-tick probe noise.
-            boolean gluedToSurface = false;
-            if (lastGroundNormal != null
+            boolean gluedToSurface = fieldAnchorShip != null;
+            if (!gluedToSurface && lastGroundNormal != null
                 && (capsuleGrounded || entity.onGround())) {
                 Vec3 targetUpNow = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), visualTarget);
                 gluedToSurface = targetUpNow.dot(lastGroundNormal) > 0.95;
@@ -1842,8 +1851,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
         if (tempEffects.isEmpty()) {
             currentRotationParameters = RotationParameters.getDefault();
             surfaceAlignAllowed = true;
+            if (fieldGraceTicks <= 0) {
+                fieldAnchorShip = null;
+                fieldAnchorLocalDown = null;
+            }
             return;
         }
+        fieldAnchorShip = null;
+        fieldAnchorLocalDown = null;
 
         double maxPriority = -Double.MAX_VALUE;
         for (GravityDirEffect effect : tempEffects) {
@@ -1873,6 +1888,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 if (effect.priority > bestParamPriority) {
                     bestParamPriority = effect.priority;
                     bestAllowSurfaceAlign = effect.allowSurfaceAlign();
+                    fieldAnchorShip = effect.sourceShip();
+                    fieldAnchorLocalDown = effect.shipLocalDown();
                     if (effect.rotationParameters != null) {
                         bestParams = effect.rotationParameters;
                     }
@@ -1905,7 +1922,28 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
         currentRotationParameters = bestParams != null ? bestParams : RotationParameters.getDefault();
         tempEffects.clear();
+
+        // FIELD-SHIP ANCHOR: when the dominant field is ship-mounted, derive
+        // the target from the LIVE ship transform (the shipyard direction is
+        // a block-grid constant) — exact at any moment, grounded or
+        // airborne, immune to the one-tick staleness of the queued effect
+        if (fieldAnchorShip != null && fieldAnchorLocalDown != null) {
+            org.joml.Vector3d worldDown = new org.joml.Quaterniond(
+                fieldAnchorShip.getTransform().getShipToWorldRotation())
+                .transform(new org.joml.Vector3d(
+                    fieldAnchorLocalDown.x, fieldAnchorLocalDown.y, fieldAnchorLocalDown.z));
+            targetGravityVector = new Vec3(worldDown.x, worldDown.y, worldDown.z).normalize();
+        }
     }
+
+    // dominant ship-mounted field source this tick (survives through the
+    // field grace; cleared when the field is fully gone)
+    @Nullable
+    private org.valkyrienskies.core.api.ships.Ship fieldAnchorShip = null;
+    @Nullable
+    private Vec3 fieldAnchorLocalDown = null;
+    // eased 0..1 alignment strength — smooth snap-in and snap-out
+    private float shipAlignWeight = 0;
 
     /**
      * Physics may only sit on a cardinal direction. Snap to the target vector's
@@ -2167,8 +2205,32 @@ public class GravityCapabilityImpl implements IGravityCapability {
         double strengthScale,
         boolean allowSurfaceAlign
     ) {
+        applyGravityDirectionEffect(
+            direction, rotationParameters, priority, secondary, strengthScale,
+            allowSurfaceAlign, null, null);
+    }
+
+    /**
+     * Ship-aware variant: a field mounted on a Valkyrien Skies ship passes
+     * its ship and the field direction in SHIPYARD coordinates (a block-grid
+     * constant for plates/normalizers). While the dominant field is
+     * ship-sourced, the entity's frame anchors to the ship — grounded,
+     * jumping, or flying — because the ship-space direction can be
+     * re-derived exactly from the live transform at any moment.
+     */
+    public void applyGravityDirectionEffect(
+        @NotNull Vec3 direction,
+        @Nullable RotationParameters rotationParameters,
+        double priority,
+        boolean secondary,
+        double strengthScale,
+        boolean allowSurfaceAlign,
+        @Nullable org.valkyrienskies.core.api.ships.Ship sourceShip,
+        @Nullable Vec3 shipLocalDown
+    ) {
         GravityDirEffect effect = new GravityDirEffect(
-            direction, rotationParameters, priority, secondary, strengthScale, allowSurfaceAlign
+            direction, rotationParameters, priority, secondary, strengthScale,
+            allowSurfaceAlign, sourceShip, shipLocalDown
         );
         if (isFiringUpdateEvent) {
             tempEffects.add(effect);
@@ -2439,15 +2501,26 @@ public class GravityCapabilityImpl implements IGravityCapability {
             dest.slerp(visualRotation, partialTick).normalize();
         }
 
-        // DRAWN-SHIP ALIGNMENT: while riding, VS renders the body at the
-        // drawn ship pose — the frame must rotate to match it, or the eye
-        // offset and model pose lag the deck (parallel transport of the
-        // interpolated frame onto the drawn ship's surface normal; identity
-        // when the drawn pose matches the tick pose, e.g. stationary ships,
-        // and inactive off-ship or on level decks where the normal is up).
-        org.joml.Vector3d localUp = shipLocalUp;
-        if (localUp != null
-            && capsuleGroundShip instanceof org.valkyrienskies.core.api.ships.ClientShip clientShip) {
+        // DRAWN-SHIP ALIGNMENT: VS renders the body at the drawn ship pose —
+        // the frame must rotate to match it. The FIELD ANCHOR supplies the
+        // shipyard-space up whenever the dominant field is ship-mounted
+        // (works airborne: jumping and flying inside a ship field stay
+        // aligned); the grounded surface normal is the fallback. The arc is
+        // scaled by the eased weight so engaging and releasing are smooth
+        // instead of instantaneous snaps.
+        org.valkyrienskies.core.api.ships.Ship alignShip = null;
+        org.joml.Vector3d localUp = null;
+        if (fieldAnchorShip != null && fieldAnchorLocalDown != null) {
+            alignShip = fieldAnchorShip;
+            localUp = new org.joml.Vector3d(
+                -fieldAnchorLocalDown.x, -fieldAnchorLocalDown.y, -fieldAnchorLocalDown.z);
+        }
+        else if (shipLocalUp != null && capsuleGroundShip != null) {
+            alignShip = capsuleGroundShip;
+            localUp = shipLocalUp;
+        }
+        if (localUp != null && shipAlignWeight > 0.001f
+            && alignShip instanceof org.valkyrienskies.core.api.ships.ClientShip clientShip) {
             org.joml.Vector3d drawn = new org.joml.Quaterniond(
                 clientShip.getRenderTransform().getShipToWorldRotation())
                 .transform(new org.joml.Vector3d(localUp));
@@ -2456,6 +2529,9 @@ public class GravityCapabilityImpl implements IGravityCapability {
             double align = frameUp.dot(drawnUp);
             if (align < 0.999999 && align > 0.5) {
                 Quaternionf arc = QuaternionUtil.getRotationBetween(frameUp, drawnUp);
+                if (shipAlignWeight < 0.999f) {
+                    arc = new Quaternionf().slerp(arc, shipAlignWeight);
+                }
                 // frame maps world -> player: world rotation S composes as
                 // frame * conj(S)
                 dest.mul(arc.conjugate()).normalize();
@@ -2602,7 +2678,9 @@ public class GravityCapabilityImpl implements IGravityCapability {
         double priority,
         boolean secondary,
         double strengthScale,
-        boolean allowSurfaceAlign
+        boolean allowSurfaceAlign,
+        @Nullable org.valkyrienskies.core.api.ships.Ship sourceShip,
+        @Nullable Vec3 shipLocalDown
     ) {
     }
 }

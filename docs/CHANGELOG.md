@@ -1,5 +1,26 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-19 (round 51: the field-ship anchor)
+
+- **Alignment now belongs to the FIELD, not to ground contact.** A
+  ship-mounted field's direction is a block-grid constant in the ship's
+  own coordinates, so field effects now carry their source ship and
+  shipyard-space direction (all three field blocks wired). While the
+  dominant field is ship-sourced, the player's frame anchors to that
+  ship — standing, jumping, or flying: the gravity target is re-derived
+  from the live ship transform every tick, and the render alignment uses
+  the drawn ship pose, airborne included. Jumping on plating no longer
+  unsnaps; flying inside a ship-mounted normalizer's zone stays aligned
+  with the moving ship.
+- **Snapping is now smooth**: alignment strength eases in and out over
+  ~0.4 seconds (matching the mod's transition feel) instead of engaging
+  instantly on landing and releasing instantly on jumping. The eased,
+  field-keyed anchor also removes the random camera snaps while walking
+  on a spinning ship (previously a binary grounded-state gate flapping
+  on per-step probe dropouts).
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-19 (round 50: the single-arg straggler)
 
 - Round 49's drawn-ship alignment confirmed working in-game: the player

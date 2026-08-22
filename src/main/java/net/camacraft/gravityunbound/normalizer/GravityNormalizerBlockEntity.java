@@ -237,7 +237,8 @@ public class GravityNormalizerBlockEntity extends BlockEntity
 
             comp.applyGravityDirectionEffect(
                 worldDown, NORMALIZER_ROTATION_PARAMS, NORMALIZER_PRIORITY, false,
-                be.gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL, true
+                be.gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL, true,
+                ship, ship != null ? Vec3.atLowerCornerOf(be.localDown.getNormal()) : null
             );
         }
     }

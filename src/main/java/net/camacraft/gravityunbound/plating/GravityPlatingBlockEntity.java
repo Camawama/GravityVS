@@ -509,7 +509,9 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 }
                 comp.applyGravityDirectionEffect(
                         worldEffectDir, PLATING_ROTATION_PARAMS, priority, secondary, strengthScale,
-                        sideDatum.surfaceSnap
+                        sideDatum.surfaceSnap,
+                        ship, ship != null
+                            ? Vec3.atLowerCornerOf(localEffectDir.getNormal()) : null
                 );
                 applies = true;
                 primaryApplies = primaryApplies || !secondary;

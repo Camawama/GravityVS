@@ -234,9 +234,17 @@ public class GravityCoreBlockEntity extends BlockEntity
                 strengthScale *= Math.min(1.0, 16.0 / distSq);
             }
 
+            Vec3 shipLocalDir = null;
+            Ship anchorShip = VSGameUtilsKt.getShipManagingPos(world, worldPosition);
+            if (anchorShip != null) {
+                org.joml.Vector3d local = new org.joml.Quaterniond(
+                    anchorShip.getTransform().getShipToWorldRotation()).conjugate()
+                    .transform(new org.joml.Vector3d(direction.x, direction.y, direction.z));
+                shipLocalDir = new Vec3(local.x, local.y, local.z);
+            }
             comp.applyGravityDirectionEffect(
                 direction, CORE_ROTATION_PARAMS, CORE_BASE_PRIORITY - distance, false, strengthScale,
-                surfaceSnap
+                surfaceSnap, anchorShip, shipLocalDir
             );
         }
     }
