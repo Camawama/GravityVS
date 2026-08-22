@@ -1,5 +1,73 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 70: fields own no-gravity entities — heartbeat-diagnosed)
+
+- **The core-field "no pull in the Great Unknown" is solved, and the
+  heartbeat named it in one capture.** The log showed the core's
+  effect arriving every tick (fx/t=1), the radial direction correct,
+  the frame perfectly aligned (gapDeg=0.0) — and pull[C]: excluded.
+  VS Genesis implements the Great Unknown's zero-g by setting
+  NO-GRAVITY on entities: vanilla travel then skips gravity entirely,
+  and the deficit's isNoGravity exclusion was the only thing standing
+  between the player and the field. Plating "worked" only because
+  Genesis clears the flag on/near ship decks; the "broken" core
+  surface snapping was pure downstream — never pulled, never landed,
+  nothing to snap to.
+- **Fix: no-gravity entities are the POINT, not an exclusion.** For
+  them vanilla contributes exactly zero (the attribute never matters),
+  so the deficit computes actual = 0 and supplies the field's whole
+  pull. An active field owns gravity. The remaining exclusions
+  (flying, elytra, swimmers, slow-falling) stand.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 69: body-scaled probes and thresholds; pull heartbeat)
+
+- **Surface snapping works on scaled ships now — the probe geometry
+  scales with the body.** Every surface-probe offset was authored for
+  a 1.8-block player in world units: the 0.2-block back-off started
+  the ray body-heights behind a 1/16 player's feet (inside or beyond a
+  matching-scale ship's hull) and the concave wall probe reached many
+  ship-blocks ahead, adopting far walls — snapping simply never
+  engaged correctly. All three probes (field, wall-adoption,
+  frame-support) now scale their start offsets and depths by
+  bbHeight/1.8.
+- **Body-scaled movement thresholds.** The capsule's step assist
+  (0.6-block lift = many body heights for a tiny player — a teleport,
+  not a step) and its upward-motion gate, and the ship idle anchor's
+  jump-release/push thresholds (a tiny player's jump velocity sat
+  below the full-size 0.05 release gate, pinning them to the deck),
+  all scale with bbHeight/1.8 now. Full-size players are bit-identical.
+- **Pull heartbeat diagnostics.** The 40-tick debug block now logs a
+  pull[] line: the deficit state (applied/covered/nofield/excluded/
+  flying), the attribute value, field strength, grounded flags, and
+  local deltaMovement — so "no downward velocity in the field" names
+  its own cause from the log instead of another remote guess.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 68: fields overpower zero-gravity dimensions)
+
+- **Field pull is authoritative now.** Field strength reached vanilla
+  travel as a MULTIPLIER on Forge's entity-gravity attribute — correct
+  in normal dimensions, but VS Genesis's zero-g Great Unknown
+  suppresses that attribute, and any multiple of (near-)zero stays
+  (near-)zero: cores/plating barely pulled (plate accel maxed at 1.0
+  gave only a sliver) and jumps sailed clean out of the field with
+  nothing decelerating them. New applyFieldPullDeficit: each tick a
+  field is active, the DEFICIT between the field's intended
+  acceleration (BASE x strength) and what the attribute actually
+  delivers is applied directly to local deltaMovement along the
+  frame's down — the same axis travel uses, composing to exactly the
+  intended pull. Inert in normal dimensions (deficit ~0). Deliberately
+  skipped for flying/fall-flying players, no-gravity entities,
+  swimmers, and slow-falling (an intentionally reduced attribute is
+  not suppression). Known limit: non-living entities (items, carts) in
+  zero-g fields still follow their own hardcoded gravity paths and may
+  stay floaty there — separate follow-up if wanted.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-22 (round 67: field range respects ship scale)
 
 - **A gravity core's field now scales with its ship.** The range is

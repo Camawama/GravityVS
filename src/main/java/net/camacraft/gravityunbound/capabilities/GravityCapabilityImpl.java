@@ -95,6 +95,9 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // player, the camera-time position diverges from the tick position)
     public Vec3 dbgTickPos = Vec3.ZERO;
     public volatile float dbgCamVsTickDist = 0;
+    // field-pull deficit heartbeat state (see applyFieldPullDeficit)
+    private double dbgDeficitApplied = 0;
+    private String dbgDeficitState = "-";
 
     // the held surface normal in the ridden ship's OWN coordinates — a
     // block face's normal is constant in shipyard space, so the drawn
@@ -360,6 +363,17 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 String.format(java.util.Locale.ROOT, "%.1f",
                     Math.toDegrees(angleBetween(visualRotation, visualTarget))),
                 useCapsuleCollision());
+            Vec3 dbgDm = entity.getDeltaMovement();
+            LOGGER.info(
+                "[GravityUnbound] pull[{}]: {} deficit={} strength={} grounded={}/{} dmLocal=({},{},{})",
+                entity.level().isClientSide() ? "C" : "S",
+                dbgDeficitState,
+                String.format(java.util.Locale.ROOT, "%.4f", dbgDeficitApplied),
+                String.format(java.util.Locale.ROOT, "%.3f", currGravityStrength),
+                capsuleGrounded, entity.onGround(),
+                String.format(java.util.Locale.ROOT, "%.4f", dbgDm.x),
+                String.format(java.util.Locale.ROOT, "%.4f", dbgDm.y),
+                String.format(java.util.Locale.ROOT, "%.4f", dbgDm.z));
         }
         dbgEffectsQueued = 0;
         dbgTickPos = entity.position();
@@ -375,6 +389,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
         applyGravityChange();
         applyGravityStrengthAttribute();
+        applyFieldPullDeficit();
         maybeSnapFreshSpawn();
         updateSurfaceProbe();
         // maintain the shipyard-space image of the held normal (see
@@ -428,6 +443,82 @@ public class GravityCapabilityImpl implements IGravityCapability {
         applyGravityChange();
         applyGravityStrengthAttribute();
         advanceVisualRotation();
+    }
+
+    /**
+     * FIELD PULL IS AUTHORITATIVE. The field's strength reaches vanilla
+     * travel through the ENTITY_GRAVITY attribute as a MULTIPLIER — which
+     * works in normal dimensions but collapses in zero-gravity ones: VS
+     * Genesis's Great Unknown suppresses the attribute, and any multiple
+     * of (near-)zero stays (near-)zero, so a core/plating field barely
+     * pulled at all and jumps sailed clean out of the field. Each tick a
+     * field is active, this applies the DEFICIT between the field's
+     * intended acceleration ({@code BASE_GRAVITY_ACCEL x strength}) and
+     * what the attribute will actually deliver, straight to the local
+     * deltaMovement along the frame's down — the exact axis vanilla
+     * travel applies the attribute along, so the two compose to precisely
+     * the intended pull. In normal dimensions the attribute already
+     * delivers everything and the deficit is ~0: this is inert there.
+     *
+     * Deliberately NOT applied to: flying/fall-flying players (weightless
+     * by vanilla semantics), swimmers (water gravity runs through
+     * different vanilla math), slow-falling entities (their reduced
+     * attribute is intentional, not suppression). NO-GRAVITY entities ARE
+     * included — with actual = 0, the deficit supplies the field's whole
+     * pull (see the note at the computation).
+     */
+    private void applyFieldPullDeficit() {
+        dbgDeficitApplied = 0;
+        if (!(entity instanceof LivingEntity living)) {
+            dbgDeficitState = "nonliving";
+            return;
+        }
+        boolean controlled = entity.level().isClientSide()
+            ? entity.isControlledByLocalInstance()
+            : !(entity instanceof Player);
+        if (!controlled) {
+            dbgDeficitState = "uncontrolled";
+            return;
+        }
+        if (fieldGraceTicks <= 0) {
+            dbgDeficitState = "nofield";
+            return;
+        }
+        if (living.isFallFlying()
+            || entity.isInWater() || entity.isInLava()
+            || living.onClimbable()
+            || living.hasEffect(net.minecraft.world.effect.MobEffects.SLOW_FALLING)) {
+            dbgDeficitState = "excluded";
+            return;
+        }
+        if (entity instanceof Player player && player.getAbilities().flying) {
+            dbgDeficitState = "flying";
+            return;
+        }
+
+        // NO-GRAVITY ENTITIES ARE NOT EXCLUDED — they are the whole point.
+        // VS Genesis's Great Unknown implements zero-g by setting noGravity
+        // on entities: vanilla travel then skips gravity ENTIRELY (the
+        // attribute value never matters), so the deficit must supply the
+        // field's full pull. Measured in the field test: the core's effect
+        // arrived (fx/t=1), the frame aligned perfectly (gapDeg=0.0), and
+        // the old isNoGravity exclusion was the only thing between the
+        // player and the pull. An active field OWNS gravity.
+        net.minecraft.world.entity.ai.attributes.AttributeInstance attr =
+            living.getAttribute(net.minecraftforge.common.ForgeMod.ENTITY_GRAVITY.get());
+        double actual = living.isNoGravity() ? 0.0
+            : attr != null ? attr.getValue() : BASE_GRAVITY_ACCEL;
+        double desired = BASE_GRAVITY_ACCEL * currGravityStrength;
+        double deficit = desired - actual;
+        if (deficit <= 1.0E-4) {
+            dbgDeficitState = String.format(java.util.Locale.ROOT,
+                "covered(attr=%.4f)", actual);
+            return; // the attribute path already delivers (or exceeds) the pull
+        }
+        entity.setDeltaMovement(entity.getDeltaMovement().add(0.0, -deficit, 0.0));
+        dbgDeficitApplied = deficit;
+        dbgDeficitState = String.format(java.util.Locale.ROOT,
+            "applied(attr=%.4f)", actual);
     }
 
     /**
@@ -614,13 +705,17 @@ public class GravityCapabilityImpl implements IGravityCapability {
         Vec3 normal = capsuleGroundNormal != null ? capsuleGroundNormal : getUpVector();
         Vec3 worldVelocity = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), visualRotation);
         double normalVel = worldVelocity.dot(normal);
-        if (normalVel > 0.05) {
+        // velocity thresholds scale with the body: a Pehkui-scaled player's
+        // jump velocity is far below the full-size 0.05 release gate, which
+        // would have pinned tiny players to the deck mid-jump
+        double velScale = Mth.clamp(entity.getBbHeight() / 1.8, 0.05, 1.0);
+        if (normalVel > 0.05 * velScale) {
             // jumping / being launched away from the surface
             shipAnchorPos = null;
             return;
         }
         Vec3 tangentialVel = worldVelocity.subtract(normal.scale(normalVel));
-        if (tangentialVel.lengthSqr() > 0.2 * 0.2) {
+        if (tangentialVel.lengthSqr() > 0.2 * 0.2 * velScale * velScale) {
             // a real push is in flight: let it play out
             shipAnchorPos = null;
             return;
@@ -790,6 +885,13 @@ public class GravityCapabilityImpl implements IGravityCapability {
         Vec3 probeDown = held ? heldNormal.scale(-1) : fieldDown;
 
         Vec3 feet = entity.position();
+        // PROBE SCALE: every probe offset below was authored for a
+        // 1.8-block player in world units — for a Pehkui-scaled player the
+        // 0.2-block back-off is body-heights long and starts the ray inside
+        // (or beyond) a matching-scale ship's hull, and the wall probe
+        // reached many ship-blocks ahead: surface snapping simply never
+        // engaged on scaled ships. Scale the probe geometry with the body.
+        double probeScale = Mth.clamp(entity.getBbHeight() / 1.8, 0.05, 1.0);
 
         // tangential (along-surface) component of last tick's actual movement;
         // drives the edge-transition probes below
@@ -886,7 +988,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             }
         }
 
-        Vec3 normal = probeSurfaceNormal(feet.subtract(probeDown.scale(0.2)), probeDown, 0.2 + GROUND_PROBE_DEPTH);
+        Vec3 normal = probeSurfaceNormal(feet.subtract(probeDown.scale(0.2 * probeScale)), probeDown, (0.2 + GROUND_PROBE_DEPTH) * probeScale);
         if (normal != null && normal.dot(fieldUp) > SUPPORT_KEEP_DOT) {
             adoptGroundNormal(normal);
 
@@ -909,7 +1011,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 Vec3 probeDir = inputTangentDir != null ? inputTangentDir
                     : (tangentSpeed > 0.02 ? tangentDir : null);
                 Vec3 wall = probeDir == null ? null
-                    : probeSurfaceNormal(feet.add(heldNormal.scale(0.2)), probeDir, 0.5);
+                    : probeSurfaceNormal(feet.add(heldNormal.scale(0.2 * probeScale)), probeDir, 0.5 * probeScale);
                 // field gate 0.2, not 0.35: near the BOTTOM of a plated wall a
                 // large plated floor dominates the blend (many more floor
                 // plates inside the blend window), tilting fieldUp mostly
@@ -942,7 +1044,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         if (!held) {
             Vec3 frameUp = getUpVector();
             Vec3 frameDown = frameUp.scale(-1);
-            Vec3 support = probeSurfaceNormal(feet.subtract(frameDown.scale(0.2)), frameDown, 0.2 + GROUND_PROBE_DEPTH);
+            Vec3 support = probeSurfaceNormal(feet.subtract(frameDown.scale(0.2 * probeScale)), frameDown, (0.2 + GROUND_PROBE_DEPTH) * probeScale);
             if (support != null && support.dot(frameUp) > 0.35 && support.dot(fieldUp) > SUPPORT_KEEP_DOT) {
                 adoptGroundNormal(support);
                 return;

@@ -147,19 +147,23 @@ public final class CapsuleCollider {
         //   mid-transition, each step attempt teleported them 0.6 along a
         //   diagonal "up", a per-tick escalator that launched players off
         //   plated walls at tilt-dependent speed.
-        if (wasGrounded && movement.dot(up) < 0.05) {
+        // step height scales with the body: 0.6 world blocks is a normal
+        // player's step, but MANY body heights for a Pehkui-scaled one —
+        // the unscaled assist teleported tiny players around scaled ships
+        double stepHeight = STEP_HEIGHT * Mth.clamp(height / 1.8, 0.05, 1.0);
+        if (wasGrounded && movement.dot(up) < 0.05 * Mth.clamp(height / 1.8, 0.05, 1.0)) {
             Vec3 tangentIntended = rejectFrom(movement, up);
             Vec3 tangentAchieved = rejectFrom(collided, up);
             double intendedLen = tangentIntended.length();
             if (intendedLen > 1.0E-5 && tangentAchieved.length() < intendedLen * 0.7) {
                 ResolveState stepState = new ResolveState();
                 stepState.gravityUp = gravityUp;
-                Vec3 lift = up.scale(STEP_HEIGHT);
+                Vec3 lift = up.scale(stepHeight);
                 Vec3 lifted = start.add(lift)
                     .add(sweep(start, lift, up, radius, sphereOffsets, obstacles, stepState));
                 Vec3 movedUp = lifted.add(movement)
                     .add(sweep(lifted, movement, up, radius, sphereOffsets, obstacles, stepState));
-                Vec3 drop = up.scale(-(STEP_HEIGHT + SKIN * 2));
+                Vec3 drop = up.scale(-(stepHeight + SKIN * 2));
                 Vec3 settled = movedUp.add(drop)
                     .add(sweep(movedUp, drop, up, radius, sphereOffsets, obstacles, stepState));
 
@@ -541,7 +545,7 @@ public final class CapsuleCollider {
     ) {
         AABB reach = makeEnvelope(start, up, radius * 2, height)
             .minmax(makeEnvelope(start.add(movement), up, radius * 2, height))
-            .inflate(radius + STEP_HEIGHT + 0.3);
+            .inflate(radius + STEP_HEIGHT * Mth.clamp(height / 1.8, 0.05, 1.0) + 0.3);
 
         List<Obstacle> out = new ArrayList<>();
 
