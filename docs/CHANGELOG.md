@@ -1,5 +1,24 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 67: field range respects ship scale)
+
+- **A gravity core's field now scales with its ship.** The range is
+  authored in the core's OWN block grid, but the core computed
+  everything in raw world units — on a scaled-down ship the field
+  reached its full unscaled radius, dwarfing the ship. The world reach
+  is now range x the ship's measured transform scale, and the
+  grid-authored quantities — the gradual falloff ("full strength
+  within 4 blocks" of the CORE's blocks), the priority distance, the
+  inner core-block exclusion, and the ship-attraction thresholds — run
+  in grid units (world distance / scale), so a scaled field keeps its
+  authored shape at its own size. The field-ring visual already
+  followed the render transform and now receives the grid-space range
+  so physics and visual agree. Plating and normalizer zones were
+  already scale-correct (their membership tests run through the full
+  world->ship matrices), and fluid queries are same-grid and untouched.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-22 (round 66: scaled-ship collision, re-applied)
 
 - Rounds 66-73 of the previous session were fully reverted after a bad

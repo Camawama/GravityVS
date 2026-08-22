@@ -134,29 +134,51 @@ public class GravityCoreBlockEntity extends BlockEntity
 
         net.camacraft.gravityunbound.util.GravityFieldLookup.register(world, blockPos, be);
 
-        double range = be.range;
+        // SHIP SCALE: the range is authored in the core's OWN block grid —
+        // a core on a scaled-down ship must project a proportionally
+        // smaller world-space field (measured from the transform matrix,
+        // like CapsuleCollider does; 1.0 for world cores and unscaled
+        // ships). Plating/normalizer zones already respect scale because
+        // their membership tests run through the full world->ship
+        // matrices; the core computes in world space, so its world reach
+        // and its ship-unit distances (falloff, priority) must be scaled
+        // explicitly. Fluids are untouched (fluidDownAt works same-grid in
+        // shipyard units).
+        double shipScale = 1.0;
+        if (ownShip != null) {
+            Vector3d unit = new Vector3d(1.0, 0.0, 0.0);
+            ownShip.getTransform().getShipToWorldMatrix().transformDirection(unit);
+            double len = unit.length();
+            if (len > 1.0E-9) {
+                shipScale = len;
+            }
+        }
+
+        double range = be.range * shipScale;
         AABB searchBox = new AABB(
             center.x - range, center.y - range, center.z - range,
             center.x + range, center.y + range, center.z + range
         );
 
-        be.applyToEntities(world, center, range, searchBox);
+        be.applyToEntities(world, center, range, shipScale, searchBox);
 
         if (world.isClientSide()) {
             if (be.showParticles) {
-                // grid-local center: the renderer applies the ship's per-frame
-                // render transform, so the visual sticks to moving ships
+                // grid-local center AND grid-local range: the renderer
+                // applies the ship's per-frame render transform (scale
+                // included), so the visual sticks to — and scales with —
+                // moving ships
                 net.camacraft.gravityunbound.util.FieldVisuals.submitCore(
-                    world, blockPos, Vec3.atCenterOf(blockPos), range, be.attracting, ownShip
+                    world, blockPos, Vec3.atCenterOf(blockPos), be.range, be.attracting, ownShip
                 );
             }
         }
         else if (GravityConfig.gravityCoreAffectsShips.get() && be.affectsShips) {
-            be.applyToShips(world, ownShip, center, range, searchBox);
+            be.applyToShips(world, ownShip, center, range, shipScale, searchBox);
         }
     }
 
-    private void applyToEntities(Level world, Vec3 center, double range, AABB searchBox) {
+    private void applyToEntities(Level world, Vec3 center, double range, double shipScale, AABB searchBox) {
         List<Entity> entities = cachedEntities;
         long gameTime = world.getGameTime();
         if (entities == null || gameTime >= entitiesCacheExpiry) {
@@ -192,15 +214,19 @@ public class GravityCoreBlockEntity extends BlockEntity
 
             Vec3 toCenter = center.subtract(entity.position());
             double distSq = toCenter.lengthSqr();
-            if (distSq > rangeSq || distSq < 0.25) {
+            if (distSq > rangeSq || distSq < 0.25 * shipScale * shipScale) {
                 // outside the field, or standing inside the core block itself
                 continue;
             }
 
-            double distance = Math.sqrt(distSq);
+            // world distance normalizes the direction; GRID distance (the
+            // core's own block units) drives falloff and priority, so a
+            // scaled ship's field keeps its authored shape at its own scale
+            double worldDistance = Math.sqrt(distSq);
+            double distance = worldDistance / shipScale;
             Vec3 direction = attracting
-                ? toCenter.scale(1.0 / distance)
-                : toCenter.scale(-1.0 / distance);
+                ? toCenter.scale(1.0 / worldDistance)
+                : toCenter.scale(-1.0 / worldDistance);
 
             // GROUNDED entities get the SECTOR-FRAME CARDINAL (the same
             // dominant-axis rule fluids use): standing on a face means
@@ -233,7 +259,9 @@ public class GravityCoreBlockEntity extends BlockEntity
             // orbiting. Orientation is never scaled, only force.
             double strengthScale = gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
             if (gradualFalloff) {
-                strengthScale *= Math.min(1.0, 16.0 / distSq);
+                // grid-unit distance: full strength within 4 of the CORE's
+                // own blocks, whatever the ship's scale
+                strengthScale *= Math.min(1.0, 16.0 / (distance * distance));
             }
 
             // Ship-mounted anchor: a RADIAL direction is position-dependent —
@@ -286,7 +314,7 @@ public class GravityCoreBlockEntity extends BlockEntity
         return new Vec3(0, pull.y < 0 ? -1 : 1, 0);
     }
 
-    private void applyToShips(Level world, @Nullable Ship ownShip, Vec3 center, double range, AABB searchBox) {
+    private void applyToShips(Level world, @Nullable Ship ownShip, Vec3 center, double range, double shipScale, AABB searchBox) {
         if (!(world instanceof ServerLevel serverLevel)) {
             return;
         }
@@ -299,10 +327,13 @@ public class GravityCoreBlockEntity extends BlockEntity
 
             Vector3d shipPos = new Vector3d(serverShip.getTransform().getPositionInWorld());
             Vector3d toCenter = new Vector3d(center.x, center.y, center.z).sub(shipPos);
-            double distance = toCenter.length();
-            if (distance > range || distance < 1.0) {
+            double worldDistance = toCenter.length();
+            // range is already world-scaled; falloff runs in the core's own
+            // grid units (see applyToEntities)
+            if (worldDistance > range || worldDistance < 1.0 * shipScale) {
                 continue;
             }
+            double distance = worldDistance / shipScale;
 
             double mass = serverShip.getInertiaData().getMass();
             double acceleration = 10.0 * GravityConfig.gravityCoreShipForceMultiplier.get(); // ~1g in m/s^2
