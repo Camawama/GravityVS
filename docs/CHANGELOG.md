@@ -1,5 +1,31 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 66: scaled-ship collision, re-applied)
+
+- Rounds 66-73 of the previous session were fully reverted after a bad
+  interaction (the ship-frame follow / fly-smoothing / steering-engine
+  arc — to be revisited deliberately). This round RE-APPLIES only the
+  verified scaled-ship collision work that was lost with them:
+- **Scaled ships are solid (VS Genesis / Pehkui-scaled ships).** Three
+  stacked fixes in CapsuleCollider: (1) the obstacle gatherer CLAMPS an
+  oversized shipyard-space search box around its center instead of
+  bailing to an empty list — on a 0.0625-scale ship the fixed
+  world-unit reach margins span ~30 shipyard blocks per axis, past the
+  old cell budget, which made the whole ship intangible; (2) obstacles
+  carry their ship's measured world-to-ship scale (from the transform
+  matrix): sphere radii scale into shipyard units for the tests and
+  penetration depths divide back to world units for the push; (3) the
+  sweep substep cap is 256 instead of 16 — a tiny player's modest fall
+  needed dozens of substeps against plating panels ~0.004 world-blocks
+  thin (crouching survived only because sneak speed fit under the old
+  cap).
+- **Pehkui-scaled players get a matching capsule**: capsuleRadius's
+  flat -0.02 shrink with a 0.1 floor is now a proportional 14/15
+  shrink (identical at vanilla width) with a 0.01 floor — at scale 0.2
+  the old floor alone was larger than the entire vanilla box.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-22 (round 65: the upstream dossier)
 
 - **New docs/UpstreamIssueReports.md** — bugs whose root cause lives in

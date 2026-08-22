@@ -58,7 +58,26 @@ public final class CapsuleCollider {
      * -z,+z, matching {@link #supportFaceNormal}) borders air/no-collision —
      * only exposed faces may act as support faces.
      */
-    private record Obstacle(AABB box, @Nullable Ship ship, int exposedMask) {}
+    /**
+     * {@code worldToShipScale}: how many SHIPYARD units one WORLD unit spans
+     * for this obstacle's ship (1.0 for world obstacles and unscaled ships).
+     * Scaled ships (VS Genesis / Pehkui-scaled ships) carry scale in their
+     * transforms: positions transform correctly through the full matrices,
+     * but the capsule's world-unit RADIUS must be multiplied by this factor
+     * before comparing against shipyard-space distances — without it, the
+     * capsule effectively shrank by the ship's scale on scaled-down ships
+     * and players phased straight through them. Depths measured in shipyard
+     * units divide by it on the way back to world units.
+     */
+    private record Obstacle(AABB box, @Nullable Ship ship, int exposedMask, double worldToShipScale) {}
+
+    /** Uniform world->ship scale factor, measured from the transform matrix. */
+    private static double worldToShipScale(Ship ship) {
+        Vector3d unit = new Vector3d(1.0, 0.0, 0.0);
+        ship.getTransform().getWorldToShipMatrix().transformDirection(unit);
+        double len = unit.length();
+        return len > 1.0E-9 ? len : 1.0;
+    }
 
     // face index -> neighbor offset, order -x,+x,-y,+y,-z,+z
     private static final int[][] FACE_OFFSETS = {
@@ -177,7 +196,8 @@ public final class CapsuleCollider {
      * fields.
      */
     public static boolean fits(Entity entity, Vec3 feetPos, Vec3 up, double width, double height) {
-        double radius = Math.max(0.1, width / 2.0 - 0.02);
+        // same proportional-shrink formula as capsuleRadius (Pehkui scales)
+        double radius = Math.max(0.01, width / 2.0 * (14.0 / 15.0));
         double effectiveHeight = Math.max(height, radius * 2.0 + 0.02);
         double[] offsets = sphereOffsets(effectiveHeight, radius);
         List<Obstacle> obstacles = gatherObstacles(entity.level(), feetPos, Vec3.ZERO, up, radius, effectiveHeight);
@@ -185,7 +205,6 @@ public final class CapsuleCollider {
         // small tolerance mirrors vanilla's deflate — resting contact
         // (separated by the collision SKIN) must not count as penetration
         double r = radius - 1.0E-3;
-        double r2 = r * r;
 
         for (double offset : offsets) {
             Vec3 center = feetPos.add(up.scale(offset));
@@ -196,11 +215,14 @@ public final class CapsuleCollider {
                     obstacle.ship().getTransform().getWorldToShipMatrix().transformPosition(local);
                     c = new Vec3(local.x, local.y, local.z);
                 }
+                // radius in the obstacle's own units (shipyard space of a
+                // scaled ship spans worldToShipScale units per world unit)
+                double rl = r * obstacle.worldToShipScale();
                 AABB box = obstacle.box();
                 double dx = c.x - Mth.clamp(c.x, box.minX, box.maxX);
                 double dy = c.y - Mth.clamp(c.y, box.minY, box.maxY);
                 double dz = c.z - Mth.clamp(c.z, box.minZ, box.maxZ);
-                if (dx * dx + dy * dy + dz * dz < r2) {
+                if (dx * dx + dy * dy + dz * dz < rl * rl) {
                     return false;
                 }
             }
@@ -208,9 +230,16 @@ public final class CapsuleCollider {
         return true;
     }
 
-    /** Radius of the capsule's spheres for this entity. */
+    /**
+     * Radius of the capsule's spheres for this entity. The shrink below the
+     * half-width is PROPORTIONAL (14/15, which is exactly the old flat
+     * -0.02 at vanilla player width 0.6) and the floor is tiny: a flat
+     * -0.02 with a 0.1 floor left Pehkui-scaled-down players with spheres
+     * bigger than their whole vanilla box (scale 0.2: box half-width 0.06,
+     * sphere floor 0.1).
+     */
     public static double capsuleRadius(Entity entity) {
-        return Math.max(0.1, entity.getBbWidth() / 2.0 - 0.02);
+        return Math.max(0.01, entity.getBbWidth() / 2.0 * (14.0 / 15.0));
     }
 
     /** Height of the capsule for this entity. */
@@ -277,7 +306,16 @@ public final class CapsuleCollider {
             return correction;
         }
 
-        int substeps = Mth.clamp((int) Math.ceil(length / (radius * 0.5)), 1, 16);
+        // Substep sizing is scale-invariant (radius shrinks with a scaled
+        // player, shipyard geometry grows by the same factor) — but the CAP
+        // is not: at Pehkui scale 0.0625 a modest fall speed needs dozens of
+        // substeps and terminal speeds hundreds, while a 0.0625-scale ship's
+        // plating panel is ~0.004 world-blocks thin. Capped at 16, each
+        // substep leapt clean over the panel (crouching survived only
+        // because sneak speed fit under the old cap). 256 covers ~2
+        // blocks/tick at the smallest capsule radius; the cost only
+        // materializes when the ratio demands it.
+        int substeps = Mth.clamp((int) Math.ceil(length / (radius * 0.5)), 1, 256);
         for (int i = 1; i <= substeps; i++) {
             Vec3 target = start.add(movement.scale((double) i / substeps)).add(correction);
             Vec3 resolved = depenetrate(target, up, radius, sphereOffsets, obstacles, state);
@@ -294,8 +332,6 @@ public final class CapsuleCollider {
         Vec3 pos, Vec3 up, double radius,
         double[] sphereOffsets, List<Obstacle> obstacles, ResolveState state
     ) {
-        double r2 = radius * radius;
-
         for (int iteration = 0; iteration < 12; iteration++) {
             double worstDepth = 0;
             Vec3 worstNormal = null;
@@ -312,6 +348,12 @@ public final class CapsuleCollider {
                         obstacle.ship.getTransform().getWorldToShipMatrix().transformPosition(local);
                         c = new Vec3(local.x, local.y, local.z);
                     }
+                    // radius and depths in the obstacle's own units: shipyard
+                    // distances span worldToShipScale units per world unit,
+                    // and measured depths divide back to world units for the
+                    // world-space push below
+                    double scale = obstacle.worldToShipScale;
+                    double rl = radius * scale;
 
                     AABB box = obstacle.box;
                     double cx = Mth.clamp(c.x, box.minX, box.maxX);
@@ -320,12 +362,12 @@ public final class CapsuleCollider {
                     double dx = c.x - cx, dy = c.y - cy, dz = c.z - cz;
                     double distSq = dx * dx + dy * dy + dz * dz;
 
-                    if (distSq >= r2 || distSq < 1.0E-12) {
+                    if (distSq >= rl * rl || distSq < 1.0E-12) {
                         if (distSq < 1.0E-12 && box.contains(c)) {
                             // sphere center inside the box: push out along the
                             // nearest face
                             Vec3 normalLocal = nearestFaceNormal(c, box);
-                            double depth = radius + nearestFaceDistance(c, box);
+                            double depth = radius + nearestFaceDistance(c, box) / scale;
                             if (depth > worstDepth) {
                                 worstDepth = depth;
                                 worstNormal = toWorldDirection(normalLocal, obstacle.ship);
@@ -337,7 +379,7 @@ public final class CapsuleCollider {
                     }
 
                     double dist = Math.sqrt(distSq);
-                    double depth = radius - dist;
+                    double depth = (rl - dist) / scale;
                     if (depth > worstDepth) {
                         worstDepth = depth;
                         worstNormal = toWorldDirection(new Vec3(dx / dist, dy / dist, dz / dist), obstacle.ship);
@@ -517,12 +559,35 @@ public final class CapsuleCollider {
     }
 
     private static void collectBlocks(Level level, AABB box, @Nullable Ship ship, List<Obstacle> out) {
+        double shipScale = ship == null ? 1.0 : worldToShipScale(ship);
+
+        // NEVER bail to zero collision: a scaled-down ship turns a modest
+        // world reach into thousands of shipyard cells (the fixed
+        // world-unit margins multiply by 1/scale per axis — at ship scale
+        // 0.0625 even a standing capsule's reach box exceeds any budget),
+        // and returning empty made the whole ship intangible — the
+        // scaled-ship phase-through. CLAMP each axis around the box center
+        // instead: near geometry is what stops tunneling; the far cells
+        // were padding.
+        if ((long) (Mth.floor(box.maxX) - Mth.floor(box.minX) + 1)
+            * (Mth.floor(box.maxY) - Mth.floor(box.minY) + 1)
+            * (Mth.floor(box.maxZ) - Mth.floor(box.minZ) + 1) > 4096) {
+            double cx = (box.minX + box.maxX) * 0.5;
+            double cy = (box.minY + box.maxY) * 0.5;
+            double cz = (box.minZ + box.maxZ) * 0.5;
+            box = new AABB(
+                Math.max(box.minX, cx - 8.0), Math.max(box.minY, cy - 8.0), Math.max(box.minZ, cz - 8.0),
+                Math.min(box.maxX, cx + 8.0), Math.min(box.maxY, cy + 8.0), Math.min(box.maxZ, cz + 8.0)
+            );
+        }
+
         int minX = Mth.floor(box.minX), maxX = Mth.floor(box.maxX);
         int minY = Mth.floor(box.minY), maxY = Mth.floor(box.maxY);
         int minZ = Mth.floor(box.minZ), maxZ = Mth.floor(box.maxZ);
 
-        // hard cap in case something hands us a huge box
-        if ((long) (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1) > 4096) {
+        // residual guard (17^3 from floor-straddling is fine; anything
+        // pathological beyond that still must not freeze the client)
+        if ((long) (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1) > 8192) {
             return;
         }
 
@@ -553,7 +618,7 @@ public final class CapsuleCollider {
                     }
 
                     for (AABB aabb : shape.toAabbs()) {
-                        out.add(new Obstacle(aabb.move(x, y, z), ship, exposedMask));
+                        out.add(new Obstacle(aabb.move(x, y, z), ship, exposedMask, shipScale));
                     }
                 }
             }
