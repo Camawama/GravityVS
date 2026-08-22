@@ -1,5 +1,84 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 64: the lag hunt, part 2 — profiled)
+
+- **The real profiler capture landed the attribution.** Over a 487 s
+  sample (healthy session, ~120 s of actual tick work): ~40 s — a third
+  of all tick time — sat inside GravityFieldLookup.bestFieldAt via the
+  fluid hooks' fluidDownAt, and the self-time split showed WHY:
+  GravityPlatingBlockEntity.sourceMaxRange 19.6 s and
+  ConcurrentHashMap traversal 15.8 s — every field query iterated
+  EVERY registered source in the level, and a world full of
+  accumulated test plates made each of the millions of fluid-tick
+  queries pay for all of them. During the earlier mass-update session
+  this concentrated into the multi-second monster ticks.
+- **Fix — chunk-bucket spatial index.** The per-level source registry
+  now buckets sources by chunk (bucket key ignores Y); a query scans
+  only the buckets within the level's largest source range instead of
+  the whole registry. The round-63 per-tick memo stays on top. The
+  monotonic max-range ring means a removed large source leaves only
+  null bucket lookups behind. Tie-breaking is unchanged (priority,
+  then distance, then the DOWN > X > Z > UP direction rank), so field
+  resolution is identical — just no longer O(every source in the
+  world) per query.
+- **Verified by a follow-up capture under the same workload**: the
+  registry scan dropped ~19x (37.4 s -> 2.0 s), sourceMaxRange ~49x
+  (19.6 s -> 0.4 s), total field-query cost ~4.6x per wall-clock
+  second, and the whole-registry traversal vanished from the profile.
+  Field queries now sit at ~11% of a much lighter tick load.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 63: the lag hunt, part 1)
+
+- **The shared spark link was a HEALTH report, not a profiler capture**
+  (no stack samples). Its tick stats still narrow things: median tick
+  0.34 ms, mean 12-16 ms, worst tick 9.6 SECONDS, one window at ~7.7
+  TPS — giant one-off cascades and between-tick starvation, not
+  uniformly slow ticks. A sampler run is needed for final attribution.
+- **Ruled out: fluid-rule tick storms.** fluidsim gained an ASYNC
+  scheduling mode (per-cell 5-tick delays, random ordering — the
+  MC-like conditions where a limit cycle could hide from the
+  synchronous rounds): a 720-source planet with punched pockets
+  settles in 737 cell-ticks, perturbation cycles in ~24, the
+  diagonal-source combine in 30. The round 57/58 rules do not
+  self-sustain.
+- **Optimization — per-tick field-query memo.** Every fluid tick makes
+  ~20-40 fluidDownAt queries and each one iterated ALL registered
+  sources with distance math; neighboring cells re-ask the same
+  positions within the same tick. GravityFieldLookup now memoizes the
+  resolved (down, source) per position per thread per game tick —
+  about an order of magnitude off our share of a mass water re-settle.
+  Staleness is bounded to one tick (registrations mutate in the BE
+  phase, and the 40-tick expiry semantics already tolerate that).
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 62: the torn-section crash)
+
+- **Crash triage (NoSuchElementException in the plating tick): not our
+  bug, but now our problem to survive.** Full chain from the logs of
+  the 23:02 crash: mass water updates put the server 155 ticks behind;
+  during the spike, a move-packet position rewrite (a TAIL mixin into
+  handleMovePlayer doing a raw setPos — Valkyrien Skies' handler; both
+  of this mod's packet paths verify clean: enqueueWork in the network
+  handlers, no position writes in the packet-listener mixins) executed
+  a player ENTITY-SECTION MOVE on a Netty IO thread, racing the server
+  thread and corrupting the section's backing ArrayList. From then on
+  every touch of that section threw (the AIOOBE "Index -1" storm in
+  move handling), and 28 seconds later the first full iteration — the
+  plating BE's entity-cache refresh — took the crash and the
+  "Suspected Mod: Gravity Unbound" blame.
+- **Hardening — the field BEs' entity queries survive torn sections**:
+  the plating/core/normalizer cache refresh now goes through
+  GCUtil.safeFieldEntityQuery, which catches a torn-section iteration
+  failure, logs a rate-limited warning naming the real mechanism, and
+  serves the previous tick's cache instead of crashing the server (the
+  refresh simply retries next expiry). One bad tick of stale entity
+  lists is invisible; a hard server crash is not.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-21 (round 61: rails fold around corners)
 
 - **Vanilla-rail isolation (the misalignment root).** A rotated sticky

@@ -16,6 +16,42 @@ import net.minecraftforge.fml.LogicalSide;
 
 public class GCUtil {
 
+	// rate limit for torn-entity-section warnings (game time of the last one)
+	private static volatile long lastTornSectionWarn = Long.MIN_VALUE;
+
+	/**
+	 * Entity query for the field block entities' periodic cache refresh,
+	 * hardened against TORN ENTITY SECTIONS. Under heavy lag, another
+	 * mod moving an entity between sections off the server thread (seen in
+	 * the wild: a move-packet position rewrite executing on a Netty thread
+	 * during a 155-tick-behind spike) corrupts the section's backing
+	 * ArrayList; every later iteration then throws (NoSuchElementException /
+	 * ConcurrentModificationException / ArrayIndexOutOfBoundsException), and
+	 * whoever iterates first — historically this mod's plating tick — takes
+	 * the crash and the blame. The query here is only a cache refresh, so on
+	 * failure we log (rate-limited) and serve the previous cache instead of
+	 * crashing the server tick; the refresh retries next expiry.
+	 */
+	public static java.util.List<Entity> safeFieldEntityQuery(
+		Level world, net.minecraft.world.phys.AABB searchBox,
+		java.util.function.Predicate<Entity> filter,
+		java.util.List<Entity> fallback
+	) {
+		try {
+			return world.getEntitiesOfClass(Entity.class, searchBox, filter);
+		} catch (RuntimeException e) {
+			long now = world.getGameTime();
+			if (now - lastTornSectionWarn > 200 || now < lastTornSectionWarn) {
+				lastTornSectionWarn = now;
+				com.mojang.logging.LogUtils.getLogger().warn(
+					"[GravityUnbound] entity query failed (torn entity section, "
+					+ "likely another thread moved an entity mid-iteration under lag); "
+					+ "serving the previous cache", e);
+			}
+			return fallback != null ? fallback : java.util.List.of();
+		}
+	}
+
 	public static void getClientLevel(Consumer<Level> consumer)
 	{
 		LogicalSidedProvider.CLIENTWORLD.get(LogicalSide.CLIENT).filter(ClientLevel.class::isInstance).ifPresent(level ->

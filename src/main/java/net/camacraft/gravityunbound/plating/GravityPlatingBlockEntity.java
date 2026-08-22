@@ -391,10 +391,8 @@ public class GravityPlatingBlockEntity extends BlockEntity
         List<Entity> entities = be.cachedEntities;
         long gameTime = world.getGameTime();
         if (entities == null || gameTime >= be.entitiesCacheExpiry) {
-            entities = world.getEntitiesOfClass(
-                    Entity.class,
-                    searchBox,
-                    EntityTags::canChangeGravity
+            entities = net.camacraft.gravityunbound.util.GCUtil.safeFieldEntityQuery(
+                    world, searchBox, EntityTags::canChangeGravity, be.cachedEntities
             );
             be.cachedEntities = entities;
             // phase-offset by position hash so half the plates refresh on

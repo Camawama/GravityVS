@@ -148,6 +148,13 @@ repositories {
     }
 
     maven { url = "https://maven.bawnorton.com/releases" }
+
+    maven {
+        url "https://cursemaven.com"
+        content {
+            includeGroup "curse.maven"
+        }
+    }
 }
 
 dependencies {
@@ -179,6 +186,9 @@ dependencies {
 
     // Explicitly add typetools to resolve the missing dependency error
     implementation "net.jodah:typetools:0.6.3"
+
+    // runtimeOnly
+    runtimeOnly fg.deobf("curse.maven:spark-361579:4738952")
 }
 
 tasks.named('processResources', ProcessResources).configure {

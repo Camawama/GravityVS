@@ -195,8 +195,8 @@ public class GravityNormalizerBlockEntity extends BlockEntity
         List<Entity> entities = be.cachedEntities;
         long gameTime = world.getGameTime();
         if (entities == null || gameTime >= be.entitiesCacheExpiry) {
-            entities = world.getEntitiesOfClass(
-                Entity.class, searchBox, EntityTags::canChangeGravity
+            entities = net.camacraft.gravityunbound.util.GCUtil.safeFieldEntityQuery(
+                world, searchBox, EntityTags::canChangeGravity, be.cachedEntities
             );
             be.cachedEntities = entities;
             be.entitiesCacheExpiry = gameTime + (Math.floorMod(gameTime + blockPos.hashCode(), 2L) == 0 ? 2 : 1);

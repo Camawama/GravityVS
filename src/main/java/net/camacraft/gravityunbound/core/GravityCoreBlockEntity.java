@@ -160,8 +160,8 @@ public class GravityCoreBlockEntity extends BlockEntity
         List<Entity> entities = cachedEntities;
         long gameTime = world.getGameTime();
         if (entities == null || gameTime >= entitiesCacheExpiry) {
-            entities = world.getEntitiesOfClass(
-                Entity.class, searchBox, EntityTags::canChangeGravity
+            entities = GCUtil.safeFieldEntityQuery(
+                world, searchBox, EntityTags::canChangeGravity, cachedEntities
             );
             cachedEntities = entities;
             entitiesCacheExpiry = gameTime + (Math.floorMod(gameTime + worldPosition.hashCode(), 2L) == 0 ? 2 : 1);

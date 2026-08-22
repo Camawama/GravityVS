@@ -72,12 +72,54 @@ public final class GravityFieldLookup {
     // ticks without re-registration after which an entry is ignored/pruned
     private static final long EXPIRY_TICKS = 40;
 
-    private static final Map<Level, ConcurrentHashMap<BlockPos, Entry>> SOURCES =
+    /**
+     * Per-level source registry with a CHUNK-BUCKET spatial index. The
+     * profiler showed field queries iterating EVERY registered source in
+     * the level (ConcurrentHashMap traversal + sourceMaxRange totalling
+     * ~35s of a capture) — a world full of test plates made every fluid
+     * tick pay for all of them. Queries now scan only the buckets within
+     * the level's largest source range of the position. {@code maxRange}
+     * is monotonic (a removed large source leaves a slightly wider scan
+     * ring of null bucket lookups — nanoseconds); the bucket key ignores Y
+     * (a column of sources shares a bucket).
+     */
+    private static final class LevelIndex {
+        final ConcurrentHashMap<BlockPos, Entry> byPos = new ConcurrentHashMap<>();
+        final ConcurrentHashMap<Long, ConcurrentHashMap<BlockPos, Entry>> byChunk =
+            new ConcurrentHashMap<>();
+        final java.util.concurrent.atomic.AtomicInteger maxRange =
+            new java.util.concurrent.atomic.AtomicInteger(1);
+
+        static long chunkKey(int chunkX, int chunkZ) {
+            return net.minecraft.world.level.ChunkPos.asLong(chunkX, chunkZ);
+        }
+
+        void put(BlockPos pos, Entry entry) {
+            byPos.put(pos, entry);
+            byChunk.computeIfAbsent(chunkKey(pos.getX() >> 4, pos.getZ() >> 4),
+                k -> new ConcurrentHashMap<>()).put(pos, entry);
+            maxRange.accumulateAndGet(entry.source().sourceMaxRange(), Math::max);
+        }
+
+        void remove(BlockPos pos) {
+            byPos.remove(pos);
+            long key = chunkKey(pos.getX() >> 4, pos.getZ() >> 4);
+            ConcurrentHashMap<BlockPos, Entry> bucket = byChunk.get(key);
+            if (bucket != null) {
+                bucket.remove(pos);
+                if (bucket.isEmpty()) {
+                    byChunk.remove(key, bucket);
+                }
+            }
+        }
+    }
+
+    private static final Map<Level, LevelIndex> SOURCES =
         java.util.Collections.synchronizedMap(new WeakHashMap<>());
 
     /** Called by field block entities every tick they are active. */
     public static void register(Level level, BlockPos pos, Source source) {
-        SOURCES.computeIfAbsent(level, l -> new ConcurrentHashMap<>())
+        SOURCES.computeIfAbsent(level, l -> new LevelIndex())
             .put(pos.immutable(), new Entry(source, level.getGameTime()));
     }
 
@@ -87,9 +129,9 @@ public final class GravityFieldLookup {
      * must already see the new field state.
      */
     public static void unregister(Level level, BlockPos pos) {
-        ConcurrentHashMap<BlockPos, Entry> map = SOURCES.get(level);
-        if (map != null) {
-            map.remove(pos);
+        LevelIndex index = SOURCES.get(level);
+        if (index != null) {
+            index.remove(pos);
         }
     }
 
@@ -136,11 +178,11 @@ public final class GravityFieldLookup {
      * entity-query cache expires.
      */
     public static void invalidateEntityCachesNear(Level level, BlockPos pos) {
-        ConcurrentHashMap<BlockPos, Entry> map = SOURCES.get(level);
-        if (map == null || map.isEmpty()) {
+        LevelIndex index = SOURCES.get(level);
+        if (index == null || index.byPos.isEmpty()) {
             return;
         }
-        for (Map.Entry<BlockPos, Entry> mapEntry : map.entrySet()) {
+        for (Map.Entry<BlockPos, Entry> mapEntry : index.byPos.entrySet()) {
             Source source = mapEntry.getValue().source();
             BlockPos sourcePos = source.sourcePos();
             int distance = Math.max(
@@ -171,8 +213,8 @@ public final class GravityFieldLookup {
         if (level == null) {
             return false;
         }
-        ConcurrentHashMap<BlockPos, Entry> map = SOURCES.get(level);
-        return map != null && !map.isEmpty() && GravityConfig.gravityAffectsFluids.get();
+        LevelIndex index = SOURCES.get(level);
+        return index != null && !index.byPos.isEmpty() && GravityConfig.gravityAffectsFluids.get();
     }
 
     /**
@@ -215,66 +257,122 @@ public final class GravityFieldLookup {
 
     private record Best(Direction down, Source source) {}
 
+    /**
+     * PER-TICK QUERY MEMO. The fluid hooks ask for the field at the same
+     * positions many times within one tick (a cell's own tick queries its
+     * whole neighborhood, and each neighbor's tick re-queries it), and every
+     * uncached query iterates all registered sources with distance math —
+     * multiplied across tens of thousands of fluid ticks during a planet
+     * re-settle, this was a real slice of the mass-update lag spikes. One
+     * cache per THREAD (the server thread and each chunk-build render
+     * thread), invalidated whenever the game time or level changes.
+     * Staleness bound: registrations mutate in the block-entity phase, after
+     * the scheduled fluid ticks — at worst a position answers one tick stale,
+     * which the 40-tick registration expiry semantics already tolerate.
+     */
+    private static final Object NULL_BEST = new Object();
+
+    private static final class QueryCache {
+        @Nullable Level level;
+        long time = Long.MIN_VALUE;
+        final java.util.HashMap<Long, Object> results = new java.util.HashMap<>(256);
+    }
+
+    private static final ThreadLocal<QueryCache> QUERY_CACHE = ThreadLocal.withInitial(QueryCache::new);
+
     @Nullable
     private static Best bestFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
         Level level = resolveLevel(getter);
         if (level == null) {
             return null;
         }
-        ConcurrentHashMap<BlockPos, Entry> map = SOURCES.get(level);
-        if (map == null || map.isEmpty()) {
+        LevelIndex index = SOURCES.get(level);
+        if (index == null || index.byPos.isEmpty()) {
             return null;
         }
         if (!GravityConfig.gravityAffectsFluids.get()) {
             return null;
         }
 
+        QueryCache cache = QUERY_CACHE.get();
+        long time = level.getGameTime();
+        if (cache.level != level || cache.time != time) {
+            cache.level = level;
+            cache.time = time;
+            cache.results.clear();
+        }
+        Long key = pos.asLong();
+        Object cached = cache.results.get(key);
+        if (cached != null) {
+            return cached == NULL_BEST ? null : (Best) cached;
+        }
+        Best best = computeBestFieldAt(level, index, pos);
+        cache.results.put(key, best == null ? NULL_BEST : best);
+        return best;
+    }
+
+    @Nullable
+    private static Best computeBestFieldAt(Level level, LevelIndex index, BlockPos pos) {
         long now = level.getGameTime();
         Direction best = null;
         Source bestSource = null;
         int bestPriority = Integer.MIN_VALUE;
         int bestDistance = Integer.MAX_VALUE;
 
-        for (Map.Entry<BlockPos, Entry> mapEntry : map.entrySet()) {
-            Entry entry = mapEntry.getValue();
-            if (now - entry.registeredAt() > EXPIRY_TICKS || now < entry.registeredAt()) {
-                // stale (source stopped ticking) or from an older world time
-                map.remove(mapEntry.getKey(), entry);
-                continue;
+        // spatial prune: only buckets within the level's largest source
+        // range can possibly reach this position
+        int ring = (index.maxRange.get() + 15) >> 4;
+        int chunkX = pos.getX() >> 4;
+        int chunkZ = pos.getZ() >> 4;
+        for (int dx = -ring; dx <= ring; dx++) {
+            for (int dz = -ring; dz <= ring; dz++) {
+                ConcurrentHashMap<BlockPos, Entry> bucket =
+                    index.byChunk.get(LevelIndex.chunkKey(chunkX + dx, chunkZ + dz));
+                if (bucket == null) {
+                    continue;
+                }
+                for (Map.Entry<BlockPos, Entry> mapEntry : bucket.entrySet()) {
+                    Entry entry = mapEntry.getValue();
+                    if (now - entry.registeredAt() > EXPIRY_TICKS || now < entry.registeredAt()) {
+                        // stale (source stopped ticking) or from an older world time
+                        index.remove(mapEntry.getKey());
+                        continue;
+                    }
+                    Source source = entry.source();
+                    BlockPos sourcePos = source.sourcePos();
+                    int distance = Math.max(
+                        Math.abs(pos.getX() - sourcePos.getX()),
+                        Math.max(Math.abs(pos.getY() - sourcePos.getY()), Math.abs(pos.getZ() - sourcePos.getZ()))
+                    );
+                    if (distance > source.sourceMaxRange()) {
+                        continue;
+                    }
+                    int priority = source.sourcePriority();
+                    if (priority < bestPriority || (priority == bestPriority && distance > bestDistance)) {
+                        continue;
+                    }
+                    Direction down = source.fluidDownAt(pos);
+                    if (down == null) {
+                        continue;
+                    }
+                    // Exact ties (same priority, same distance — e.g. a cube edge
+                    // cell equidistant from two plates) resolve by the same fixed
+                    // direction priority the core's sector frames use, DOWN > X >
+                    // Z > UP, instead of map iteration order. This keeps convex
+                    // edges of plated builds pour-over lips of the upstream face;
+                    // an arbitrary tie could hand a top-edge cell to a side plate,
+                    // making the rim's pour into it a forbidden up-entry (a wrap
+                    // stall at that edge).
+                    if (priority == bestPriority && distance == bestDistance && best != null
+                        && directionRank(down) >= directionRank(best)) {
+                        continue;
+                    }
+                    best = down;
+                    bestSource = source;
+                    bestPriority = priority;
+                    bestDistance = distance;
+                }
             }
-            Source source = entry.source();
-            BlockPos sourcePos = source.sourcePos();
-            int distance = Math.max(
-                Math.abs(pos.getX() - sourcePos.getX()),
-                Math.max(Math.abs(pos.getY() - sourcePos.getY()), Math.abs(pos.getZ() - sourcePos.getZ()))
-            );
-            if (distance > source.sourceMaxRange()) {
-                continue;
-            }
-            int priority = source.sourcePriority();
-            if (priority < bestPriority || (priority == bestPriority && distance > bestDistance)) {
-                continue;
-            }
-            Direction down = source.fluidDownAt(pos);
-            if (down == null) {
-                continue;
-            }
-            // Exact ties (same priority, same distance — e.g. a cube edge
-            // cell equidistant from two plates) resolve by the same fixed
-            // direction priority the core's sector frames use, DOWN > X >
-            // Z > UP, instead of map iteration order. This keeps convex
-            // edges of plated builds pour-over lips of the upstream face;
-            // an arbitrary tie could hand a top-edge cell to a side plate,
-            // making the rim's pour into it a forbidden up-entry (a wrap
-            // stall at that edge).
-            if (priority == bestPriority && distance == bestDistance && best != null
-                && directionRank(down) >= directionRank(best)) {
-                continue;
-            }
-            best = down;
-            bestSource = source;
-            bestPriority = priority;
-            bestDistance = distance;
         }
         return best != null ? new Best(best, bestSource) : null;
     }
