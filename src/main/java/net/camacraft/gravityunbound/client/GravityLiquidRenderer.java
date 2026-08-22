@@ -87,12 +87,15 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *       feeder-side mirror of through-fall): a cross-frame neighbor whose
  *       own frame-up faces the cell receives and carries away the cell's
  *       flow — the cell's surface ramps to full at that edge, funneling
- *       into the outgoing column ({@link #drainsFrom}). Every other cross-frame
- *       neighbor (the side-by-side sector sheets of a wrapped cube, thin
- *       edge cells whose down merely happens to point at the next face)
- *       shapes as EMPTY, giving each frame its own closed vanilla cliff
- *       edge instead of bulging to full height (the round-30 fix,
- *       preserved).</li>
+ *       into the outgoing column ({@link #drainsFrom}). PERPENDICULAR BODY
+ *       CONTACT: other cross-frame same-type water on a PERPENDICULAR down
+ *       axis reads at its OWN level height — its partial height lives on a
+ *       different axis, so along the querier's axis it spans the cell (one
+ *       connected body): the floating shell around a bare core knits into
+ *       one blob, while a thin film on a wrapped cube ramps DOWN to its
+ *       low level (vanilla's pour-over droop, not the round-30 bulge).
+ *       Only the axis-equal OPPOSITE frame (the mutual pit) shapes as
+ *       EMPTY — a closed vanilla cliff edge.</li>
  * </ul>
  *
  * Both sides of a pour boundary then render complete, visually connected
@@ -229,7 +232,17 @@ public final class GravityLiquidRenderer {
         boolean upColumn = fluid.isSame(upFluidEff.getType())
             || (fluid.isSame(upFluid.getType())
                 && GravityFieldLookup.fluidDownAt(level, upPos).getAxis() != down.getAxis());
-        float ownHeight = upColumn ? 1.0F : fluidState.getOwnHeight();
+        // FLUSH SKIN: in a RADIAL field (gravity core), settled fluid that
+        // is SUPPORTED at its frame-down (solid, or same-type fluid)
+        // renders at FULL height — a taut planet skin hugging the mass.
+        // Honest level-height surfaces cannot look like a snug wrap here:
+        // every shell cell is an outermost "surface" cell, so each drew an
+        // inset, sloped panel along its own sector axis — the jagged
+        // vest-and-claw blob. Free-FALLING fluid (frame-down empty) keeps
+        // its normal shapes; planar fields (plates, normalizers) are
+        // untouched.
+        float ownHeight = (upColumn || flushSkin(level, pos, fluidState, down))
+            ? 1.0F : fluidState.getOwnHeight();
         float hNE;
         float hNW;
         float hSE;
@@ -464,7 +477,41 @@ public final class GravityLiquidRenderer {
         BlockAndTintGetter level, Direction cellDown, BlockPos neighborPos, FluidState actual
     ) {
         return actual.isEmpty() || sameFrame(level, cellDown, neighborPos)
-            || rendersFullColumn(level, neighborPos, actual) ? actual : EMPTY_FLUID;
+            || coversCell(level, neighborPos, actual) ? actual : EMPTY_FLUID;
+    }
+
+    /**
+     * Whether the fluid at {@code pos} renders spanning its FULL cell — a
+     * full column in its own frame, or a radial-field FLUSH SKIN cell. Such
+     * geometry genuinely covers every face of its cell: safe to cull
+     * against (whatever its frame), and it reads as full for height
+     * shaping. Without the flush-skin half, the perfect-cube skin would
+     * show internal translucent seams at every sector boundary.
+     */
+    private static boolean coversCell(
+        BlockAndTintGetter level, BlockPos pos, FluidState fluidState
+    ) {
+        if (rendersFullColumn(level, pos, fluidState)) {
+            return true;
+        }
+        return flushSkin(level, pos, fluidState, GravityFieldLookup.fluidDownAt(level, pos));
+    }
+
+    /**
+     * FLUSH SKIN test: the cell sits in a RADIAL field (gravity core) and
+     * its frame-down neighbor supports it — solid, or same-type fluid. Its
+     * fluid renders at full cell height (the taut planet skin); free-falling
+     * fluid (frame-down empty) is excluded and keeps vanilla shapes.
+     */
+    private static boolean flushSkin(
+        BlockAndTintGetter level, BlockPos pos, FluidState fluidState, Direction down
+    ) {
+        if (!GravityFieldLookup.isRadialFieldAt(level, pos)) {
+            return false;
+        }
+        BlockState below = level.getBlockState(pos.relative(down));
+        return below.blocksMotion()
+            || fluidState.getType().isSame(below.getFluidState().getType());
     }
 
     /**
@@ -665,11 +712,28 @@ public final class GravityLiquidRenderer {
                 // POURS toward this cell as a column (incoming stream), or
                 // where it DRAINS this cell's flow onward (outgoing
                 // column) — the surface ramps to meet the crossing.
-                // Everywhere else it shapes as passable air — the
-                // bulge-free cliff edge at side-by-side sector boundaries.
-                return rendersFullColumn(level, pos, fluidState)
+                if (coversCell(level, pos, fluidState)
                     || poursToward(level, pos, fluidState, cellPos)
-                    || drainsFrom(level, pos, cellPos) ? 1.0F : 0.0F;
+                    || drainsFrom(level, pos, cellPos)) {
+                    return 1.0F;
+                }
+                // PERPENDICULAR BODY CONTACT: partial cross-frame water on
+                // a perpendicular down axis is part of the SAME connected
+                // body — its partial height lives on a different axis, so
+                // along OUR height axis its water spans the cell. Reading
+                // it at its OWN level (not 0, not 1) knits the two
+                // surfaces together: the floating shell around a bare core
+                // renders as one connected blob instead of vest-and-claw
+                // gaps sloping to nothing at every sector boundary, while
+                // a thin film on a wrapped cube ramps DOWN to its low
+                // level — vanilla's pour-over droop, not the round-30
+                // full-height bulge. Only the axis-equal opposite frame
+                // (the mutual pit, whose water hugs the far side) still
+                // shapes as passable air.
+                if (GravityFieldLookup.fluidDownAt(level, pos).getAxis() != down.getAxis()) {
+                    return fluidState.getOwnHeight();
+                }
+                return 0.0F;
             }
             // frame-aware above-check: a SAME-frame column counts full — or
             // THROUGH-FALL, a perpendicular-axis cross-frame feeder at the

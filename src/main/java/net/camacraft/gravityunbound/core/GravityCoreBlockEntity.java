@@ -393,6 +393,12 @@ public class GravityCoreBlockEntity extends BlockEntity
         return 1;
     }
 
+    @Override
+    public boolean radialSkin() {
+        // core fields render supported fluid as a flush planet skin
+        return true;
+    }
+
     public int getRange() {
         return range;
     }

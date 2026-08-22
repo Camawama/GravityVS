@@ -50,6 +50,16 @@ public final class GravityFieldLookup {
         int sourcePriority();
 
         /**
+         * RADIAL fields (gravity cores) render settled, supported fluid as
+         * a FLUSH full-height skin hugging the mass ("planet skin") —
+         * planar fields (plates, normalizers) keep vanilla level-height
+         * surfaces. Purely a rendering hint; flow is unaffected.
+         */
+        default boolean radialSkin() {
+            return false;
+        }
+
+        /**
          * Drop any cached entity query so a just-spawned entity is picked up
          * on the source's very next tick instead of after the cache expires
          * (spawn-egg mobs must adopt field gravity instantly).
@@ -182,12 +192,31 @@ public final class GravityFieldLookup {
      * disabled, or when {@code getter} cannot be resolved to a level.
      */
     public static Direction fluidDownAt(@Nullable BlockGetter getter, BlockPos pos) {
-        Direction best = bestFieldDownAt(getter, pos);
-        return best != null ? best : Direction.DOWN;
+        Best best = bestFieldAt(getter, pos);
+        return best != null ? best.down() : Direction.DOWN;
+    }
+
+    /**
+     * Whether the dominant field at {@code pos} is a RADIAL source (a
+     * gravity core) — the renderer draws supported fluid in such fields as
+     * a flush full-height skin. False outside fields and for planar
+     * sources (plates, normalizers).
+     */
+    public static boolean isRadialFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
+        Best best = bestFieldAt(getter, pos);
+        return best != null && best.source().radialSkin();
     }
 
     @Nullable
     private static Direction bestFieldDownAt(@Nullable BlockGetter getter, BlockPos pos) {
+        Best best = bestFieldAt(getter, pos);
+        return best != null ? best.down() : null;
+    }
+
+    private record Best(Direction down, Source source) {}
+
+    @Nullable
+    private static Best bestFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
         Level level = resolveLevel(getter);
         if (level == null) {
             return null;
@@ -202,6 +231,7 @@ public final class GravityFieldLookup {
 
         long now = level.getGameTime();
         Direction best = null;
+        Source bestSource = null;
         int bestPriority = Integer.MIN_VALUE;
         int bestDistance = Integer.MAX_VALUE;
 
@@ -242,10 +272,11 @@ public final class GravityFieldLookup {
                 continue;
             }
             best = down;
+            bestSource = source;
             bestPriority = priority;
             bestDistance = distance;
         }
-        return best;
+        return best != null ? new Best(best, bestSource) : null;
     }
 
     /** Fixed frame priority for tie-breaking: DOWN > X > Z > UP. */

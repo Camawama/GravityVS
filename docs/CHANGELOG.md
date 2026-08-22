@@ -1,5 +1,56 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 60: the flush planet skin)
+
+- **Core-field water now renders as a taut FLUSH skin — the perfect
+  cube.** Round 59's body-contact reads connected the bare-core shell,
+  but it still looked wrong, and no honest-level rendering ever could:
+  every shell cell is an outermost "surface" cell (frame-up is air), so
+  each drew an inset, sloped panel at its own level (5-7) along its own
+  sector axis — connected, but a lumpy lantern, never a snug wrap.
+  Vanilla ponds only look clean because settled ponds are level-8
+  sources; a one-source shell can never be.
+- **Fix — radial fields get a skin rule**: in a GRAVITY CORE's field
+  (new Source.radialSkin() hint + GravityFieldLookup.isRadialFieldAt),
+  fluid that is SUPPORTED at its frame-down (solid or same-type fluid)
+  renders at FULL cell height. The 26-cell shell — every cell supported
+  — becomes a crisp 3x3x3 cube hugging the core. Flush cells also count
+  as COVERING for culling and read full in shaping (coversCell), so the
+  cube shows no internal translucent seams. Free-FALLING fluid
+  (frame-down empty) keeps vanilla shapes; plates and normalizers are
+  deliberately untouched (planar surfaces keep honest levels).
+  Rendering only — levels, flow, and drainage are unchanged.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 59: perpendicular body contact)
+
+- **The bare-core shell now renders as one connected blob.** The
+  physics was already right — fluidsim shows a perfectly symmetric
+  26-cell cube (levels 5-7) around the core — but every edge and
+  corner cell drew its partial height along its own sector axis and
+  read all its cross-frame water neighbors as EMPTY (none are falling
+  columns, so none of the pour/drain/full-column reads fired). Each
+  cell sloped to nothing at every sector boundary: the vest-shaped
+  taper and claw fins in the screenshots.
+- **Fix — the missing read is geometric, not a special case**: a
+  cross-frame same-type neighbor on a PERPENDICULAR down axis keeps
+  its partial height on a DIFFERENT axis, so along the querying cell's
+  height axis its water genuinely spans the cell — the two cells are
+  one connected body. It now reads at its OWN level height (not 0, not
+  1): chunky shell cells knit their surfaces together into a rounded
+  cube, while a thin film on a wrapped solid cube ramps DOWN toward
+  its low level — vanilla's pour-over droop at the lip, NOT the
+  round-30 full-height bulge. The axis-equal opposite frame (the
+  mutual pit) keeps its cliff. Rendering-only; the flow rules and the
+  sim are untouched this round.
+- Expectation note: a single source yields shell levels 5-7, so the
+  cube renders with vanilla-honest tapers at its outer edges. More
+  sources (or letting in-field conversion knit a fed shell into
+  sources) raise the shell to level 8 for the crispest cube.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-21 (round 58: the solid planet — screenshots round)
 
 - **The "air pockets" shattering a solid water planet were mostly NOT
