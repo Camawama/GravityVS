@@ -1,5 +1,23 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 71: the split-frame snap — held surface wins the render pass)
+
+- **"Only the AABB snaps to the surface; the capsule spheres and
+  camera don't" — a render-pass branch-order bug from round 52,
+  exposed by F3+B on ship cores.** The drawn-ship alignment preferred
+  the RADIAL field anchor over the held surface unconditionally: the
+  tick-side frame and the physics box correctly snapped to the
+  stood-on face (which is also why jumps followed the box's up), but
+  every frame the render pass dragged the camera and the capsule debug
+  spheres back toward the core's raw radial direction — sharply
+  divergent from the face normal on small ships, visible on all of
+  them. The held surface (grounded, shipyard-space normal) now wins
+  the render alignment; the radial anchor applies exactly when no
+  surface is held (circling, falling, flying in the field), which is
+  the case round 52 built it for.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-22 (round 70: fields own no-gravity entities — heartbeat-diagnosed)
 
 - **The core-field "no pull in the Great Unknown" is solved, and the

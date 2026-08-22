@@ -2666,10 +2666,26 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // tick rate holds still between ticks and jumps at each boundary,
         // which the full-strength arc turned into 20 Hz camera stepping
         // while circling the core.
+        // BRANCH ORDER MATTERS: the HELD SURFACE must win over the radial
+        // field anchor. The tick-side frame respects the stood-on face
+        // (effectiveTargetUp holds the surface normal), but this render
+        // pass used to prefer the raw RADIAL direction whenever a ship
+        // core anchored the field — dragging the CAMERA and the capsule
+        // debug spheres toward the core while the physics frame (the
+        // white envelope box, the jump direction) stayed correctly snapped
+        // to the face: the visible "only the AABB snaps, camera and
+        // capsule don't" split, worst on small ships where radial and
+        // face normal diverge sharply. Radial alignment is right exactly
+        // when NO surface is held (circling, falling, flying in the
+        // field).
         org.valkyrienskies.core.api.ships.Ship alignShip = null;
         org.joml.Vector3d localUp = null;
         Vec3 radialLocalPos = null;
-        if (fieldAnchorShip != null && fieldAnchorLocalPos != null) {
+        if (shipLocalUp != null && capsuleGroundShip != null) {
+            alignShip = capsuleGroundShip;
+            localUp = shipLocalUp;
+        }
+        else if (fieldAnchorShip != null && fieldAnchorLocalPos != null) {
             alignShip = fieldAnchorShip;
             radialLocalPos = fieldAnchorLocalPos;
         }
@@ -2677,10 +2693,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
             alignShip = fieldAnchorShip;
             localUp = new org.joml.Vector3d(
                 -fieldAnchorLocalDown.x, -fieldAnchorLocalDown.y, -fieldAnchorLocalDown.z);
-        }
-        else if (shipLocalUp != null && capsuleGroundShip != null) {
-            alignShip = capsuleGroundShip;
-            localUp = shipLocalUp;
         }
         if ((localUp != null || radialLocalPos != null) && shipAlignWeight > 0.001f
             && alignShip instanceof org.valkyrienskies.core.api.ships.ClientShip clientShip) {
