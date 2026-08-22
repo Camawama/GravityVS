@@ -1,5 +1,56 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 54: the through-fall seam)
+
+- **Water dropping out the back of a field connects too.** Round 53's
+  pour test covers water arriving BY THE NEIGHBOR'S gravity (its
+  frame-down points at the cell) — but a seam has a second form: water
+  leaving a field by THE RECEIVING CELL'S gravity. Below a waterlogged
+  east-facing plate, the vanilla cell's water is pulled out of the
+  plate cell by plain world gravity; the plate's own frame-down is
+  sideways, so the pour test never fires, and the falling cell rendered
+  at its own 8/9 height with tapered corners — the visible gap between
+  the waterlogged plate and the stream under it.
+- **Fix — THROUGH-FALL**: a cell with same-type cross-frame water at
+  its own frame-up renders as a full column when that water can
+  actually FEED it — the neighbor's down axis is PERPENDICULAR to the
+  cell's, so its spread plane contains the cell's down (exactly the
+  engine's feed arithmetic; note the gap cell is laterally fed and NOT
+  marked FALLING, so no falling-state test could catch it). Applied in
+  the ownHeight rule and getHeight's above-check so same-frame
+  neighbors agree about shared corners. An axis-equal opposite frame at
+  the frame-up (the mutual-pit seam, where neither side feeds the
+  other) keeps its cliff edge, and lateral/diagonal shaping is
+  untouched — the cliff-edge/no-bulge behavior of rounds 30 and 53 is
+  preserved on wrapped cubes.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 53: the pour-aware ramp)
+
+- **Water crossing a gravity boundary connects with a slope again**
+  (round 30 regression). Round 30 flipped the renderer's cross-frame
+  height shaping from "full column" to cliff-edge to kill the bulging
+  edges on wrapped cubes — but that also severed the visual connection
+  where a falling stream actually crosses into a differently-oriented
+  frame: the receiving cell truncated to its own thin height and the
+  stream ended in a floating disconnected column.
+- **Fix — the ramp follows the water**: cross-frame fluid now shapes as
+  a FULL column exactly when a genuine column pours toward the queried
+  cell — the neighbor is a source or FALLING in its own frame, and one
+  step along its own frame-down carries its water strictly closer (onto
+  the cell for face neighbors, onto a corner-adjacent cell for diagonal
+  samples). The receiving surface ramps up to meet the incoming stream,
+  entering AND exiting fields. All other cross-frame water (the
+  side-by-side sector sheets of a wrapped cube, thin edge cells whose
+  down merely points at the next face) still shapes as empty — the
+  round-30 cliff-edge fix is preserved. This is the renderer's mirror of
+  the flow engine's crossFeeds relation and getFlow's pour-aware
+  isolation: the visual ramp exists precisely where water actually moves
+  between frames. Physics untouched — flow behavior is unchanged.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-21 (round 52: the radial anchor)
 
 - **Fixed the circling jitter around ship-mounted gravity cores** (round

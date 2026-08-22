@@ -27,7 +27,9 @@ import net.minecraft.world.level.material.FluidState;
  * basis (which renders exactly like vanilla), so its asymmetric cross-frame
  * isolation applies to them too: culling treats the other frame's fluid as
  * empty (no see-through holes) while height shaping treats it as a full
- * column (the surface ramps up to meet the stream instead of truncating).
+ * column exactly where a source/falling column pours toward the cell (the
+ * surface ramps up to meet the stream) and as empty elsewhere (cliff
+ * edge, no bulging).
  *
  * The scan covers every cell whose FLUID can influence vanilla tesselate's
  * output — the cell below, the four sides, the four horizontal diagonals,

@@ -14,6 +14,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.level.BlockAndTintGetter;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FlowingFluid;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
@@ -68,16 +69,29 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *       fluid counts as EMPTY — it never actually covers a face it would
  *       cull, so culling must ignore it or boundaries open see-through
  *       holes;</li>
- *   <li>HEIGHT SHAPING (the "fluid above me" full-column check and the
- *       corner-height sampling, including diagonal samples and their
- *       above-checks): cross-frame same-type fluid, where actually present,
- *       counts as a FULL COLUMN (height 1.0) — the surface ramps up to meet
- *       the adjoining stream like vanilla's higher-touches-lower ramp
- *       instead of truncating at the boundary. Taller geometry can only
- *       overlap, never reopen holes.</li>
+ *   <li>HEIGHT SHAPING (the corner-height sampling, including diagonal
+ *       samples, and the "fluid above me" full-column check): cross-frame
+ *       same-type fluid counts as a FULL COLUMN (height 1.0) only where
+ *       water genuinely crosses the seam, which happens in exactly two
+ *       forms. INBOUND POUR: a source/FALLING neighbor whose own
+ *       frame-down carries its water strictly toward the queried cell (a
+ *       stream falling across the boundary into a rotated cell, or
+ *       sideways out of a field into vanilla space) — the receiving
+ *       surface ramps up to meet it ({@link #poursToward}). THROUGH-FALL:
+ *       same-type cross-frame water at the cell's own frame-up whose down
+ *       axis is PERPENDICULAR to the cell's — its spread plane contains
+ *       the cell's down, so its water feeds through the seam (water
+ *       dropping out the back of a waterlogged plate into vanilla
+ *       gravity) and the cell renders full to meet it; an axis-equal
+ *       opposite frame (the mutual pit) stays a cliff. Every other cross-frame
+ *       neighbor (the side-by-side sector sheets of a wrapped cube, thin
+ *       edge cells whose down merely happens to point at the next face)
+ *       shapes as EMPTY, giving each frame its own closed vanilla cliff
+ *       edge instead of bulging to full height (the round-30 fix,
+ *       preserved).</li>
  * </ul>
  *
- * Both sides of a boundary then render complete, visually connected
+ * Both sides of a pour boundary then render complete, visually connected
  * surfaces (slight overdraw; the 0.001 face insets prevent z-fighting).
  * Solid-BLOCK occlusion is frame-independent and deliberately unaffected.
  * When every consulted cell shares the cell's frame, output is identical to
@@ -149,12 +163,10 @@ public final class GravityLiquidRenderer {
 
         // Frame checks for the 6 face neighbors: one fluidDownAt query each
         // (skipped when the neighbor holds no fluid — an empty cell behaves
-        // identically in either frame), cached for the whole call. Both
-        // CULLING and HEIGHT SHAPING see cross-frame fluid as EMPTY: each
-        // frame renders its own closed vanilla cliff edge at the boundary.
-        // (The old "shaping sees a full column" policy pulled boundary
-        // water up to full height — the bulging, wrong-looking edges on
-        // wrapped cubes.)
+        // identically in either frame), cached for the whole call. CULLING
+        // sees cross-frame fluid as EMPTY (the ...Eff states); HEIGHT
+        // SHAPING sees it as FULL only where it actually POURS toward this
+        // cell, EMPTY otherwise — see getHeight and the class doc.
         boolean downSameFrame = downFluid.isEmpty() || sameFrame(level, down, downPos);
         boolean upSameFrame = upFluid.isEmpty() || sameFrame(level, down, upPos);
         boolean northSameFrame = northFluid.isEmpty() || sameFrame(level, down, northPos);
@@ -194,9 +206,20 @@ public final class GravityLiquidRenderer {
         float shadeUp = level.getShade(Direction.UP, true);
         Fluid fluid = fluidState.getType();
         // getHeight specialized to the cell itself (the cell's fluid always
-        // matches its own type); the above-check uses the frame-filtered
-        // state, so only a SAME-frame column makes this cell full height
-        float ownHeight = fluid.isSame(upFluidEff.getType()) ? 1.0F : fluidState.getOwnHeight();
+        // matches its own type). Full column when same-type water sits at
+        // the frame-up cell and can actually FEED this cell: same frame
+        // (the vanilla column), or — THROUGH-FALL — a cross-frame neighbor
+        // on a PERPENDICULAR down axis, whose spread plane contains our
+        // down, so its water passes through the seam into this cell (the
+        // stream dropping out the back of a waterlogged plate into vanilla
+        // gravity; that cell is laterally fed, NOT falling, so no FALLING
+        // test can catch it). Only an axis-equal opposite frame at the
+        // frame-up (the mutual-pit seam, where neither feeds the other)
+        // keeps the cliff edge.
+        boolean upColumn = fluid.isSame(upFluidEff.getType())
+            || (fluid.isSame(upFluid.getType())
+                && GravityFieldLookup.fluidDownAt(level, upPos).getAxis() != down.getAxis());
+        float ownHeight = upColumn ? 1.0F : fluidState.getOwnHeight();
         float hNE;
         float hNW;
         float hSE;
@@ -207,18 +230,18 @@ public final class GravityLiquidRenderer {
             hSE = 1.0F;
             hSW = 1.0F;
         } else {
-            float hN = getHeight(level, fluid, northPos, northState, northFluid, down, northSameFrame);
-            float hS = getHeight(level, fluid, southPos, southState, southFluid, down, southSameFrame);
-            float hE = getHeight(level, fluid, eastPos, eastState, eastFluid, down, eastSameFrame);
-            float hW = getHeight(level, fluid, westPos, westState, westFluid, down, westSameFrame);
+            float hN = getHeight(level, fluid, northPos, northState, northFluid, down, northSameFrame, pos);
+            float hS = getHeight(level, fluid, southPos, southState, southFluid, down, southSameFrame, pos);
+            float hE = getHeight(level, fluid, eastPos, eastState, eastFluid, down, eastSameFrame, pos);
+            float hW = getHeight(level, fluid, westPos, westState, westFluid, down, westSameFrame, pos);
             hNE = calculateAverageHeight(level, fluid, ownHeight, hN, hE,
-                northPos.relative(gEast), down);
+                northPos.relative(gEast), down, pos);
             hNW = calculateAverageHeight(level, fluid, ownHeight, hN, hW,
-                northPos.relative(gWest), down);
+                northPos.relative(gWest), down, pos);
             hSE = calculateAverageHeight(level, fluid, ownHeight, hS, hE,
-                southPos.relative(gEast), down);
+                southPos.relative(gEast), down, pos);
             hSW = calculateAverageHeight(level, fluid, ownHeight, hS, hW,
-                southPos.relative(gWest), down);
+                southPos.relative(gWest), down, pos);
         }
 
         double ox = (double) (pos.getX() & 15);
@@ -491,17 +514,53 @@ public final class GravityLiquidRenderer {
 
     // ------------------------------------------------------------------
     // heights (vanilla corner averaging; "above" mapped through the basis;
-    // cross-frame same-type fluid shapes as EMPTY — the cliff-edge look)
+    // cross-frame same-type fluid shapes as FULL where it pours toward the
+    // cell, EMPTY everywhere else — ramp at real crossings, cliff edge at
+    // side-by-side sector boundaries)
     // ------------------------------------------------------------------
+
+    /**
+     * POUR TEST: does the cross-frame fluid at {@code neighborPos} arrive
+     * at the cell being shaped as a full column? Two conditions:
+     * <ul>
+     *   <li>one step along the neighbor's own frame-down brings its water
+     *       strictly closer to {@code cellPos} — onto the cell itself for
+     *       face neighbors, onto a corner-adjacent cell for diagonal
+     *       samples (the directional half of the flow engine's crossFeeds
+     *       relation);</li>
+     *   <li>the neighbor is genuinely COLUMN-shaped in its own frame — a
+     *       source or FALLING flowing water. A stream crossing the
+     *       boundary is a full-width column, so the receiving surface must
+     *       ramp up to meet it. A thin rim-fed edge sheet (the wrapped
+     *       cube's sector-boundary cells, whose down also happens to point
+     *       at the neighboring face's rim) is NOT — counting those full
+     *       was the round-30 bulge.</li>
+     * </ul>
+     */
+    private static boolean poursToward(
+        BlockGetter level, BlockPos neighborPos, FluidState neighbor, BlockPos cellPos
+    ) {
+        if (!neighbor.isSource() && !isFalling(neighbor)) {
+            return false;
+        }
+        Direction neighborDown = GravityFieldLookup.fluidDownAt(level, neighborPos);
+        return cellPos.distManhattan(neighborPos.relative(neighborDown))
+            < cellPos.distManhattan(neighborPos);
+    }
+
+    /** FALLING flowing water (a full column in its own frame). */
+    private static boolean isFalling(FluidState state) {
+        return state.hasProperty(FlowingFluid.FALLING) && state.getValue(FlowingFluid.FALLING);
+    }
 
     private static float calculateAverageHeight(
         BlockAndTintGetter level, Fluid fluid, float ownHeight,
-        float heightA, float heightB, BlockPos diagonalPos, Direction down
+        float heightA, float heightB, BlockPos diagonalPos, Direction down, BlockPos cellPos
     ) {
         if (!(heightB >= 1.0F) && !(heightA >= 1.0F)) {
             float[] weighted = new float[2];
             if (heightB > 0.0F || heightA > 0.0F) {
-                float diagonal = getHeight(level, fluid, diagonalPos, down);
+                float diagonal = getHeight(level, fluid, diagonalPos, down, cellPos);
                 if (diagonal >= 1.0F) {
                     return 1.0F;
                 }
@@ -528,31 +587,40 @@ public final class GravityLiquidRenderer {
         }
     }
 
-    private static float getHeight(BlockAndTintGetter level, Fluid fluid, BlockPos pos, Direction down) {
+    private static float getHeight(
+        BlockAndTintGetter level, Fluid fluid, BlockPos pos, Direction down, BlockPos cellPos
+    ) {
         BlockState state = level.getBlockState(pos);
         FluidState fluidState = state.getFluidState();
         // diagonal corner sample: query the frame here (outside the 6-cache)
         boolean posSameFrame = fluidState.isEmpty() || sameFrame(level, down, pos);
-        return getHeight(level, fluid, pos, state, fluidState, down, posSameFrame);
+        return getHeight(level, fluid, pos, state, fluidState, down, posSameFrame, cellPos);
     }
 
     private static float getHeight(
         BlockAndTintGetter level, Fluid fluid, BlockPos pos,
-        BlockState blockState, FluidState fluidState, Direction down, boolean posSameFrame
+        BlockState blockState, FluidState fluidState, Direction down, boolean posSameFrame,
+        BlockPos cellPos
     ) {
         if (fluid.isSame(fluidState.getType())) {
             if (!posSameFrame) {
-                // cross-frame fluid: its level lives on another axis — shape
-                // as if the cell were passable air, giving this frame's water
-                // a normal vanilla cliff edge at the boundary
-                return 0.0F;
+                // cross-frame fluid: its level lives on another axis. Where
+                // it POURS toward this cell as a column it reads FULL, so
+                // the surface ramps up to meet the incoming stream;
+                // everywhere else it shapes as passable air — the
+                // bulge-free cliff edge at side-by-side sector boundaries.
+                return poursToward(level, pos, fluidState, cellPos) ? 1.0F : 0.0F;
             }
-            // frame-aware above-check: only a SAME-frame column counts full
+            // frame-aware above-check: a SAME-frame column counts full — or
+            // THROUGH-FALL, a perpendicular-axis cross-frame feeder at the
+            // frame-up (mirroring the ownHeight rule so same-frame
+            // neighbors agree about shared corners)
             BlockPos abovePos = pos.relative(down.getOpposite());
             BlockState above = level.getBlockState(abovePos);
             FluidState aboveFluid = above.getFluidState();
             boolean fullColumn = fluid.isSame(aboveFluid.getType())
-                && (aboveFluid.isEmpty() || sameFrame(level, down, abovePos));
+                && (aboveFluid.isEmpty() || sameFrame(level, down, abovePos)
+                    || GravityFieldLookup.fluidDownAt(level, abovePos).getAxis() != down.getAxis());
             return fullColumn ? 1.0F : fluidState.getOwnHeight();
         } else {
             return !blockState.isSolid() ? 0.0F : -1.0F;
