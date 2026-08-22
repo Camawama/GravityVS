@@ -68,9 +68,18 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * and immediately re-settles the rail from its own local-frame neighborhood,
  * so the corruption is transient (within the same block update).
  *
- * <p>Still out of scope: cross-frame linking around cube edges / concave
- * corners (see docs in {@link StickyRailState}), powered/activator/detector
- * variants, rails on Valkyrien Skies ships.
+ * <p>CROSS-FRAME JUNCTIONS (rails connecting between axes): rails whose
+ * frames meet at a cube edge or corner link through three patterns — see
+ * the cross-frame section in {@link StickyRailState}. Concave corners
+ * produce an ascending ramp on the side whose frame-up holds the partner
+ * (floor ramps up into a wall track; a ceiling track ramps down toward a
+ * wall), convex edges and wall bases connect flat, folding around the
+ * edge. DOWN rails participate via {@link #crossFrameTouchUp} after
+ * vanilla settles them. Junctions require sticky rails on BOTH sides
+ * (plain vanilla rails have no frame to fold into).
+ *
+ * <p>Still out of scope: powered/activator/detector variants, rails on
+ * Valkyrien Skies ships.
  */
 public class StickyRailBlock extends BaseRailBlock implements EntityBlock {
 
@@ -217,12 +226,24 @@ public class StickyRailBlock extends BaseRailBlock implements EntityBlock {
         // identifies rails per-block and can write a WORLD-frame shape into a
         // rotated rail's LOCAL-frame property. Our own StickyRailState writes
         // are marked by LOCAL_UPDATE_DEPTH; anything else re-settles the rail
-        // from its local neighborhood immediately.
+        // from its local neighborhood immediately. (With the BaseRailBlock
+        // isolation mixin, vanilla can no longer even see rotated rails —
+        // this guard remains as defense in depth against other mods.)
         if (!level.isClientSide
             && bottom != Direction.DOWN
             && LOCAL_UPDATE_DEPTH.get()[0] == 0
             && oldState.getValue(SHAPE) != state.getValue(SHAPE)) {
             this.updateDir(level, pos, state, false);
+        }
+        // DOWN rails: a vanilla RailState cascade may legitimately reshape
+        // us (it owns the plane) — but it knows nothing about cross-frame
+        // junctions, so re-apply the conservative touch-up (idempotent; only
+        // acts when a junction partner exists).
+        if (!level.isClientSide
+            && bottom == Direction.DOWN
+            && LOCAL_UPDATE_DEPTH.get()[0] == 0
+            && oldState.getValue(SHAPE) != state.getValue(SHAPE)) {
+            crossFrameTouchUp(level, pos, state);
         }
     }
 
@@ -237,12 +258,81 @@ public class StickyRailBlock extends BaseRailBlock implements EntityBlock {
             return state;
         }
         if (state.getValue(BOTTOM) == Direction.DOWN) {
-            return super.updateDir(level, pos, state, alwaysPlace);
+            BlockState settled = super.updateDir(level, pos, state, alwaysPlace);
+            return crossFrameTouchUp(level, pos, settled);
         }
         RailShape shape = state.getValue(SHAPE);
         return new StickyRailState(level, pos, state)
             .place(level.hasNeighborSignal(pos), alwaysPlace, shape)
             .getState();
+    }
+
+    /**
+     * Cross-frame junction pass for DOWN rails. DOWN sticky rails are real
+     * vanilla rails (vanilla RailState settles them), and vanilla knows
+     * nothing about rails on walls — so after vanilla has had its say, a
+     * DOWN rail with a cross-frame partner orients toward the junction:
+     * ASCENDING toward a wall rail directly above (the concave ramp that
+     * also carries carts up into the wall rail's cell), or the flat axis
+     * toward a wall-base/convex partner. Deliberately conservative: the
+     * touch-up only acts when vanilla found NO same-plane rails of its own
+     * (with the isolation mixin, rotated rails no longer count), or when it
+     * would only upgrade the straight axis vanilla already chose into the
+     * matching ascending — vanilla layouts are never re-routed.
+     */
+    private BlockState crossFrameTouchUp(Level level, BlockPos pos, BlockState state) {
+        RailShape shape = state.getValue(SHAPE);
+        if (shape != RailShape.NORTH_SOUTH && shape != RailShape.EAST_WEST) {
+            return state;
+        }
+        boolean lone = vanillaPotentialConnections(level, pos) == 0;
+        RailShape upgraded = null;
+        for (Direction d : Direction.Plane.HORIZONTAL) {
+            boolean axisMatches = (d.getAxis() == Direction.Axis.Z) == (shape == RailShape.NORTH_SOUTH);
+            if (!lone && !axisMatches) {
+                continue; // never re-route an axis vanilla chose from its own rails
+            }
+            // CONCAVE: wall rail directly above, mounted on the wall at d
+            if (isSameFrameRail(level.getBlockState(pos.above()), d)) {
+                upgraded = ascendingToward(d);
+                break;
+            }
+            // WALL-BASE: wall rail beside us whose plane base meets our cell
+            if (isSameFrameRail(level.getBlockState(pos.relative(d)), d)
+                || isSameFrameRail(level.getBlockState(pos.relative(d).below()), d.getOpposite())) {
+                // flat toward d (the second probe is the CONVEX edge partner)
+                upgraded = d.getAxis() == Direction.Axis.Z ? RailShape.NORTH_SOUTH : RailShape.EAST_WEST;
+                if (!lone) {
+                    upgraded = null; // axis already correct; nothing to change
+                }
+                if (upgraded != null) {
+                    break;
+                }
+            }
+        }
+        if (upgraded == null || upgraded == shape) {
+            return state;
+        }
+        BlockState updated = state.setValue(SHAPE, upgraded);
+        int[] depth = LOCAL_UPDATE_DEPTH.get();
+        depth[0]++;
+        try {
+            level.setBlock(pos, updated, 3);
+        } finally {
+            depth[0]--;
+        }
+        return updated;
+    }
+
+    /** The ascending shape climbing toward world direction {@code d}. */
+    private static RailShape ascendingToward(Direction d) {
+        return switch (d) {
+            case NORTH -> RailShape.ASCENDING_NORTH;
+            case SOUTH -> RailShape.ASCENDING_SOUTH;
+            case EAST -> RailShape.ASCENDING_EAST;
+            case WEST -> RailShape.ASCENDING_WEST;
+            default -> RailShape.NORTH_SOUTH;
+        };
     }
 
     @SuppressWarnings("deprecation")

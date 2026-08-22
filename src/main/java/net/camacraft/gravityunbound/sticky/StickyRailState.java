@@ -89,6 +89,75 @@ public class StickyRailState {
         return StickyRailBlock.isSameFrameRail(this.level.getBlockState(checkPos), this.bottom);
     }
 
+    /** World direction of one of THIS rail's local directions. */
+    private Direction worldDir(Direction localDir) {
+        return Rotation24.localToWorld(
+            localDir, this.bottom, this.state.getValue(StickyRailBlock.SPIN));
+    }
+
+    // ---- CROSS-FRAME LINKING (the between-axes connections) ----
+    //
+    // A track continuing in local direction d can leave this rail's frame in
+    // exactly three ways, each identified by the partner's position AND its
+    // BOTTOM (the frame "rolls" across the junction line):
+    //
+    //   CONCAVE (into a corner): the wall rail directly local-ABOVE this
+    //   cell, mounted on the wall ahead — its bottom IS the world travel
+    //   direction. This rail becomes an ASCENDING ramp toward the wall
+    //   (the slope the junction needs, and the physical climb path that
+    //   carries a cart up into the wall rail's cell).
+    //
+    //   WALL-BASE (the same corner seen from the wall side): the LATERAL
+    //   neighbor whose bottom is the world travel direction (the floor rail
+    //   at the base of this wall). Flat — the wall rail's plane already
+    //   meets the floor at the fold line.
+    //
+    //   CONVEX (over an edge): one step out and one local-DOWN, mounted on
+    //   the far face of the edge — its bottom is OPPOSITE the world travel
+    //   direction. Flat on both sides; the two rail planes meet at the
+    //   shared edge.
+    //
+    // Partners count for SHAPE resolution (axis choice, curve suppression,
+    // the concave ascent) but are not stored in the connections list — each
+    // side of a junction independently discovers the other through the
+    // complementary pattern, so shapes converge without cross-frame writes.
+
+    /** The cross-frame partner continuing local direction {@code d}, if any. */
+    private boolean hasCrossFramePartner(Direction localDir) {
+        return this.crossFramePartnerPos(localDir) != null;
+    }
+
+    /** Position of the cross-frame partner in local direction {@code d}, or null. */
+    @Nullable
+    private BlockPos crossFramePartnerPos(Direction localDir) {
+        if (this.hasConcavePartner(localDir)) {
+            return this.aboveLocal(this.pos);
+        }
+        if (this.hasWallBasePartner(localDir)) {
+            return this.local(localDir);
+        }
+        if (this.hasConvexPartner(localDir)) {
+            return this.belowLocal(this.local(localDir));
+        }
+        return null;
+    }
+
+    private boolean hasConcavePartner(Direction localDir) {
+        return StickyRailBlock.isSameFrameRail(
+            this.level.getBlockState(this.aboveLocal(this.pos)), this.worldDir(localDir));
+    }
+
+    private boolean hasWallBasePartner(Direction localDir) {
+        return StickyRailBlock.isSameFrameRail(
+            this.level.getBlockState(this.local(localDir)), this.worldDir(localDir));
+    }
+
+    private boolean hasConvexPartner(Direction localDir) {
+        return StickyRailBlock.isSameFrameRail(
+            this.level.getBlockState(this.belowLocal(this.local(localDir))),
+            this.worldDir(localDir).getOpposite());
+    }
+
     /**
      * Vanilla compares connections by X and Z only (ignoring the vertical for
      * slopes). The local-frame equivalent ignores the coordinate along the
@@ -214,7 +283,7 @@ public class StickyRailState {
     public int countPotentialConnections() {
         int count = 0;
         for (Direction localDir : Direction.Plane.HORIZONTAL) {
-            if (this.hasRail(this.local(localDir))) {
+            if (this.hasRail(this.local(localDir)) || this.hasCrossFramePartner(localDir)) {
                 ++count;
             }
         }
@@ -257,18 +326,22 @@ public class StickyRailState {
             }
         }
         if (shape == RailShape.NORTH_SOUTH && this.canMakeSlopes) {
-            if (this.isSameFrameRailAt(this.aboveLocal(northPos))) {
+            if (this.isSameFrameRailAt(this.aboveLocal(northPos))
+                || this.hasConcavePartner(Direction.NORTH)) {
                 shape = RailShape.ASCENDING_NORTH;
             }
-            if (this.isSameFrameRailAt(this.aboveLocal(southPos))) {
+            if (this.isSameFrameRailAt(this.aboveLocal(southPos))
+                || this.hasConcavePartner(Direction.SOUTH)) {
                 shape = RailShape.ASCENDING_SOUTH;
             }
         }
         if (shape == RailShape.EAST_WEST && this.canMakeSlopes) {
-            if (this.isSameFrameRailAt(this.aboveLocal(eastPos))) {
+            if (this.isSameFrameRailAt(this.aboveLocal(eastPos))
+                || this.hasConcavePartner(Direction.EAST)) {
                 shape = RailShape.ASCENDING_EAST;
             }
-            if (this.isSameFrameRailAt(this.aboveLocal(westPos))) {
+            if (this.isSameFrameRailAt(this.aboveLocal(westPos))
+                || this.hasConcavePartner(Direction.WEST)) {
                 shape = RailShape.ASCENDING_WEST;
             }
         }
@@ -303,10 +376,12 @@ public class StickyRailState {
         BlockPos southPos = this.local(Direction.SOUTH);
         BlockPos westPos = this.local(Direction.WEST);
         BlockPos eastPos = this.local(Direction.EAST);
-        boolean north = this.hasNeighborRail(northPos);
-        boolean south = this.hasNeighborRail(southPos);
-        boolean west = this.hasNeighborRail(westPos);
-        boolean east = this.hasNeighborRail(eastPos);
+        // cross-frame partners count exactly like same-frame neighbors for
+        // the axis/curve decisions — the track continues around the fold
+        boolean north = this.hasNeighborRail(northPos) || this.hasCrossFramePartner(Direction.NORTH);
+        boolean south = this.hasNeighborRail(southPos) || this.hasCrossFramePartner(Direction.SOUTH);
+        boolean west = this.hasNeighborRail(westPos) || this.hasCrossFramePartner(Direction.WEST);
+        boolean east = this.hasNeighborRail(eastPos) || this.hasCrossFramePartner(Direction.EAST);
         RailShape shape = null;
         boolean northSouth = north || south;
         boolean eastWest = west || east;
@@ -377,18 +452,22 @@ public class StickyRailState {
         }
 
         if (shape == RailShape.NORTH_SOUTH && this.canMakeSlopes) {
-            if (this.isSameFrameRailAt(this.aboveLocal(northPos))) {
+            if (this.isSameFrameRailAt(this.aboveLocal(northPos))
+                || this.hasConcavePartner(Direction.NORTH)) {
                 shape = RailShape.ASCENDING_NORTH;
             }
-            if (this.isSameFrameRailAt(this.aboveLocal(southPos))) {
+            if (this.isSameFrameRailAt(this.aboveLocal(southPos))
+                || this.hasConcavePartner(Direction.SOUTH)) {
                 shape = RailShape.ASCENDING_SOUTH;
             }
         }
         if (shape == RailShape.EAST_WEST && this.canMakeSlopes) {
-            if (this.isSameFrameRailAt(this.aboveLocal(eastPos))) {
+            if (this.isSameFrameRailAt(this.aboveLocal(eastPos))
+                || this.hasConcavePartner(Direction.EAST)) {
                 shape = RailShape.ASCENDING_EAST;
             }
-            if (this.isSameFrameRailAt(this.aboveLocal(westPos))) {
+            if (this.isSameFrameRailAt(this.aboveLocal(westPos))
+                || this.hasConcavePartner(Direction.WEST)) {
                 shape = RailShape.ASCENDING_WEST;
             }
         }
@@ -408,6 +487,22 @@ public class StickyRailState {
                     if (railState.canConnectTo(this)) {
                         railState.connectTo(this);
                     }
+                }
+            }
+            // Wake cross-frame partners so a junction settles from EITHER
+            // placement order (a convex partner is diagonal — vanilla
+            // neighbor updates never reach it). Terminates: partner probes
+            // read only our POSITION and BOTTOM, never our shape, so a
+            // partner's re-settle cannot change what we would compute, and
+            // an unchanged re-settle does not write (or wake) again.
+            for (Direction localDir : Direction.Plane.HORIZONTAL) {
+                BlockPos partnerPos = this.crossFramePartnerPos(localDir);
+                if (partnerPos == null) {
+                    continue;
+                }
+                BlockState partnerState = this.level.getBlockState(partnerPos);
+                if (partnerState.getBlock() instanceof StickyRailBlock partnerBlock) {
+                    partnerBlock.updateDir(this.level, partnerPos, partnerState, false);
                 }
             }
         }

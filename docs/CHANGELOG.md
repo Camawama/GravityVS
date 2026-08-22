@@ -1,5 +1,49 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 61: rails fold around corners)
+
+- **Vanilla-rail isolation (the misalignment root).** A rotated sticky
+  rail is a BaseRailBlock in the rails tag (so minecart placement
+  works), which let ALL of vanilla's world-frame rail logic treat a
+  WALL rail as an ordinary flat rail: vanilla RailState curved real
+  rails toward wall-rail cells and wrote world-frame shapes into
+  local-frame SHAPE properties (the kinked ground rails and ceiling
+  S-bends in the screenshots), and a corrupted shape fed the cart ride
+  garbage track chords — the cart clamped diagonally, misaligned and
+  sunk into the ground. New BaseRailBlockMixin: {@code isRail} returns
+  FALSE for non-DOWN sticky rails, so vanilla rail logic and vanilla
+  cart physics can no longer see them at all. Cart placement still
+  works (the item checks the TAG, not isRail). NOTE: rails corrupted
+  before this fix keep their stored shape until re-settled — break and
+  re-place one rail in an affected run.
+- **CROSS-FRAME JUNCTIONS — rails now connect between axes.** The
+  deferred feature, implemented via three junction patterns in
+  StickyRailState (each identified by the partner's position AND
+  bottom, mutual by construction):
+  - CONCAVE (floor runs into a wall, wall meets a ceiling): the side
+    whose frame-up holds the partner becomes an ASCENDING ramp toward
+    it — the slope the user asked for, and a physical climb path: a
+    cart riding the ramp exits into the partner's cell where the
+    existing attach rules take over;
+  - WALL-BASE (the same corner from the wall side) and CONVEX (over an
+    edge): flat on both sides, the two rail planes folding around the
+    corner line.
+  Partners count for shape resolution (axis, curves, ascent) but are
+  never written across frames — each side independently discovers the
+  other, so settling converges and cannot oscillate (partner probes
+  read only position+bottom, never shape). Placement order does not
+  matter: settling wakes cross-frame partners (convex partners are
+  diagonal, out of vanilla's neighbor-update reach).
+- **DOWN rails join junctions too** (floor rails are real vanilla
+  rails): a conservative post-vanilla touch-up orients a LONE floor
+  rail toward an adjacent junction partner, or upgrades the straight
+  axis vanilla already chose into the matching concave ascending —
+  vanilla layouts are never re-routed, and the onPlace self-heal
+  re-applies the touch-up if a vanilla cascade flattens it. Junctions
+  require sticky rails on BOTH sides.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-21 (round 60: the flush planet skin)
 
 - **Core-field water now renders as a taut FLUSH skin — the perfect

@@ -10,6 +10,7 @@
     "AbstractMinecartMixin",
     "AbstractSkeletonMixin",
     "AreaEffectCloudMixin",
+    "BaseRailBlockMixin",
     "BegGoalMixin",
     "BoatMixin",
     "CrossbowItemMixin",
@@ -56,14 +57,14 @@
     "UseOnContextMixin",
     "WitchMixin",
     "WitherBossMixin",
-    "fall_distance.ServerPlayerMixin_FallDistance",
-    "fall_distance.ServerGamePacketListenerImplMixin",
-    "fluid.FlowingFluidMixin",
-    "item.BehaviorUtilsMixin",
-    "forge.MixinForgeHooks",
     "compat.ACEntityMixin",
     "compat.VSEntityDraggerMixin",
-    "compat.VSEntityShipCollisionMixin"
+    "compat.VSEntityShipCollisionMixin",
+    "fall_distance.ServerGamePacketListenerImplMixin",
+    "fall_distance.ServerPlayerMixin_FallDistance",
+    "fluid.FlowingFluidMixin",
+    "forge.MixinForgeHooks",
+    "item.BehaviorUtilsMixin"
   ],
   "client": [
     "client.CameraMixin",
