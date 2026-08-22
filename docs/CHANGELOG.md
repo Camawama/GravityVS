@@ -1,5 +1,56 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 73: the sawtooth found — and jumps keep their snap)
+
+- **The spinning-ship jitter had an exact cause: the sub-tick camera
+  twist DOUBLE-COUNTED.** Vanilla's yRotO lerp already interpolates the
+  spin-follow's tick-rate yaw across each tick; adding the full
+  drawn-vs-tick delta on top showed the intra-tick rotation twice — a
+  sawtooth with exactly one tick of rotation amplitude, resetting at
+  every tick boundary. The camera now subtracts the partialTick
+  fraction of the tick's applied twist and contributes only the
+  REMAINDER (the render transform's true lead): constant during steady
+  spin, zero on stationary ships. This is also, in hindsight, what the
+  round-69 "low refresh rate" complaint likely was en route to.
+- **Jumping no longer unsnaps.** A 10-tick hold grace already existed —
+  but the cliff early-release (moving against the held normal at
+  0.08/tick) fired on every ordinary jump's DESCENT, and a full jump
+  (~13 ticks) outlived the budget anyway. The early release now probes
+  2.5 blocks (body-scaled) along the held down first: the plate still
+  underneath means it is a JUMP — keep the hold; nothing underneath
+  means a real cliff — release fast so the field can catch the fall.
+  Grace raised to 16 ticks so the whole arc stays held: hopping around
+  on plating never unsnaps, exactly the requested cooldown behavior.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 72: smooth landings and exact yaw-follow)
+
+- **Landing snap eased.** Round 71's branch fix meant landing swaps the
+  render alignment's target from radial to the held surface — and the
+  correction arc applied the whole radial-vs-face angle in one frame
+  (the "abrupt snap"). Large arcs are now rate-capped at 10 degrees
+  per frame: the landing transient sweeps at the tick chase's own
+  smooth convergence rate, while steady-state residuals (always far
+  below the cap) are untouched.
+- **Yaw follows the ship exactly — ownership + sub-tick camera twist,
+  landed in isolation from the reverted arc.** The /vs torque test
+  (mostly ROLL) proved the gap again: as roll tilts the rider's
+  frame-up, the twist about their up flows through axes VS's
+  world-yaw-only dragger cannot express, so the camera slid in yaw
+  against the deck. While a ship-anchored field holds the entity, the
+  capability now computes the EXACT twist about the frame's up from
+  the full tick rotation delta and applies it to yaw/head/body every
+  tick (VS's dragger yaw suppressed at the source — nothing
+  double-turns); the tick-vs-drawn-pose gap that made this stutter in
+  the round-69 attempt is closed by a SUB-TICK CAMERA TWIST — the view
+  rotates by the twist of renderTransform o tickTransform^-1 each
+  frame. Purely visual, identity on stationary ships. These two pieces
+  were designed together in the reverted overhaul but never
+  field-tested in isolation until now.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-22 (round 71: the split-frame snap — held surface wins the render pass)
 
 - **"Only the AABB snaps to the surface; the capsule spheres and

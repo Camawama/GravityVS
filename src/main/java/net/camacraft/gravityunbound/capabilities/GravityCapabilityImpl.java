@@ -108,7 +108,10 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // few ticks (jumps and probe flicker must not wobble the frame; the probe
     // re-acquires during a jump's descent, so this only needs to bridge the
     // ascent and apex)
-    private static final int GROUND_NORMAL_GRACE_TICKS = 10;
+    // sized to outlast a full jump (~13 ticks up-and-down): with the
+    // descent no longer tripping the cliff early-release, a hop keeps its
+    // held surface for the whole arc and re-grounds without ever unsnapping
+    private static final int GROUND_NORMAL_GRACE_TICKS = 16;
     // how far past the feet the ground probe reaches, along the field's down
     private static final double GROUND_PROBE_DEPTH = 0.6;
 
@@ -336,6 +339,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
         applyShipIdleAnchor();
         applyShipFrameFeedForward();
+        applyShipFieldSpinFollow();
         if (entity.tickCount % 40 == 0
             && (entity instanceof Player)
             && (dbgEffectsQueued > 0 || lastGroundNormal != null || !isVisuallyDefault())) {
@@ -686,6 +690,73 @@ public class GravityCapabilityImpl implements IGravityCapability {
      * discharge as a launch. Any input, jump, real push (knockback, piston) or
      * ground change releases the anchor immediately.
      */
+    /**
+     * SHIP-FIELD SPIN FOLLOW — the yaw half of riding a rotating frame,
+     * with OWNERSHIP. VS's dragger only conveys the ship's WORLD-YAW
+     * component (projected by frame-up alignment in
+     * compat.VSEntityDraggerMixin): a ship spun about a horizontal axis
+     * (the /vs teleport torque test — mostly roll) applies twist about the
+     * rider's frame-up through axes VS structurally cannot deliver, so the
+     * camera slid in yaw relative to the deck. While a ship-anchored field
+     * holds the entity, the EXACT twist about the frame's up is computed
+     * here from the full tick rotation delta and applied to yaw/head/body
+     * every tick, in every state; VS's own yaw is suppressed at the source
+     * (projectYaw returns the current yaw for field-anchored entities) so
+     * nothing double-turns. Tick-rate smoothness comes from vanilla's
+     * yRotO interpolation; the tick-vs-drawn-pose gap is closed at the
+     * camera by the sub-tick twist correction (CameraMixin).
+     */
+    private void applyShipFieldSpinFollow() {
+        lastSpinFollowTwist = 0;
+        boolean controlled = entity.level().isClientSide()
+            ? entity.isControlledByLocalInstance()
+            : !(entity instanceof Player);
+        if (!controlled || fieldAnchorShip == null || entity.isPassenger()) {
+            return;
+        }
+
+        org.joml.Quaterniond now =
+            new org.joml.Quaterniond(fieldAnchorShip.getTransform().getShipToWorldRotation());
+        org.joml.Quaterniond prev =
+            new org.joml.Quaterniond(fieldAnchorShip.getPrevTickTransform().getShipToWorldRotation());
+        org.joml.Quaterniond delta = now.mul(prev.conjugate(), new org.joml.Quaterniond()).normalize();
+        if (delta.w < 0) {
+            delta.set(-delta.x, -delta.y, -delta.z, -delta.w);
+        }
+        if (delta.w > 0.99999999) {
+            return; // stationary ship
+        }
+
+        // signed twist angle about the frame's up (right-handed); a world
+        // rotation of +a about up corresponds to an MC yaw delta of -deg(a)
+        Vec3 up = getUpVector();
+        double s = delta.x * up.x + delta.y * up.y + delta.z * up.z;
+        double angle = 2.0 * Math.atan2(s, delta.w);
+        if (Math.abs(angle) < 1.0E-6) {
+            return;
+        }
+        float yawDelta = (float) -Math.toDegrees(angle);
+        entity.setYRot(Mth.wrapDegrees(entity.getYRot() + yawDelta));
+        if (entity instanceof LivingEntity living) {
+            living.setYHeadRot(Mth.wrapDegrees(living.getYHeadRot() + yawDelta));
+            living.yBodyRot = Mth.wrapDegrees(living.yBodyRot + yawDelta);
+        }
+        lastSpinFollowTwist = angle;
+    }
+
+    // the twist applied by this tick's spin-follow (radians, world-handed
+    // about the frame's up) — the camera's sub-tick correction subtracts
+    // the partialTick fraction of it, because vanilla's yRotO lerp already
+    // shows that fraction: adding the full drawn-vs-tick delta on top
+    // DOUBLE-COUNTED the intra-tick rotation, a one-tick-amplitude sawtooth
+    // ("standing on the spinning ship looks jittery again")
+    private double lastSpinFollowTwist = 0;
+
+    /** See {@link #applyShipFieldSpinFollow} and the CameraMixin consumer. */
+    public double getLastSpinFollowTwist() {
+        return lastSpinFollowTwist;
+    }
+
     private void applyShipIdleAnchor() {
         if (!entity.level().isClientSide() || !entity.isControlledByLocalInstance()) {
             return;
@@ -1093,7 +1164,17 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // the field could catch them. Jump ascent moves ALONG the held normal
         // (dot > 0) and keeps the full grace.
         if (lastGroundNormal != null && !capsuleGrounded && moved.dot(lastGroundNormal) < -0.08) {
-            groundNormalGraceTicks = Math.min(groundNormalGraceTicks, 1);
+            // ...but only when NOTHING is under the feet: an ordinary jump's
+            // DESCENT also moves against the held normal, and clamping the
+            // grace there unsnapped every hop mid-air ("jumping immediately
+            // unsnaps with no smoothing"). A longer look along the held
+            // down separates the cliff (nothing under — release fast, the
+            // field must catch the fall) from the jump (the plate is still
+            // right there — keep the hold through the whole arc).
+            Vec3 under = probeSurfaceNormal(feet, lastGroundNormal.scale(-1), 2.5 * probeScale);
+            if (under == null || under.dot(lastGroundNormal) < 0.7) {
+                groundNormalGraceTicks = Math.min(groundNormalGraceTicks, 1);
+            }
         }
 
         if (groundNormalGraceTicks > 0) {
@@ -1939,6 +2020,22 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // consecutive ticks the collision ground plane disagreed with the held face
     private int contactDisagreeTicks = 0;
 
+    /**
+     * Whether the dominant gravity field is mounted on a Valkyrien Skies
+     * ship. While true, this capability owns the entity's spin-follow (yaw
+     * twist) and VS's dragger yaw is suppressed — see
+     * {@link #applyShipFieldSpinFollow} and compat.VSEntityDraggerMixin.
+     */
+    public boolean isShipFieldAnchored() {
+        return fieldAnchorShip != null;
+    }
+
+    /** The ship the dominant field is mounted on, or null. */
+    @Nullable
+    public org.valkyrienskies.core.api.ships.Ship getFieldAnchorShip() {
+        return fieldAnchorShip;
+    }
+
     /** See the consumption site in {@link #advanceVisualRotation()}. */
     public void setExternalVisualOverride(Quaternionf frame) {
         if (externalVisualOverride == null) {
@@ -2721,6 +2818,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 Quaternionf arc = QuaternionUtil.getRotationBetween(frameUp, drawnUp);
                 if (shipAlignWeight < 0.999f) {
                     arc = new Quaternionf().slerp(arc, shipAlignWeight);
+                }
+                // RATE-CAP large corrections. The arc is normally the tiny
+                // tick-vs-drawn residual — but when the alignment TARGET
+                // switches (landing swaps the radial anchor for the held
+                // surface, round 71), the residual jumps by the whole
+                // radial-vs-face angle and applying it in one frame was a
+                // hard camera snap. Capped, the transient sweeps at the
+                // tick chase's own smooth convergence rate (the true arc
+                // shrinks as the frame catches up); steady-state
+                // corrections are far below the cap and untouched.
+                double arcAngle = 2.0 * Math.acos(Mth.clamp(Math.abs(arc.w), 0.0f, 1.0f));
+                double maxArc = Math.toRadians(10.0);
+                if (arcAngle > maxArc) {
+                    arc = new Quaternionf().slerp(arc, (float) (maxArc / arcAngle));
                 }
                 // frame maps world -> player: world rotation S composes as
                 // frame * conj(S)

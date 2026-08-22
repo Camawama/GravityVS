@@ -93,7 +93,19 @@ public abstract class VSEntityDraggerMixin {
 
     private static float gravityunbound$projectYaw(Entity entity, float currentYaw, float newYaw) {
         GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(entity);
-        if (comp == null || comp.isVisuallyDefault()) {
+        if (comp == null) {
+            return newYaw;
+        }
+        // FIELD-ANCHORED entities: the capability owns the spin-follow — it
+        // computes the EXACT twist about the frame's up from the ship's
+        // full rotation delta (VS only knows its world-yaw component, which
+        // misses the twist a rolling/pitching ship applies to its riders).
+        // Suppress VS's yaw entirely so nothing double-turns; the sub-tick
+        // camera twist (CameraMixin) provides the between-tick smoothness.
+        if (comp.isShipFieldAnchored()) {
+            return currentYaw;
+        }
+        if (comp.isVisuallyDefault()) {
             return newYaw;
         }
         float delta = Mth.wrapDegrees(newYaw - currentYaw);
