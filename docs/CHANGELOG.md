@@ -1,5 +1,58 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 57: water planets combine)
+
+- **Streams now COMBINE with cross-frame water instead of sheeting over
+  it.** The spread hole-gate deliberately let non-falling water over a
+  cross-frame below cell side-spread (the corner wrap needs it over a
+  solid lip) — but it never checked what the below cell HOLDS. The
+  spreading ring around a stream treated another sector's water surface
+  as solid ground and sheeted outward in all four directions (the
+  uniform in-field spread amplified it) — the "huge mess" from a source
+  placed diagonal to a core. Now, water over same-type cross-frame
+  water DEFERS exactly like a falling column landing on it: the flows
+  merge at the seam (the pour/cross-feed relations carry the level
+  across), and spreading stops. The solid-lip corner wrap is untouched.
+- **Water planets self-heal — in-field source conversion re-enabled.**
+  The old blanket suppression ("fields move water, they never create
+  it") left flooded fields un-healable: flowing cells starve at sector
+  boundaries under the cross-frame feed rules, and with conversion off
+  those air pockets were PERMANENT — the un-swimmable water planet.
+  Conversion is vanilla's own infinite-water rule and all its inputs
+  were already frame-aware (perpendicular-plane neighbor count,
+  frame-below solid-or-source check), so flooded regions now knit
+  themselves back into sources like a vanilla pool: enclosed pockets
+  fill, then convert. The one suppression that remains is PLATE CELLS
+  (a source minted inside a plate is undrainable and blocks flow).
+  Deliberate consequence: sources minted in a field are real sources
+  and outlive it, exactly like vanilla infinite water.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 56: the drain funnel)
+
+- **The logged plate's own surface now slopes into its outflow.** Round
+  54 made the column BELOW a fluid-logged plate render full (the
+  through-fall seam), but the plate cell's sheet still shaped that
+  column as empty — a thin sheet perched on a full-width column, a hard
+  T-junction instead of a slope.
+- **Fix — DRAIN, the feeder-side mirror of through-fall**: a cross-frame
+  neighbor whose own frame-up faces the queried cell (directly for face
+  neighbors, corner-adjacent for diagonal samples) is RECEIVING that
+  cell's flow and carrying it onward — it now reads FULL in the cell's
+  height shaping, so the plate sheet's surface sweeps from its thin
+  height down to full extent at the outflow edge, funneling into the
+  column below. Works for water and lava alike, and symmetrically for
+  any field-exit direction. No column-shape gate on the drain side (the
+  receiving cell is laterally fed, never FALLING — its same-type
+  presence at the drain is the proof the flow continues). The wrapped
+  cube's side-by-side sector sheets still read empty: a sector
+  neighbor's down points AT the rim, not away from it, so the drain
+  test cannot fire there — cliff edges and the round-30/53 no-bulge
+  behavior are preserved.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-21 (round 55: lava-logging)
 
 - **Gravity plating can now hold LAVA** the same way it holds water —

@@ -83,7 +83,11 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *       the cell's down, so its water feeds through the seam (water
  *       dropping out the back of a waterlogged plate into vanilla
  *       gravity) and the cell renders full to meet it; an axis-equal
- *       opposite frame (the mutual pit) stays a cliff. Every other cross-frame
+ *       opposite frame (the mutual pit) stays a cliff. DRAIN (the
+ *       feeder-side mirror of through-fall): a cross-frame neighbor whose
+ *       own frame-up faces the cell receives and carries away the cell's
+ *       flow — the cell's surface ramps to full at that edge, funneling
+ *       into the outgoing column ({@link #drainsFrom}). Every other cross-frame
  *       neighbor (the side-by-side sector sheets of a wrapped cube, thin
  *       edge cells whose down merely happens to point at the next face)
  *       shapes as EMPTY, giving each frame its own closed vanilla cliff
@@ -548,6 +552,25 @@ public final class GravityLiquidRenderer {
             < cellPos.distManhattan(neighborPos);
     }
 
+    /**
+     * DRAIN TEST: the feeder-side mirror of THROUGH-FALL. True when the
+     * cross-frame fluid at {@code neighborPos} RECEIVES the queried cell's
+     * flow and carries it away — the cell sits at (or corner-adjacent to)
+     * the neighbor's own frame-UP, so the neighbor's gravity pulls the
+     * cell's fluid through the seam and onward (the lava/water-logged
+     * plate draining out its back into a vanilla column below). The
+     * feeding surface then ramps to FULL at that edge, funneling into the
+     * receiving column instead of ending as a thin sheet perched on a
+     * full-width column. No column-shape gate here: the receiving cell is
+     * laterally fed (never FALLING), and its mere same-type presence at
+     * the drain proves the flow continues.
+     */
+    private static boolean drainsFrom(BlockGetter level, BlockPos neighborPos, BlockPos cellPos) {
+        Direction neighborDown = GravityFieldLookup.fluidDownAt(level, neighborPos);
+        return cellPos.distManhattan(neighborPos.relative(neighborDown.getOpposite()))
+            < cellPos.distManhattan(neighborPos);
+    }
+
     /** FALLING flowing water (a full column in its own frame). */
     private static boolean isFalling(FluidState state) {
         return state.hasProperty(FlowingFluid.FALLING) && state.getValue(FlowingFluid.FALLING);
@@ -605,11 +628,13 @@ public final class GravityLiquidRenderer {
         if (fluid.isSame(fluidState.getType())) {
             if (!posSameFrame) {
                 // cross-frame fluid: its level lives on another axis. Where
-                // it POURS toward this cell as a column it reads FULL, so
-                // the surface ramps up to meet the incoming stream;
+                // it POURS toward this cell as a column (incoming stream)
+                // or DRAINS this cell's flow onward (outgoing column) it
+                // reads FULL, so the surface ramps to meet the crossing;
                 // everywhere else it shapes as passable air — the
                 // bulge-free cliff edge at side-by-side sector boundaries.
-                return poursToward(level, pos, fluidState, cellPos) ? 1.0F : 0.0F;
+                return poursToward(level, pos, fluidState, cellPos)
+                    || drainsFrom(level, pos, cellPos) ? 1.0F : 0.0F;
             }
             // frame-aware above-check: a SAME-frame column counts full — or
             // THROUGH-FALL, a perpendicular-axis cross-frame feeder at the

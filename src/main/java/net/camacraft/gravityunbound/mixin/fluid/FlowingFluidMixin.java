@@ -205,10 +205,20 @@ public abstract class FlowingFluidMixin {
      * beneath it. FALLING water keeps that behavior verbatim — a stream
      * landing on cross-frame field water must be absorbed and redirected,
      * not splash sideways over the boundary like a sheet on glass. LATERAL
-     * (non-falling) water over a CROSS-frame below cell side-spreads
-     * instead: that below cell can never absorb it (same-type fluid never
-     * replaces), so vanilla defer would dead-end the corner wrap — the rim
-     * cell of one face must keep spreading to carry flow onto the next.
+     * (non-falling) water over a cross-frame below cell splits on what the
+     * below cell HOLDS:
+     * <ul>
+     *   <li>same-type WATER: defer, exactly like the falling case — the two
+     *       flows COMBINE at the seam (the pour/cross-feed relations carry
+     *       the level across). Without this, the spreading ring around a
+     *       stream treated another sector's water surface as solid ground
+     *       and sheeted outward across the whole boundary (amplified by
+     *       the uniform in-field spread) — the "huge mess of water";</li>
+     *   <li>anything else (the solid lip of a convex corner): side-spread —
+     *       vanilla defer would dead-end the corner wrap, and the rim cell
+     *       of one face must keep spreading to carry flow onto the
+     *       next.</li>
+     * </ul>
      */
     @WrapOperation(
         method = "spread",
@@ -223,7 +233,8 @@ public abstract class FlowingFluidMixin {
         if (GravityFieldLookup.hasSources(getter)
             && gravityunbound$down(getter, belowPos) != gravityunbound$down(getter, pos)
             && !(spreadingState.hasProperty(FlowingFluid.FALLING)
-                 && spreadingState.getValue(FlowingFluid.FALLING))) {
+                 && spreadingState.getValue(FlowingFluid.FALLING))
+            && !belowState.getFluidState().getType().isSame(fluid)) {
             return false;
         }
         return original.call(self, getter, fluid, pos, state, belowPos, belowState);
@@ -361,12 +372,17 @@ public abstract class FlowingFluidMixin {
     }
 
     // Source conversion (the infinite-water rule) lives in getNewLiquid's
-    // own neighbor loop and is gated by FluidState.canConvertToSource —
-    // suppress it inside rotated frames: fields move water, they never
-    // create it (manufactured sources are permanent blocks that outlive
-    // the field). NOTE: an earlier fix emptied sourceNeighborCount instead,
-    // which gates a different mechanic (falling side-spread) — that wrap is
-    // reverted to the proper perpendicular plane below.
+    // own neighbor loop and is gated by FluidState.canConvertToSource.
+    // Originally suppressed inside ANY field ("fields move water, they
+    // never create it") — but that left a water planet un-healable: flowing
+    // cells starve at sector boundaries under the cross-frame feed rules,
+    // and with conversion off the resulting air pockets are PERMANENT.
+    // In-field conversion is vanilla's own infinite-water rule expressed in
+    // the frame (sourceNeighborCount already iterates the perpendicular
+    // plane, the below-check the frame-below), so flooded regions now knit
+    // themselves back into sources exactly like a vanilla pool. The one
+    // suppression that stays is PLATE CELLS: a source minted inside a
+    // plate is undrainable and blocks flow through it.
     @WrapOperation(
         method = "getNewLiquid",
         at = @At(
@@ -377,10 +393,8 @@ public abstract class FlowingFluidMixin {
     private boolean gravityunbound$noRotatedSourceConversion(
         FluidState fluidState, Level level, BlockPos pos, Operation<Boolean> original
     ) {
-        // suppressed inside ANY field region — including DOWN-pointing
-        // fields (floor plates): a source minted inside a plate cell is
-        // undrainable and blocks flow through it
-        return !net.camacraft.gravityunbound.util.GravityFieldLookup.hasFieldAt(level, pos)
+        return !(level.getBlockState(pos).getBlock()
+                instanceof net.camacraft.gravityunbound.plating.GravityPlatingBlock)
             && original.call(fluidState, level, pos);
     }
 
