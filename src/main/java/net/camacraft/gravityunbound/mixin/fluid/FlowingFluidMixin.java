@@ -208,16 +208,22 @@ public abstract class FlowingFluidMixin {
      * (non-falling) water over a cross-frame below cell splits on what the
      * below cell HOLDS:
      * <ul>
-     *   <li>same-type WATER: defer, exactly like the falling case — the two
-     *       flows COMBINE at the seam (the pour/cross-feed relations carry
-     *       the level across). Without this, the spreading ring around a
-     *       stream treated another sector's water surface as solid ground
-     *       and sheeted outward across the whole boundary (amplified by
-     *       the uniform in-field spread) — the "huge mess of water";</li>
-     *   <li>anything else (the solid lip of a convex corner): side-spread —
-     *       vanilla defer would dead-end the corner wrap, and the rim cell
-     *       of one face must keep spreading to carry flow onto the
-     *       next.</li>
+     *   <li>OPEN same-type water (air- or water-backed in its own frame:
+     *       a stream, the flooded interior): defer, exactly like the
+     *       falling case — the two flows COMBINE at the seam (the
+     *       pour/cross-feed relations carry the level across). Without
+     *       this, the spreading ring around a stream treated another
+     *       sector's water surface as solid ground and sheeted outward
+     *       across the whole boundary — the "huge mess of water";</li>
+     *   <li>a SOLID-BACKED surface film (same-type water resting directly
+     *       on solid in its own frame), or no fluid at all (the bare solid
+     *       lip): side-spread — the corner wrap's continuation: the rim
+     *       cell of one face must keep spreading to carry flow onto the
+     *       next. Round 57 deferred over ALL cross-frame water, which
+     *       killed the wrap (fluidsim: cube coverage and the 26-cell
+     *       bare-core shell regressed; the solid-backing distinction — the
+     *       same criterion the side-entry feed uses to stay on the
+     *       surface — restores both while keeping the sheet fix).</li>
      * </ul>
      */
     @WrapOperation(
@@ -230,11 +236,13 @@ public abstract class FlowingFluidMixin {
         Operation<Boolean> original,
         @Local(argsOnly = true) FluidState spreadingState
     ) {
+        Direction belowDown = gravityunbound$down(getter, belowPos);
         if (GravityFieldLookup.hasSources(getter)
-            && gravityunbound$down(getter, belowPos) != gravityunbound$down(getter, pos)
+            && belowDown != gravityunbound$down(getter, pos)
             && !(spreadingState.hasProperty(FlowingFluid.FALLING)
                  && spreadingState.getValue(FlowingFluid.FALLING))
-            && !belowState.getFluidState().getType().isSame(fluid)) {
+            && (!belowState.getFluidState().getType().isSame(fluid)
+                || getter.getBlockState(belowPos.relative(belowDown)).blocksMotion())) {
             return false;
         }
         return original.call(self, getter, fluid, pos, state, belowPos, belowState);

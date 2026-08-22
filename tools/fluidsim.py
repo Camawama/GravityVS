@@ -134,14 +134,26 @@ class World:
     def get_new_liquid(self, p):
         if self.solid(p): return None
         i = 0
+        j = 0  # source neighbors (round 57: conversion re-enabled in fields)
         for d in self.planar_dirs(p):
             st = self.f(add(p,d))
             if st is not None:
                 i = max(i, st[0])
-            # source conversion suppressed inside fields: no j count
+                if st[2]: j += 1
         for d in range(6):
-            i = max(i, self.cross_feeder_amount(p, d))
+            amt = self.cross_feeder_amount(p, d)
+            if amt:
+                i = max(i, amt)
+                nst = self.f(add(p, d))
+                if nst is not None and nst[2]: j += 1
         i = max(i, self.side_entry_amount(p))
+        # ROUND 57: vanilla infinite-water conversion, frame-aware inputs
+        # (perpendicular-plane source count, frame-below solid-or-source)
+        if j >= 2:
+            below = add(p, self.down(p))
+            bst = self.f(below)
+            if self.solid(below) or (bst is not None and bst[2]):
+                return (8, False, True)
         up = opp(self.down(p))
         upp = add(p, up)
         st = self.f(upp)
@@ -219,7 +231,17 @@ class World:
             if nl_below is not None:
                 self.set_fluid(below, nl_below)
         elif state[2] or not self.is_water_hole(p, below) or (
-                not state[1] and self.down(below) != self.down(p)):
+                not state[1] and self.down(below) != self.down(p)
+                and (self.f(below) is None
+                     or self.solid(add(below, self.down(below))))):
+            # ROUND 57/58: the cross-frame side-spread exception fires when
+            # the below cell holds NO same-type fluid (the solid lip of a
+            # convex corner) — OR when its water rests DIRECTLY ON SOLID in
+            # its own frame (a surface film on a face: the corner wrap's
+            # continuation cell must keep spreading onto the next face).
+            # Over OPEN cross-frame water (air/water-backed — a stream or
+            # the flooded interior) the spread defers and COMBINES instead
+            # of sheeting outward over it.
             self.spread_to_sides(p, state)
 
     def spread_to_sides(self, p, state):
@@ -275,8 +297,10 @@ def scenario(name, world, sources, checks, rounds=400):
         good, detail = fn(world)
         ok = ok and good
         msgs.append(("PASS " if good else "FAIL ") + label + (f" [{detail}]" if detail else ""))
-    # drainage: remove all sources, everything must drain
-    for s in sources:
+    # drainage: remove ALL sources (placed AND converted — round 57 allows
+    # in-field conversion, and converted sources are real sources), then
+    # everything must drain: no source-free water sustains itself
+    for s in [p for p, st in world.fluid.items() if st[2]]:
         world.set_fluid(s, None)
     dr = world.run(rounds)
     drained = dr is not None and len(world.fluid) == 0
@@ -366,6 +390,29 @@ def main():
              all((wd.f((x,y,z)) is None) == (wd.f((-x,y,z)) is None)
                  and (wd.f((x,y,z)) is None) == (wd.f((x,y,-z)) is None)
                  for x in range(-2,3) for y in range(-2,3) for z in range(-2,3)), ""))])
+
+    # --- diagonal source near a bare core: the round-57 regression — the
+    # stream crossing sectors must COMBINE with the other frame's water,
+    # not sheet outward over it ("huge mess") ---
+    w = World(CORE1, core_down((0,0,0), 8), field_fn=core_field)
+    all_ok &= scenario("diagonal source, bounded", w, [(3,3,0)],
+        [("bounded (no sheet)", lambda wd: (len(wd.fluid) <= 80, f"{len(wd.fluid)} cells"))])
+
+    # --- water planet: a sources cube around the core with punched air
+    # pockets must self-heal (fill, then convert) — the swimmable planet ---
+    pockets = [(2,2,0),(0,2,2),(-2,-2,0),(1,1,1),(2,0,2),(0,-2,2),(-2,0,-2)]
+    planet_srcs = [(x,y,z) for x in range(-3,4) for y in range(-3,4) for z in range(-3,4)
+                   if (x,y,z) != (0,0,0) and (x,y,z) not in pockets]
+    w = World(CORE1, core_down((0,0,0), 8), field_fn=core_field,
+              void_fn=lambda p: max(abs(p[0]),abs(p[1]),abs(p[2])) > 24)
+    all_ok &= scenario("water planet pockets heal", w, planet_srcs,
+        [("pockets filled", lambda wd: (
+            all(wd.f(pk) is not None for pk in pockets),
+            "empty: " + str([pk for pk in pockets if wd.f(pk) is None]))),
+         ("pockets full-level", lambda wd: (
+            all(wd.f(pk) is not None and wd.f(pk)[0] == 8 for pk in pockets),
+            str([(pk, wd.f(pk)) for pk in pockets if wd.f(pk) is None or wd.f(pk)[0] != 8][:4])))],
+        rounds=800)
 
     # --- vertical stream into a sideways (WEST) plating field ---
     # field box x in [4..10], y in [-2..2], z in [-2..2], down=WEST inside;

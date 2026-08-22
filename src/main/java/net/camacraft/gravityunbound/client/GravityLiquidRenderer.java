@@ -168,21 +168,27 @@ public final class GravityLiquidRenderer {
         // Frame checks for the 6 face neighbors: one fluidDownAt query each
         // (skipped when the neighbor holds no fluid — an empty cell behaves
         // identically in either frame), cached for the whole call. CULLING
-        // sees cross-frame fluid as EMPTY (the ...Eff states); HEIGHT
-        // SHAPING sees it as FULL only where it actually POURS toward this
-        // cell, EMPTY otherwise — see getHeight and the class doc.
+        // (the ...Eff states via effectiveFluid) sees cross-frame fluid as
+        // EMPTY unless it renders as a FULL COLUMN in its own frame — a
+        // full column fills its whole cell, so it genuinely covers the
+        // shared face whatever its frame. Without that exception, every
+        // sector boundary deep inside a flooded region rendered internal
+        // water surfaces, shattering a solid water planet into what looked
+        // like uniform "air pockets" around the core. HEIGHT SHAPING keeps
+        // the strict frame flags below and resolves cross-frame fluid in
+        // getHeight (full column / pour / drain → FULL, else EMPTY).
         boolean downSameFrame = downFluid.isEmpty() || sameFrame(level, down, downPos);
         boolean upSameFrame = upFluid.isEmpty() || sameFrame(level, down, upPos);
         boolean northSameFrame = northFluid.isEmpty() || sameFrame(level, down, northPos);
         boolean southSameFrame = southFluid.isEmpty() || sameFrame(level, down, southPos);
         boolean westSameFrame = westFluid.isEmpty() || sameFrame(level, down, westPos);
         boolean eastSameFrame = eastFluid.isEmpty() || sameFrame(level, down, eastPos);
-        FluidState downFluidEff = downSameFrame ? downFluid : EMPTY_FLUID;
-        FluidState upFluidEff = upSameFrame ? upFluid : EMPTY_FLUID;
-        FluidState northFluidEff = northSameFrame ? northFluid : EMPTY_FLUID;
-        FluidState southFluidEff = southSameFrame ? southFluid : EMPTY_FLUID;
-        FluidState westFluidEff = westSameFrame ? westFluid : EMPTY_FLUID;
-        FluidState eastFluidEff = eastSameFrame ? eastFluid : EMPTY_FLUID;
+        FluidState downFluidEff = effectiveFluid(level, down, downPos, downFluid);
+        FluidState upFluidEff = effectiveFluid(level, down, upPos, upFluid);
+        FluidState northFluidEff = effectiveFluid(level, down, northPos, northFluid);
+        FluidState southFluidEff = effectiveFluid(level, down, southPos, southFluid);
+        FluidState westFluidEff = effectiveFluid(level, down, westPos, westFluid);
+        FluidState eastFluidEff = effectiveFluid(level, down, eastPos, eastFluid);
 
         boolean renderUp = !isNeighborSameFluid(fluidState, upFluidEff);
         boolean renderDown =
@@ -440,19 +446,45 @@ public final class GravityLiquidRenderer {
 
     /**
      * CULLING mask: a neighbor's fluid as this cell's cull decisions may see
-     * it. Cross-frame fluid renders on different axes and never actually
-     * covers a face it would cull here, so it is masked to empty — it never
-     * merges and never culls our faces. Same-frame (and empty) fluid passes
+     * it. Cross-frame fluid renders on different axes and usually never
+     * covers a face it would cull here, so it is masked to empty — with ONE
+     * exception: a neighbor that renders as a FULL COLUMN in its own frame
+     * ({@link #rendersFullColumn}) fills its entire cell, so it genuinely
+     * covers the shared face whatever its frame, and passes through. Deep
+     * inside a flooded region every cell is a full column, so internal
+     * sector boundaries stop rendering entirely (the "water planet
+     * shattered into air pockets" fix). Same-frame (and empty) fluid passes
      * through untouched, keeping all-same-frame output identical to the
      * unisolated port. Used per ring cell by
-     * {@link #shouldRenderBackwardUpFace}; the six face neighbors get the
-     * same masking inline in {@code tesselate} from the cached frame flags.
-     * Height shaping deliberately does NOT use this — see the class doc.
+     * {@link #shouldRenderBackwardUpFace} and for the six face neighbors in
+     * {@code tesselate}. Height shaping resolves cross-frame fluid in
+     * {@link #getHeight} instead.
      */
     private static FluidState effectiveFluid(
-        BlockGetter level, Direction cellDown, BlockPos neighborPos, FluidState actual
+        BlockAndTintGetter level, Direction cellDown, BlockPos neighborPos, FluidState actual
     ) {
-        return actual.isEmpty() || sameFrame(level, cellDown, neighborPos) ? actual : EMPTY_FLUID;
+        return actual.isEmpty() || sameFrame(level, cellDown, neighborPos)
+            || rendersFullColumn(level, neighborPos, actual) ? actual : EMPTY_FLUID;
+    }
+
+    /**
+     * Whether the fluid at {@code pos} renders with ownHeight 1.0 in its
+     * own frame — mirrors tesselate's upColumn rule exactly: same-type
+     * fluid at its frame-up, same-frame or on a perpendicular down axis
+     * (through-fall). Such a cell's geometry spans its full cube, so it
+     * covers every face of its cell.
+     */
+    private static boolean rendersFullColumn(
+        BlockAndTintGetter level, BlockPos pos, FluidState fluidState
+    ) {
+        Direction down = GravityFieldLookup.fluidDownAt(level, pos);
+        BlockPos upPos = pos.relative(down.getOpposite());
+        FluidState upFluid = level.getFluidState(upPos);
+        if (!fluidState.getType().isSame(upFluid.getType())) {
+            return false;
+        }
+        Direction upDown = GravityFieldLookup.fluidDownAt(level, upPos);
+        return upDown == down || upDown.getAxis() != down.getAxis();
     }
 
     /**
@@ -627,13 +659,16 @@ public final class GravityLiquidRenderer {
     ) {
         if (fluid.isSame(fluidState.getType())) {
             if (!posSameFrame) {
-                // cross-frame fluid: its level lives on another axis. Where
-                // it POURS toward this cell as a column (incoming stream)
-                // or DRAINS this cell's flow onward (outgoing column) it
-                // reads FULL, so the surface ramps to meet the crossing;
-                // everywhere else it shapes as passable air — the
+                // cross-frame fluid: its level lives on another axis. It
+                // reads FULL when it is a full column in its own frame
+                // (fills its whole cell — the flooded interior), where it
+                // POURS toward this cell as a column (incoming stream), or
+                // where it DRAINS this cell's flow onward (outgoing
+                // column) — the surface ramps to meet the crossing.
+                // Everywhere else it shapes as passable air — the
                 // bulge-free cliff edge at side-by-side sector boundaries.
-                return poursToward(level, pos, fluidState, cellPos)
+                return rendersFullColumn(level, pos, fluidState)
+                    || poursToward(level, pos, fluidState, cellPos)
                     || drainsFrom(level, pos, cellPos) ? 1.0F : 0.0F;
             }
             // frame-aware above-check: a SAME-frame column counts full — or

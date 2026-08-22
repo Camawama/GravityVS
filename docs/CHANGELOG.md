@@ -1,5 +1,39 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 58: the solid planet — screenshots round)
+
+- **The "air pockets" shattering a solid water planet were mostly NOT
+  air** — they were phantom internal water surfaces: the renderer's
+  cross-frame culling isolation treated the other sector's water as
+  empty, so every sector boundary deep inside the flooded cube rendered
+  internal faces, in the uniform core-surrounding pattern the
+  screenshots show. FIX: a neighbor that renders as a FULL COLUMN in
+  its own frame fills its entire cell, so it genuinely covers the
+  shared face whatever its frame — such neighbors now pass through the
+  culling mask (and read full in height shaping). Deep inside a water
+  planet every cell is a full column, so internal sector boundaries
+  stop rendering entirely; near the real surface, partial cells keep
+  the isolation.
+- **fluidsim caught a round-57 physics regression the screenshots also
+  show (the jagged single-source blob)**: deferring over ALL cross-frame
+  water killed the corner wrap's continuation — the wrap cell sits over
+  the previous face's water film and must keep spreading onto the next
+  face; with it deferred, coverage died past the first face (cube faces
+  0/9, the bare-core 26-cell shell down to 18 lopsided cells). FIX: the
+  defer now distinguishes OPEN water (air/water-backed — a stream, the
+  flooded interior: COMBINE, no sheet) from a SOLID-BACKED surface film
+  (the wrap continuation: keep spreading) — the same solid-backing
+  criterion the side-entry feed already uses. Full suite green,
+  including the round-57 no-sheet scenario.
+- **fluidsim brought up to date and extended** (it had drifted to
+  round-52 rules): round-57 combine gate and in-field source conversion
+  ported in; new regression scenarios for the diagonal-source sheet
+  (bounded) and the punched water planet (all pockets fill AND convert
+  to sources); the drain invariant now strips CONVERTED sources too, so
+  "no source-free water sustains itself" stays proven under conversion.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-21 (round 57: water planets combine)
 
 - **Streams now COMBINE with cross-frame water instead of sheeting over
