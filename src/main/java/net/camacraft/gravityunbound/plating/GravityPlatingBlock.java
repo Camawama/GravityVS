@@ -59,15 +59,18 @@ public class GravityPlatingBlock extends BaseEntityBlock
     public static final BooleanProperty UP = BlockStateProperties.UP;
     public static final BooleanProperty DOWN = BlockStateProperties.DOWN;
     // Plates are thin panels sharing their cell with fluid, and the plate
-    // cells are exactly where face-hugging water lives — so unlike vanilla
+    // cells are exactly where face-hugging fluid lives — so unlike vanilla
     // waterlogging (source-only boolean), plating stores the FULL fluid
     // level: 0 = dry, 1-7 flowing, 8 = source (or full falling when
-    // WATER_FALLING). FlowingFluid's tick updates these through the
-    // container-preservation hook in FlowingFluidMixin instead of replacing
-    // the plate.
+    // WATER_FALLING). The LAVA flag retypes the stored fluid to lava
+    // ("lava-logging"); the property names keep their water_ prefix for
+    // save compatibility with worlds from before lava support.
+    // FlowingFluid's tick updates these through the container-preservation
+    // hook in FlowingFluidMixin instead of replacing the plate.
     public static final net.minecraft.world.level.block.state.properties.IntegerProperty WATER_LEVEL =
         net.minecraft.world.level.block.state.properties.IntegerProperty.create("water_level", 0, 8);
     public static final BooleanProperty WATER_FALLING = BooleanProperty.create("water_falling");
+    public static final BooleanProperty LAVA = BooleanProperty.create("lava");
     
     protected static final VoxelShape DOWN_SHAPE = Block.box(0.0, 0.0, 0.0, 16.0, 1.0, 16.0);
     protected static final VoxelShape UP_SHAPE = Block.box(0.0, 15.0, 0.0, 16.0, 16.0, 16.0);
@@ -78,7 +81,9 @@ public class GravityPlatingBlock extends BaseEntityBlock
     private final Map<BlockState, VoxelShape> shapesByState;
     
     public GravityPlatingBlock() {
-        super(BlockBehaviour.Properties.of().noOcclusion().noCollission().instabreak().explosionResistance(3600000.0f));
+        super(BlockBehaviour.Properties.of().noOcclusion().noCollission().instabreak().explosionResistance(3600000.0f)
+            // lava-logged plates glow like lava (per-state emission)
+            .lightLevel(state -> state.getValue(WATER_LEVEL) > 0 && state.getValue(LAVA) ? 15 : 0));
         registerDefaultState(getStateDefinition().any()
             .setValue(NORTH, false)
             .setValue(EAST, false)
@@ -88,6 +93,7 @@ public class GravityPlatingBlock extends BaseEntityBlock
             .setValue(DOWN, false)
             .setValue(WATER_LEVEL, 0)
             .setValue(WATER_FALLING, false)
+            .setValue(LAVA, false)
         );
         this.shapesByState =
             ImmutableMap.copyOf(
@@ -131,46 +137,59 @@ public class GravityPlatingBlock extends BaseEntityBlock
     
     @Override
     protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> stateManager) {
-        stateManager.add(UP, DOWN, NORTH, SOUTH, EAST, WEST, WATER_LEVEL, WATER_FALLING);
+        stateManager.add(UP, DOWN, NORTH, SOUTH, EAST, WEST, WATER_LEVEL, WATER_FALLING, LAVA);
     }
-    
+
     @Override
     public net.minecraft.world.level.material.FluidState getFluidState(BlockState state) {
-        int waterLevel = state.getValue(WATER_LEVEL);
-        if (waterLevel == 0) {
+        int fluidLevel = state.getValue(WATER_LEVEL);
+        if (fluidLevel == 0) {
             return super.getFluidState(state);
         }
         boolean falling = state.getValue(WATER_FALLING);
-        if (waterLevel == 8 && !falling) {
-            return net.minecraft.world.level.material.Fluids.WATER.getSource(false);
+        net.minecraft.world.level.material.FlowingFluid type = state.getValue(LAVA)
+            ? net.minecraft.world.level.material.Fluids.LAVA
+            : net.minecraft.world.level.material.Fluids.WATER;
+        if (fluidLevel == 8 && !falling) {
+            return type.getSource(false);
         }
-        return net.minecraft.world.level.material.Fluids.WATER.getFlowing(waterLevel, falling);
+        return type.getFlowing(fluidLevel, falling);
     }
 
-    /** Encodes a fluid state into the plate's water properties. */
+    /** Encodes a water or lava fluid state into the plate's fluid properties. */
     public static BlockState withFluid(BlockState state, net.minecraft.world.level.material.FluidState fluid) {
-        if (fluid.isEmpty() || !fluid.getType().isSame(net.minecraft.world.level.material.Fluids.WATER)) {
-            return state.setValue(WATER_LEVEL, 0).setValue(WATER_FALLING, false);
+        boolean lava = !fluid.isEmpty()
+            && fluid.getType().isSame(net.minecraft.world.level.material.Fluids.LAVA);
+        if (!lava && (fluid.isEmpty()
+            || !fluid.getType().isSame(net.minecraft.world.level.material.Fluids.WATER))) {
+            return state.setValue(WATER_LEVEL, 0).setValue(WATER_FALLING, false).setValue(LAVA, false);
         }
         int amount = fluid.isSource() ? 8 : fluid.getAmount();
         boolean falling = !fluid.isSource()
             && fluid.getValue(net.minecraft.world.level.material.FlowingFluid.FALLING);
-        return state.setValue(WATER_LEVEL, amount).setValue(WATER_FALLING, falling);
+        return state.setValue(WATER_LEVEL, amount).setValue(WATER_FALLING, falling).setValue(LAVA, lava);
     }
 
     @Override
     public boolean canPlaceLiquid(BlockGetter level, BlockPos pos, BlockState state,
                                   net.minecraft.world.level.material.Fluid fluid) {
-        // water in any form — SOURCE OR FLOWING: face-hugging flow must be
-        // able to pass through plate cells (vanilla waterlogging is
-        // source-only, which walled the whole face off from flowing water)
-        return fluid.isSame(net.minecraft.world.level.material.Fluids.WATER);
+        // water OR lava, SOURCE OR FLOWING: face-hugging flow must be able
+        // to pass through plate cells (vanilla waterlogging is water-source-
+        // only, which walled the whole face off from flowing fluid). Never a
+        // silent swap though: a plate already holding one fluid rejects the
+        // other — the two don't mix inside a plate cell, the stored fluid
+        // must drain (or be picked up) before the other can enter.
+        boolean lava = fluid.isSame(net.minecraft.world.level.material.Fluids.LAVA);
+        if (!lava && !fluid.isSame(net.minecraft.world.level.material.Fluids.WATER)) {
+            return false;
+        }
+        return state.getValue(WATER_LEVEL) == 0 || state.getValue(LAVA) == lava;
     }
 
     @Override
     public boolean placeLiquid(LevelAccessor level, BlockPos pos, BlockState state,
                                net.minecraft.world.level.material.FluidState fluid) {
-        if (!fluid.getType().isSame(net.minecraft.world.level.material.Fluids.WATER)) {
+        if (!canPlaceLiquid(level, pos, state, fluid.getType())) {
             return false;
         }
         BlockState updated = withFluid(state, fluid);
@@ -192,8 +211,12 @@ public class GravityPlatingBlock extends BaseEntityBlock
     public ItemStack pickupBlock(LevelAccessor level, BlockPos pos, BlockState state) {
         // buckets pick up sources only, like vanilla
         if (state.getValue(WATER_LEVEL) == 8 && !state.getValue(WATER_FALLING)) {
-            level.setBlock(pos, state.setValue(WATER_LEVEL, 0).setValue(WATER_FALLING, false), 3);
-            return new ItemStack(net.minecraft.world.item.Items.WATER_BUCKET);
+            boolean lava = state.getValue(LAVA);
+            level.setBlock(pos, state.setValue(WATER_LEVEL, 0)
+                .setValue(WATER_FALLING, false).setValue(LAVA, false), 3);
+            return new ItemStack(lava
+                ? net.minecraft.world.item.Items.LAVA_BUCKET
+                : net.minecraft.world.item.Items.WATER_BUCKET);
         }
         return ItemStack.EMPTY;
     }
@@ -201,6 +224,15 @@ public class GravityPlatingBlock extends BaseEntityBlock
     @Override
     public java.util.Optional<net.minecraft.sounds.SoundEvent> getPickupSound() {
         return net.minecraft.world.level.material.Fluids.WATER.getPickupSound();
+    }
+
+    // Forge's state-aware overload — the one BucketItem actually calls —
+    // so scooping lava out of a plate fizzes like lava, not water
+    @Override
+    public java.util.Optional<net.minecraft.sounds.SoundEvent> getPickupSound(BlockState state) {
+        return (state.getValue(LAVA)
+            ? net.minecraft.world.level.material.Fluids.LAVA
+            : net.minecraft.world.level.material.Fluids.WATER).getPickupSound();
     }
 
     @Override

@@ -1,5 +1,29 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-21 (round 55: lava-logging)
+
+- **Gravity plating can now hold LAVA** the same way it holds water —
+  source or flowing, full level range, following the plate's gravity.
+  A new LAVA blockstate flag retypes the stored fluid; the existing
+  water_level/water_falling properties are reused unchanged, so old
+  worlds load intact (their plates simply read as water). All the
+  fluid machinery was already fluid-agnostic (the FlowingFluid mixins,
+  the container-preservation hook, the rotated renderer, the
+  pour/through-fall seam shaping) — the plate's encode/decode was the
+  only water-only gate.
+- Details: lava-logged plates emit light 15 like real lava, burn
+  entities, and fire-spread via the fluid's own random tick; lava
+  buckets fill and empty against plate cells (with the lava pickup
+  fizz); placing a plate into standing lava lava-logs it.
+- **Deliberate limit — no mixing inside a plate cell**: a plate holding
+  one fluid rejects the other outright (water flowing at a lava-logged
+  plate just stops, and vice versa). There is no block space for the
+  obsidian/cobble a real interaction would mint, and silently swapping
+  fluids would be worse; the stored fluid must drain or be bucketed
+  before the other can enter.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-21 (round 54: the through-fall seam)
 
 - **Water dropping out the back of a field connects too.** Round 53's
