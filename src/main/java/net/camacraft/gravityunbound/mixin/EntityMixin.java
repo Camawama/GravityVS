@@ -474,6 +474,36 @@ public abstract class EntityMixin {
         cir.setReturnValue(RotationUtil.vecPlayerToWorld(cir.getReturnValue(), comp.getVisualRotation()));
     }
 
+    /**
+     * RENDER-TIME VIEW VECTOR. calculateViewVector above applies the TICK
+     * frame — right for gameplay. But the crosshair pick runs every frame
+     * with a partial tick, from an eye position that follows the RENDER
+     * frame (getEyePosition(pt) below) and, on a Valkyrien Skies ship,
+     * against blocks VS raycasts at the ship's DRAWN pose. A direction one
+     * tick behind the eye and the deck sent the ray to a neighboring block
+     * that shifted every tick: the block outline hopping between blocks on
+     * a spinning ship, worse the faster it spun. Re-express the direction
+     * through the render frame for sub-tick queries; whole-tick queries
+     * (pt = 1, gameplay raycasts shared with the server) keep the tick
+     * frame so both sides still agree.
+     */
+    @Inject(
+        method = "Lnet/minecraft/world/entity/Entity;getViewVector(F)Lnet/minecraft/world/phys/Vec3;",
+        at = @At("RETURN"),
+        cancellable = true
+    )
+    private void gravityunbound$renderViewVector(float tickDelta, CallbackInfoReturnable<Vec3> cir) {
+        if (tickDelta >= 1.0F || !this.level.isClientSide()) {
+            return;
+        }
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull((Entity) (Object) this);
+        if (comp == null || comp.isRenderDefault()) {
+            return;
+        }
+        Vec3 local = RotationUtil.vecWorldToPlayer(cir.getReturnValue(), comp.getVisualRotation());
+        cir.setReturnValue(RotationUtil.vecPlayerToWorld(local, comp.getRenderRotation(tickDelta)));
+    }
+
     @Inject(
         method = "Lnet/minecraft/world/entity/Entity;getBlockPosBelowThatAffectsMyMovement()Lnet/minecraft/core/BlockPos;",
         at = @At("HEAD"),

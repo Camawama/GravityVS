@@ -206,9 +206,15 @@ public final class CapsuleCollider {
         double[] offsets = sphereOffsets(effectiveHeight, radius);
         List<Obstacle> obstacles = gatherObstacles(entity.level(), feetPos, Vec3.ZERO, up, radius, effectiveHeight);
 
-        // small tolerance mirrors vanilla's deflate — resting contact
-        // (separated by the collision SKIN) must not count as penetration
-        double r = radius - 1.0E-3;
+        // tolerance = the collider's own resting tolerance: depenetration in
+        // collide() is depth-gated at 0.02, so a capsule may legitimately
+        // rest up to that deep in a face (network-lumpy ship carries, the
+        // idle anchor's residual, frame carries on a spinning ship). A pose
+        // test stricter than that read such rests as "does not fit" and
+        // vanilla dropped the player into the crawl pose for a tick — the
+        // "randomly pushed into prone" flicker on rotating ships. Mirrors
+        // vanilla's own deflate as well.
+        double r = radius - 0.02 - 1.0E-3;
 
         for (double offset : offsets) {
             Vec3 center = feetPos.add(up.scale(offset));

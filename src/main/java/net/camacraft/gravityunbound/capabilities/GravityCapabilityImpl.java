@@ -217,20 +217,41 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private long artificialPullTick = Long.MIN_VALUE;
 
     // SURFACE CLING (enchantment.SurfaceClingEnchantment) state kept on the
-    // entity: the last cling direction (world space, plus its ship-space
-    // image when the surface belonged to a ship) so a wearer keeps being
-    // pulled toward the surface they left while airborne, and the target the
-    // controlling client reported to the server (the server mirrors it
-    // instead of guessing from input it cannot see)
-    public @Nullable Vec3 clingMemoryDown = null;
-    public @Nullable org.valkyrienskies.core.api.ships.Ship clingMemoryShip = null;
-    public @Nullable Vec3 clingMemoryLocalDown = null;
+    // entity: the let-go timer after a jump, the target the controlling
+    // client reported to the server (the server mirrors it instead of
+    // guessing from input it cannot see), and the last report sent
+    public int clingReleaseTicks = 0;
+    public boolean clingReportedActive = false;
+    public boolean clingReportedReleased = false;
     public @Nullable Vec3 clingReportedDown = null;
     public long clingReportedShipId = -1L;
     public @Nullable Vec3 clingReportedLocalDown = null;
     public int clingReportedAge = Integer.MAX_VALUE;
+    public boolean clingLastSentActive = false;
     public @Nullable Vec3 clingLastSentDown = null;
     public long clingLastSentShipId = -1L;
+
+    /**
+     * LET GO of the current field right now: no lingering grace pull, no
+     * held surface. Used when Surface Cling releases on a jump — the
+     * 6-tick grace exists so plate fields keep pulling through a jump, but
+     * a wearer jumping off a wall must simply fall (or float, in zero-g).
+     * Declined while a PRIMARY block field is pending this tick: an
+     * engineered field owns the entity and keeps its own grace.
+     */
+    public void releaseFieldGraceNow() {
+        for (GravityDirEffect pending : delayApplyDirEffects) {
+            if (!pending.secondary()) {
+                return;
+            }
+        }
+        fieldGraceTicks = 0;
+        lastFieldVector = null;
+    }
+
+    /** A surface probe hit: the face normal (world space) and the ship it belongs to, if any. */
+    public record SurfaceHit(Vec3 normal, @Nullable org.valkyrienskies.core.api.ships.Ship ship, net.minecraft.core.BlockPos pos) {
+    }
 
     /** See {@code GravityPlatingBlockEntity.gravityunbound$applyArtificialGravityForce}. */
     public boolean tryClaimArtificialPull(long gameTime) {
@@ -1372,6 +1393,12 @@ public class GravityCapabilityImpl implements IGravityCapability {
      * coordinates; the face normal is transformed back), or null on a miss.
      */
     public @Nullable Vec3 probeSurfaceNormal(Vec3 from, Vec3 direction, double distance) {
+        SurfaceHit hit = probeSurface(from, direction, distance);
+        return hit != null ? hit.normal() : null;
+    }
+
+    /** {@link #probeSurfaceNormal} with the hit's ship and block position. */
+    public @Nullable SurfaceHit probeSurface(Vec3 from, Vec3 direction, double distance) {
         net.minecraft.world.phys.BlockHitResult hit = entity.level().clip(new net.minecraft.world.level.ClipContext(
             from,
             from.add(direction.scale(distance)),
@@ -1392,7 +1419,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             n.normalize();
             normal = new Vec3(n.x, n.y, n.z);
         }
-        return normal;
+        return new SurfaceHit(normal, ship, hit.getBlockPos());
     }
 
     /**

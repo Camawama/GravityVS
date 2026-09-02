@@ -2,9 +2,11 @@ package net.camacraft.gravityunbound.mixin.compat;
 
 import net.camacraft.gravityunbound.api.GravityChangerAPI;
 import net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl;
+import org.objectweb.asm.Opcodes;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import org.valkyrienskies.core.api.ships.Ship;
 import org.valkyrienskies.mod.common.util.EntityDragger;
@@ -12,8 +14,10 @@ import org.valkyrienskies.mod.common.util.EntityDragger;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
@@ -89,6 +93,56 @@ public abstract class VSEntityDraggerMixin {
     )
     private void gravityunbound$projectDragHeadYaw(Entity entity, float newYaw, Operation<Void> original) {
         original.call(entity, gravityunbound$projectYaw(entity, entity.getYHeadRot(), newYaw));
+    }
+
+    /**
+     * VS writes the BODY yaw as a direct field store (no setter to wrap),
+     * for living entities and again for server players. Left unprojected,
+     * an attached rider's body received the ship's world yaw on top of the
+     * frame's own twist-to-yaw compensation every tick — the head (whose
+     * setter IS wrapped) stayed put while the torso and legs slowly spun
+     * round in third person. Same projection as the yaw setters.
+     */
+    @Redirect(
+        method = "dragEntitiesWithShips",
+        at = @At(
+            value = "FIELD",
+            target = "Lnet/minecraft/world/entity/LivingEntity;yBodyRot:F",
+            opcode = Opcodes.PUTFIELD,
+            remap = true
+        ),
+        remap = false
+    )
+    private void gravityunbound$projectDragBodyYaw(LivingEntity living, float newBodyYaw) {
+        living.yBodyRot = gravityunbound$projectYaw(living, living.yBodyRot, newBodyYaw);
+    }
+
+    @Redirect(
+        method = "dragEntitiesWithShips",
+        at = @At(
+            value = "FIELD",
+            target = "Lnet/minecraft/server/level/ServerPlayer;yBodyRot:F",
+            opcode = Opcodes.PUTFIELD,
+            remap = true
+        ),
+        remap = false
+    )
+    private void gravityunbound$projectDragServerBodyYaw(ServerPlayer player, float newBodyYaw) {
+        player.yBodyRot = gravityunbound$projectYaw(player, player.yBodyRot, newBodyYaw);
+    }
+
+    @Redirect(
+        method = "dragEntitiesWithShips",
+        at = @At(
+            value = "FIELD",
+            target = "Lnet/minecraft/server/level/ServerPlayer;yHeadRot:F",
+            opcode = Opcodes.PUTFIELD,
+            remap = true
+        ),
+        remap = false
+    )
+    private void gravityunbound$projectDragServerHeadYaw(ServerPlayer player, float newHeadYaw) {
+        player.yHeadRot = gravityunbound$projectYaw(player, player.yHeadRot, newHeadYaw);
     }
 
     private static float gravityunbound$projectYaw(Entity entity, float currentYaw, float newYaw) {

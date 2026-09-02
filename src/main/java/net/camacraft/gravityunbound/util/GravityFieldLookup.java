@@ -280,17 +280,34 @@ public final class GravityFieldLookup {
 
     private static final ThreadLocal<QueryCache> QUERY_CACHE = ThreadLocal.withInitial(QueryCache::new);
 
+    /**
+     * The field down for a PARTICLE at {@code pos} — the particle's OWN grid
+     * (shipyard coordinates for particles living on a ship, so a ship's
+     * fields answer in the ship's frame) — or null outside every field or
+     * when the feature is disabled.
+     */
+    @Nullable
+    public static Direction particleDownAt(@Nullable BlockGetter getter, BlockPos pos) {
+        Best best = bestFieldAt(getter, pos, GravityConfig.gravityAffectsParticles.get());
+        return best != null ? best.down() : null;
+    }
+
     @Nullable
     private static Best bestFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
+        return bestFieldAt(getter, pos, GravityConfig.gravityAffectsFluids.get());
+    }
+
+    @Nullable
+    private static Best bestFieldAt(@Nullable BlockGetter getter, BlockPos pos, boolean enabled) {
+        if (!enabled) {
+            return null;
+        }
         Level level = resolveLevel(getter);
         if (level == null) {
             return null;
         }
         LevelIndex index = SOURCES.get(level);
         if (index == null || index.byPos.isEmpty()) {
-            return null;
-        }
-        if (!GravityConfig.gravityAffectsFluids.get()) {
             return null;
         }
 

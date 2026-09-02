@@ -12,26 +12,33 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.NetworkEvent;
 
 /**
- * C2S: the controlling client's current Surface Cling target (see
- * {@code enchantment.SurfaceClingEnchantment}). The endorsement of the next
- * face depends on movement input the server cannot see, so the server
- * mirrors the client's direction instead of estimating its own — the two
- * sides then agree about the wearer's gravity at every step of a wall
- * climb. For a surface on a Valkyrien Skies ship the direction travels in
- * the ship's own coordinates, so it stays valid while the ship rotates.
+ * C2S: the controlling client's current Surface Cling state (see
+ * {@code enchantment.SurfaceClingEnchantment}). Finding and endorsing faces
+ * depends on movement input the server cannot see, and letting go depends
+ * on the jump the client performs, so the server mirrors the client's state
+ * instead of estimating its own — the two sides then agree about the
+ * wearer's gravity at every step. For a surface on a Valkyrien Skies ship
+ * the direction travels in the ship's own coordinates, so it stays valid
+ * while the ship rotates. Sent only when the state changes.
  */
 public class SurfaceClingTargetPacket {
+    private final boolean active;
+    private final boolean released;
     private final Vec3 down;
     private final long shipId;
     private final @Nullable Vec3 localDown;
 
-    public SurfaceClingTargetPacket(Vec3 down, long shipId, @Nullable Vec3 localDown) {
+    public SurfaceClingTargetPacket(boolean active, boolean released, Vec3 down, long shipId, @Nullable Vec3 localDown) {
+        this.active = active;
+        this.released = released;
         this.down = down;
         this.shipId = shipId;
         this.localDown = localDown;
     }
 
     public SurfaceClingTargetPacket(FriendlyByteBuf buf) {
+        this.active = buf.readBoolean();
+        this.released = buf.readBoolean();
         this.down = new Vec3(buf.readDouble(), buf.readDouble(), buf.readDouble());
         this.shipId = buf.readLong();
         if (buf.readBoolean()) {
@@ -43,6 +50,8 @@ public class SurfaceClingTargetPacket {
     }
 
     public static void encode(SurfaceClingTargetPacket msg, FriendlyByteBuf buf) {
+        buf.writeBoolean(msg.active);
+        buf.writeBoolean(msg.released);
         buf.writeDouble(msg.down.x);
         buf.writeDouble(msg.down.y);
         buf.writeDouble(msg.down.z);
@@ -68,7 +77,7 @@ public class SurfaceClingTargetPacket {
         public static void onMessage(SurfaceClingTargetPacket msg, Supplier<NetworkEvent.Context> ctx) {
             ctx.get().enqueueWork(() -> {
                 ServerPlayer sender = ctx.get().getSender();
-                if (sender == null || !isUnit(msg.down)) {
+                if (sender == null) {
                     return;
                 }
                 GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(sender);
@@ -78,9 +87,12 @@ public class SurfaceClingTargetPacket {
                 // untrusted input: only unit-ish directions are accepted;
                 // the direction itself is the player's own gravity, nothing
                 // a client could not already choose by walking
-                comp.clingReportedDown = msg.down.normalize();
-                comp.clingReportedShipId = msg.shipId;
-                comp.clingReportedLocalDown = isUnit(msg.localDown) ? msg.localDown.normalize() : null;
+                boolean active = msg.active && isUnit(msg.down);
+                comp.clingReportedActive = active;
+                comp.clingReportedReleased = comp.clingReportedReleased || msg.released;
+                comp.clingReportedDown = active ? msg.down.normalize() : null;
+                comp.clingReportedShipId = active ? msg.shipId : -1L;
+                comp.clingReportedLocalDown = active && isUnit(msg.localDown) ? msg.localDown.normalize() : null;
                 comp.clingReportedAge = 0;
             });
             ctx.get().setPacketHandled(true);

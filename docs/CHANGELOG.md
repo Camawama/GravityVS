@@ -1,5 +1,49 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-09-02 (round 78: cling lets go, the crosshair, the crawl flicker, the body, particles)
+
+- **Surface Cling no longer pulls in zero-g and lets go on a jump.** The
+  boots used to seed a pull toward "whatever down currently is" before any
+  surface was held, and an active field owns gravity — so in the Great
+  Unknown the wearer simply fell. Now the boots only act when a surface is
+  actually in reach: the face underfoot (probed), a face the wearer pushes
+  into, or the face around a walked-off edge. Free of every surface they
+  do nothing: ambient gravity applies and a zero-g dimension stays zero-g.
+  Jumping off a held face releases on the spot — the field's grace
+  pull-back is dropped (unless an engineered field owns the entity), the
+  boots stay off for half a second so nothing re-clings mid-leap, and the
+  next touch clings again. The client reports active/inactive/released
+  state to the server, which mirrors it.
+- **The block outline no longer hops between blocks on a spinning ship.**
+  The crosshair pick runs every frame with a partial tick: its eye
+  position followed the RENDER frame, and Valkyrien Skies raycasts ship
+  blocks at the ship's drawn pose — but the view DIRECTION still came from
+  the tick frame, one tick behind. The direction is now re-expressed
+  through the render frame for sub-tick queries; whole-tick gameplay
+  raycasts (shared with the server) keep the tick frame.
+- **No more split-second crawl pose on rotating ships.** The capsule's
+  pose-fit test counted any overlap over a millimeter as "does not fit",
+  while the collider itself lets a resting capsule sit up to 0.02 deep
+  before pushing it out (residuals of the idle anchor, the frame carry and
+  the network-lumpy ship carry) — vanilla then dropped the player into the
+  swimming pose for a tick. The fit test now uses the collider's own
+  resting tolerance.
+- **The body no longer spins under a still head in third person.** VS's
+  dragger writes riders' body yaw as a direct field store, which the yaw
+  setter wraps never saw; an attached rider's torso received the ship's
+  world yaw on top of the frame's own twist compensation every tick. The
+  body-yaw stores (living entities and server players) are now projected
+  like the yaw setters.
+- **Particles fall with gravity fields.** Vanilla accelerates every
+  particle straight down; inside a field the acceleration is re-aimed
+  along the field's down at the particle's position — in the particle's
+  own grid, so particles on a ship follow the ship's fields. Particle
+  types that replace the base tick with their own physics (drips, water
+  splashes, smoke) keep vanilla behavior. New config
+  `gravityAffectsParticles` (default on).
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-09-02 (round 77: hands, bodies, doorways and Surface Cling)
 
 - **The first-person hand no longer sways or snaps on a rotating ship.**

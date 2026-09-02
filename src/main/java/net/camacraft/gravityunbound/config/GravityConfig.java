@@ -26,6 +26,7 @@ public class GravityConfig
 	// plating / fields
 	public static ForgeConfigSpec.IntValue platingMaxLevel;
 	public static ForgeConfigSpec.BooleanValue gravityAffectsFluids;
+	public static ForgeConfigSpec.BooleanValue gravityAffectsParticles;
 	public static ForgeConfigSpec.ConfigValue<List<? extends String>> artificialGravityDimensions;
 	public static ForgeConfigSpec.DoubleValue artificialGravityAcceleration;
 	public static ForgeConfigSpec.ConfigValue<List<? extends String>> dimensionGravity;
@@ -63,6 +64,7 @@ public class GravityConfig
         config.push("Gravity Fields");
         GravityConfig.platingMaxLevel = config.comment("maximum upgrade level (field range) of gravity plating").defineInRange("platingMaxLevel", 64, 1, 256);
         GravityConfig.gravityAffectsFluids = config.comment("liquids inside gravity fields flow along the field's down direction").define("gravityAffectsFluids", true);
+        GravityConfig.gravityAffectsParticles = config.comment("particles inside gravity fields fall along the field's down direction").define("gravityAffectsParticles", true);
         GravityConfig.artificialGravityDimensions = config
             .comment("dimensions where gravity fields also apply an accelerating force (zero-g dimensions)")
             .defineListAllowEmpty(List.of("artificialGravityDimensions"), () -> List.of(

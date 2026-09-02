@@ -22,11 +22,14 @@ import net.minecraft.world.phys.Vec3;
 /**
  * SURFACE CLING — an API showcase enchantment for boots.
  *
- * A wearer clings to whatever block surface they stand on: gravity is pulled
+ * A wearer clings to whatever block surface they touch: gravity is pulled
  * toward that face, so they can walk up walls, across ceilings and around
  * the outside of any structure — Valkyrien Skies ships included, moving or
  * spinning, because the effect is anchored to the ship the surface belongs
- * to exactly like a ship-mounted gravity plate.
+ * to exactly like a ship-mounted gravity plate. With NO surface in reach
+ * the boots do nothing: ambient gravity applies, and a zero-g dimension
+ * stays zero-g. Jumping lets go — the wearer leaves the surface under
+ * ambient gravity (or floats away) and clings again on the next touch.
  *
  * Everything here goes through the public Gravity Unbound API:
  * <ul>
@@ -38,20 +41,25 @@ import net.minecraft.world.phys.Vec3;
  * <li>{@link GravityCapabilityImpl#getHeldSurfaceNormal()} /
  *     {@link GravityCapabilityImpl#getHeldSurfaceShip()} — the surface the
  *     mod's own ground probe currently holds for the entity.</li>
- * <li>{@link GravityCapabilityImpl#probeSurfaceNormal} and
+ * <li>{@link GravityCapabilityImpl#probeSurface} and
  *     {@link GravityCapabilityImpl#getInputTangentDirection} — short
- *     raycasts and the player's movement intent, used to ENDORSE the next
- *     face: a wall the wearer pushes into, or the face just around a walked
- *     -off edge. The mod's surface machinery adopts a face only when the
- *     field endorses it, so blending that face into the effect is exactly
- *     how a plate field lets players walk around a cube's edges.</li>
+ *     raycasts and the player's movement intent, used to find the surface
+ *     underfoot and to ENDORSE the next face: a wall the wearer pushes
+ *     into, or the face just around a walked-off edge. The mod's surface
+ *     machinery adopts a face only when the field endorses it, so blending
+ *     that face into the effect is exactly how a plate field lets players
+ *     walk around a cube's edges.</li>
+ * <li>{@link GravityCapabilityImpl#releaseFieldGraceNow()} — the jump
+ *     release: fields normally keep pulling through a jump's grace window;
+ *     a wearer letting go must simply fall.</li>
  * </ul>
  *
- * Endorsement needs the player's INPUT, which only the controlling client
- * sees; the client therefore reports its cling target to the server
- * ({@link SurfaceClingTargetPacket}) and the server mirrors it, so both
- * sides agree about the wearer's gravity at every step. Mobs wearing the
- * boots cling to what they stand on and follow their own velocity.
+ * Endorsement and the jump need the player's INPUT and velocity, which only
+ * the controlling client sees; the client therefore reports its cling state
+ * to the server ({@link SurfaceClingTargetPacket}) and the server mirrors
+ * it, so both sides agree about the wearer's gravity at every step. Mobs
+ * wearing the boots cling to what they stand on and follow their own
+ * velocity.
  */
 public class SurfaceClingEnchantment extends Enchantment {
     /**
@@ -64,6 +72,12 @@ public class SurfaceClingEnchantment extends Enchantment {
     // a client report older than this is ignored and the server falls back
     // to its own (input-less) estimate
     private static final int REPORT_TTL_TICKS = 40;
+    // after a jump, the boots stay off this long (the wearer clears the
+    // surface before anything can re-cling them to it)
+    private static final int RELEASE_TICKS = 10;
+    // outward speed along the held face that counts as a jump (a vanilla
+    // jump leaves ~0.33 after its first tick of gravity)
+    private static final double JUMP_RELEASE_SPEED = 0.25;
 
     public SurfaceClingEnchantment() {
         super(Rarity.RARE, EnchantmentCategory.ARMOR_FEET, new EquipmentSlot[] { EquipmentSlot.FEET });
@@ -97,9 +111,7 @@ public class SurfaceClingEnchantment extends Enchantment {
      */
     public static void applyTo(LivingEntity living, GravityCapabilityImpl comp) {
         if (!isWearing(living)) {
-            comp.clingMemoryDown = null;
-            comp.clingMemoryShip = null;
-            comp.clingMemoryLocalDown = null;
+            comp.clingReleaseTicks = 0;
             return;
         }
         if (living instanceof Player player && (player.getAbilities().flying || player.isSpectator())) {
@@ -114,10 +126,16 @@ public class SurfaceClingEnchantment extends Enchantment {
         Ship ship = null;
         Vec3 localDown = null;
 
-        if (serverSide && living instanceof Player
-            && comp.clingReportedDown != null && comp.clingReportedAge < REPORT_TTL_TICKS) {
-            // MIRROR the controlling client's target
+        if (serverSide && living instanceof Player && comp.clingReportedAge < REPORT_TTL_TICKS) {
+            // MIRROR the controlling client's state
             comp.clingReportedAge++;
+            if (comp.clingReportedReleased) {
+                comp.clingReportedReleased = false;
+                comp.releaseFieldGraceNow();
+            }
+            if (!comp.clingReportedActive || comp.clingReportedDown == null) {
+                return;
+            }
             ship = comp.clingReportedShipId >= 0 ? findShip(living, comp.clingReportedShipId) : null;
             if (ship != null && comp.clingReportedLocalDown != null) {
                 localDown = comp.clingReportedLocalDown;
@@ -129,89 +147,136 @@ public class SurfaceClingEnchantment extends Enchantment {
             }
         }
         else {
-            Vec3 held = comp.getHeldSurfaceNormal();
-            if (held != null) {
-                // cling to the stood-on face...
-                ship = comp.getHeldSurfaceShip();
-                down = held.scale(-1);
+            boolean controlling = !serverSide && living instanceof Player && living.isControlledByLocalInstance();
 
-                // ...and ENDORSE the next one the wearer is heading for
-                Vec3 intent = intentTangent(living, comp, held);
-                if (intent != null) {
-                    double scale = Mth.clamp(living.getBbHeight() / 1.8, 0.05, 1.0);
-                    Vec3 feet = living.position();
-                    // concave: a face the wearer pushes into becomes the new floor
-                    Vec3 wall = comp.probeSurfaceNormal(feet.add(held.scale(0.2 * scale)), intent, 0.6 * scale);
-                    if (wall != null && wall.dot(held) < 0.7 && wall.dot(intent) < -0.5) {
-                        down = down.add(wall.scale(-1));
+            if (comp.clingReleaseTicks > 0) {
+                comp.clingReleaseTicks--;
+                if (controlling) {
+                    report(comp, false, false, null, null, null);
+                }
+                return;
+            }
+
+            double scale = Mth.clamp(living.getBbHeight() / 1.8, 0.05, 1.0);
+            Vec3 feet = living.position();
+            Vec3 held = comp.getHeldSurfaceNormal();
+
+            // JUMPING = LETTING GO. Moving away from the held face at jump
+            // speed drops the field on the spot (no grace pull-back) and
+            // keeps the boots off until the wearer is clear of the surface.
+            if (held != null) {
+                Vec3 worldVelocity = RotationUtil.vecPlayerToWorld(living.getDeltaMovement(), comp.getVisualRotation());
+                if (worldVelocity.dot(held) > JUMP_RELEASE_SPEED * scale) {
+                    comp.clingReleaseTicks = RELEASE_TICKS;
+                    comp.releaseFieldGraceNow();
+                    if (controlling) {
+                        report(comp, false, true, null, null, null);
                     }
-                    // convex: feet past an edge — the face around the corner
-                    else if (comp.probeSurfaceNormal(feet.add(held.scale(0.2 * scale)), held.scale(-1), 0.8 * scale) == null) {
-                        Vec3 wrap = comp.probeSurfaceNormal(feet.subtract(held.scale(0.15 * scale)), intent.scale(-1), 0.75 * scale);
-                        if (wrap != null && wrap.dot(held) < 0.7 && wrap.dot(intent) > 0.1) {
-                            down = down.add(wrap.scale(-1));
+                    return;
+                }
+            }
+
+            Vec3 refUp = held != null ? held : comp.getUpVector();
+            Vec3 sum = Vec3.ZERO;
+
+            // the surface underfoot (the held face, or whatever the feet are
+            // on when nothing is held yet) — nothing there, nothing to cling to
+            GravityCapabilityImpl.SurfaceHit ground =
+                comp.probeSurface(feet.add(refUp.scale(0.2 * scale)), refUp.scale(-1), 0.8 * scale);
+            if (held != null) {
+                sum = held.scale(-1);
+                ship = comp.getHeldSurfaceShip();
+            }
+            else if (ground != null) {
+                sum = ground.normal().scale(-1);
+                ship = ground.ship();
+            }
+
+            // ENDORSE the next face the wearer is heading for
+            Vec3 intent = intentTangent(living, comp, refUp);
+            if (intent != null) {
+                // concave: a face the wearer pushes into becomes the new floor
+                GravityCapabilityImpl.SurfaceHit wall =
+                    comp.probeSurface(feet.add(refUp.scale(0.2 * scale)), intent, 0.6 * scale);
+                if (wall != null && wall.normal().dot(refUp) < 0.7 && wall.normal().dot(intent) < -0.5) {
+                    sum = sum.add(wall.normal().scale(-1));
+                    if (ship == null) {
+                        ship = wall.ship();
+                    }
+                }
+                // convex: feet past an edge — the face around the corner
+                else if (held != null && ground == null) {
+                    GravityCapabilityImpl.SurfaceHit wrap =
+                        comp.probeSurface(feet.subtract(held.scale(0.15 * scale)), intent.scale(-1), 0.75 * scale);
+                    if (wrap != null && wrap.normal().dot(held) < 0.7 && wrap.normal().dot(intent) > 0.1) {
+                        sum = sum.add(wrap.normal().scale(-1));
+                        if (ship == null) {
+                            ship = wrap.ship();
                         }
                     }
                 }
-                down = down.normalize();
             }
-            else if (comp.clingMemoryDown != null) {
-                // airborne with nothing held: keep pulling toward the surface
-                // that was left (jumps land back on it, ships keep carrying)
-                ship = comp.clingMemoryShip;
-                localDown = comp.clingMemoryLocalDown;
-                down = ship != null && localDown != null ? shipToWorld(ship, localDown) : comp.clingMemoryDown;
+
+            if (sum.lengthSqr() < 1.0E-6) {
+                // free of every surface: ambient gravity (zero-g stays zero-g)
+                if (controlling) {
+                    report(comp, false, false, null, null, null);
+                }
+                return;
             }
-            else {
-                // first tick with the boots on: seed with the current pull so
-                // the ground probe engages and finds the floor
-                down = comp.getEffectiveUpVector().scale(-1);
-            }
-            if (ship != null && localDown == null) {
+            down = sum.normalize();
+            if (ship != null) {
                 localDown = worldToShip(ship, down);
             }
+            if (controlling) {
+                report(comp, true, false, down, ship, localDown);
+            }
         }
-
-        comp.clingMemoryDown = down;
-        comp.clingMemoryShip = ship;
-        comp.clingMemoryLocalDown = localDown;
 
         // THE API CALL: one effect per tick. Ship-anchored when the surface
         // belongs to a ship, so the wearer rides it like a plated deck.
         comp.applyGravityDirectionEffect(down, null, PRIORITY, false, 1.0, true, ship, localDown, null);
-
-        if (!serverSide && living instanceof Player && living.isControlledByLocalInstance()) {
-            report(comp, down, ship, localDown);
-        }
     }
 
     /**
-     * Where the wearer is trying to go, tangential to the held face: the
-     * movement input for the controlling client, the packet-driven position
-     * delta for a server-side player, the entity's own velocity for mobs.
+     * Where the wearer is trying to go, tangential to the reference face:
+     * the movement input for the controlling client, the packet-driven
+     * position delta for a server-side player, the entity's own velocity
+     * for mobs.
      */
-    private static @Nullable Vec3 intentTangent(LivingEntity living, GravityCapabilityImpl comp, Vec3 held) {
-        Vec3 input = comp.getInputTangentDirection(held);
+    private static @Nullable Vec3 intentTangent(LivingEntity living, GravityCapabilityImpl comp, Vec3 refUp) {
+        Vec3 input = comp.getInputTangentDirection(refUp);
         if (input != null) {
             return input;
         }
         Vec3 motion = living instanceof Player
             ? new Vec3(living.getX() - living.xo, living.getY() - living.yo, living.getZ() - living.zo)
             : RotationUtil.vecPlayerToWorld(living.getDeltaMovement(), comp.getVisualRotation());
-        Vec3 tangent = motion.subtract(held.scale(motion.dot(held)));
+        Vec3 tangent = motion.subtract(refUp.scale(motion.dot(refUp)));
         return tangent.lengthSqr() > 1.0E-4 ? tangent.normalize() : null;
     }
 
-    private static void report(GravityCapabilityImpl comp, Vec3 down, @Nullable Ship ship, @Nullable Vec3 localDown) {
+    private static void report(GravityCapabilityImpl comp, boolean active, boolean released,
+                               @Nullable Vec3 down, @Nullable Ship ship, @Nullable Vec3 localDown) {
+        if (!active) {
+            if (comp.clingLastSentActive || released) {
+                comp.clingLastSentActive = false;
+                comp.clingLastSentDown = null;
+                comp.clingLastSentShipId = -1L;
+                GravityNetwork.sendToServer(new SurfaceClingTargetPacket(false, released, Vec3.ZERO, -1L, null));
+            }
+            return;
+        }
         long shipId = ship != null ? ship.getId() : -1L;
         Vec3 key = ship != null && localDown != null ? localDown : down;
-        if (comp.clingLastSentDown != null && comp.clingLastSentShipId == shipId
+        if (comp.clingLastSentActive && comp.clingLastSentDown != null && comp.clingLastSentShipId == shipId
             && comp.clingLastSentDown.dot(key) > 0.9998) {
             return; // unchanged within ~1 degree
         }
+        comp.clingLastSentActive = true;
         comp.clingLastSentDown = key;
         comp.clingLastSentShipId = shipId;
-        GravityNetwork.sendToServer(new SurfaceClingTargetPacket(down, shipId, ship != null ? localDown : null));
+        GravityNetwork.sendToServer(new SurfaceClingTargetPacket(true, false, down, shipId, ship != null ? localDown : null));
     }
 
     private static @Nullable Ship findShip(LivingEntity living, long shipId) {
