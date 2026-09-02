@@ -22,6 +22,7 @@ public class GravityNetwork
 		int id = 0;
 		CHANNEL.registerMessage(id++, UpdateGravityCapabilityPacket.class, UpdateGravityCapabilityPacket::encode, UpdateGravityCapabilityPacket::new, UpdateGravityCapabilityPacket.Handler::onMessage);
 		CHANNEL.registerMessage(id++, UpdateGravityBlockSettingsPacket.class, UpdateGravityBlockSettingsPacket::encode, UpdateGravityBlockSettingsPacket::new, UpdateGravityBlockSettingsPacket.Handler::onMessage);
+		CHANNEL.registerMessage(id++, SurfaceClingTargetPacket.class, SurfaceClingTargetPacket::encode, SurfaceClingTargetPacket::new, SurfaceClingTargetPacket.Handler::onMessage);
 	}
 	
     public static <MSG> void sendToServer(MSG message) 

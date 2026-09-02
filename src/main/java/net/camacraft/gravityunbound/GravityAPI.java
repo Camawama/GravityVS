@@ -34,6 +34,7 @@ public class GravityAPI
 		GravityBlocks.BLOCK_ENTITIES.register(bus);
 		GravityMobEffects.EFFECTS.register(bus);
 		GravityMobEffects.POTIONS.register(bus);
+		net.camacraft.gravityunbound.init.GravityEnchantments.ENCHANTMENTS.register(bus);
 		GravityCreativeTabs.CREATIVE_MODE_TAB.register(bus);
 		RegisterArgumentTypes.ARGUMENT_TYPES.register(bus);
 

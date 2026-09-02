@@ -189,8 +189,20 @@ public class GravityPlatingBlockEntity extends BlockEntity
          * The plate's own cell extended outward by the effect range — the
          * region the visual shows. A small tolerance keeps positions right on
          * the boundary inside.
+         *
+         * DOORWAY BRIDGES: a door (or trapdoor / fence gate) cannot share a
+         * cell with plating, so a plated floor or ceiling always had a
+         * one-cell hole at every doorway. When the cell right beside this
+         * plate holds such a block and the cell beyond it holds a plate with
+         * the same facing and polarity, the primary column extends across
+         * the gap — both plates do, so the doorway is fully inside the field
+         * and walking through it never leaves the plating. (The hidden
+         * 1-block bleed already covered the cell as a SECONDARY, blend-only
+         * contribution; a primary is what keeps gravity there while standing
+         * still.) The plate model draws a connecting panel for the same
+         * condition, see {@code client.PlatingBridgeModel}.
          */
-        public AABB getPrimaryBox(BlockPos blockPos, Direction plateDir) {
+        public AABB getPrimaryBox(BlockPos blockPos, Direction plateDir, @Nullable Level world) {
             if (primaryBoxCache == null) {
                 double expand = 0.05;
 
@@ -211,11 +223,100 @@ public class GravityPlatingBlockEntity extends BlockEntity
                     case EAST -> minX -= delta;
                 }
 
+                if (world != null) {
+                    for (Direction tangent : Direction.values()) {
+                        if (tangent.getAxis() == plateDir.getAxis()
+                            || !isBridgedToward(world, blockPos, plateDir, isAttracting, tangent)) {
+                            continue;
+                        }
+                        switch (tangent) {
+                            case DOWN -> minY -= 1.0;
+                            case UP -> maxY += 1.0;
+                            case NORTH -> minZ -= 1.0;
+                            case SOUTH -> maxZ += 1.0;
+                            case WEST -> minX -= 1.0;
+                            case EAST -> maxX += 1.0;
+                        }
+                    }
+                }
+
                 primaryBoxCache = new AABB(minX, minY, minZ, maxX, maxY, maxZ);
             }
 
             return primaryBoxCache;
         }
+    }
+
+    /**
+     * Blocks a plate field may bridge across: openings that can never share a
+     * cell with plating but sit in the middle of plated surfaces.
+     */
+    public static boolean isBridgeableGap(BlockState state) {
+        return state.getBlock() instanceof net.minecraft.world.level.block.DoorBlock
+            || state.getBlock() instanceof net.minecraft.world.level.block.TrapDoorBlock
+            || state.getBlock() instanceof net.minecraft.world.level.block.FenceGateBlock;
+    }
+
+    /**
+     * True when {@code pos + tangent} is a bridgeable gap and {@code pos +
+     * 2 * tangent} holds a plate with the same facing and polarity.
+     */
+    public static boolean isBridgedToward(
+        net.minecraft.world.level.BlockGetter world, BlockPos pos, Direction plateDir,
+        boolean attracting, Direction tangent
+    ) {
+        BlockPos gap = pos.relative(tangent);
+        if (!isBridgeableGap(world.getBlockState(gap))) {
+            return false;
+        }
+        BlockPos beyond = gap.relative(tangent);
+        BlockState beyondState = world.getBlockState(beyond);
+        if (!(beyondState.getBlock() instanceof GravityPlatingBlock)
+            || !GravityPlatingBlock.hasDir(beyondState, plateDir)) {
+            return false;
+        }
+        if (!(world.getBlockEntity(beyond) instanceof GravityPlatingBlockEntity be)) {
+            return false;
+        }
+        SideData other = be.getSideData(plateDir);
+        return other != null && other.isAttracting == attracting;
+    }
+
+    // ---- connected-panel rendering across doorways (client model data) ----
+
+    /** One bit per (plate side, bridge tangent): {@code side.ordinal() * 6 + tangent.ordinal()}. */
+    public static final net.minecraftforge.client.model.data.ModelProperty<Long> BRIDGES =
+        new net.minecraftforge.client.model.data.ModelProperty<>();
+
+    private long bridgeMask = 0L;
+
+    public static int bridgeBit(Direction plateDir, Direction tangent) {
+        return plateDir.ordinal() * 6 + tangent.ordinal();
+    }
+
+    @Override
+    public net.minecraftforge.client.model.data.ModelData getModelData() {
+        return net.minecraftforge.client.model.data.ModelData.builder().with(BRIDGES, bridgeMask).build();
+    }
+
+    private long computeBridgeMask(Level world) {
+        if (sideData == null) {
+            return 0L;
+        }
+        long mask = 0L;
+        for (Direction plateDir : Direction.values()) {
+            SideData side = sideData[plateDir.ordinal()];
+            if (side == null) {
+                continue;
+            }
+            for (Direction tangent : Direction.values()) {
+                if (tangent.getAxis() != plateDir.getAxis()
+                    && isBridgedToward(world, worldPosition, plateDir, side.isAttracting, tangent)) {
+                    mask |= 1L << bridgeBit(plateDir, tangent);
+                }
+            }
+        }
+        return mask;
     }
 
     private @Nullable SideData[] sideData = null;
@@ -325,6 +426,18 @@ public class GravityPlatingBlockEntity extends BlockEntity
         // stagger cache invalidation across plates; floorMod because hashCode may be negative
         if (Math.floorMod(this.worldPosition.hashCode(), 5) == world.getGameTime() % 5) {
             invalidateBoxCaches();
+
+            // doorway bridges: re-mesh the plate when a connecting panel
+            // appears or disappears (door placed/broken, plate beyond
+            // placed/broken/re-polarized)
+            if (world.isClientSide()) {
+                long mask = computeBridgeMask(world);
+                if (mask != bridgeMask) {
+                    bridgeMask = mask;
+                    requestModelDataUpdate();
+                    world.setBlocksDirty(worldPosition, blockState, blockState);
+                }
+            }
         }
     }
 
@@ -493,7 +606,7 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 // beside a plate must not have their gravity changed, but the
                 // bleed still smooths cube-edge transitions where a primary
                 // field is present
-                boolean secondary = !sideDatum.getPrimaryBox(blockPos, plateDir).contains(testingPos);
+                boolean secondary = !sideDatum.getPrimaryBox(blockPos, plateDir, world).contains(testingPos);
 
                 // GRADUAL falloff: the force weakens linearly from full at
                 // the plate face to zero at the field edge. distanceToPlate
@@ -515,7 +628,7 @@ public class GravityPlatingBlockEntity extends BlockEntity
                         sideDatum.surfaceSnap,
                         ship, ship != null
                             ? Vec3.atLowerCornerOf(localEffectDir.getNormal()) : null,
-                        sideDatum.getPrimaryBox(blockPos, plateDir)
+                        sideDatum.getPrimaryBox(blockPos, plateDir, world)
                 );
                 applies = true;
                 primaryApplies = primaryApplies || !secondary;
@@ -629,6 +742,10 @@ public class GravityPlatingBlockEntity extends BlockEntity
         int minX = origin.getX(), minY = origin.getY(), minZ = origin.getZ();
         int maxX = minX, maxY = minY, maxZ = minZ;
         boolean overflow = false;
+        // the group's master is its lexicographically smallest PLATE (a
+        // bridged doorway cell may be the bounding box's corner but holds
+        // no plate to submit the visual)
+        BlockPos master = origin;
 
         while (!queue.isEmpty()) {
             BlockPos cur = queue.poll();
@@ -637,21 +754,51 @@ public class GravityPlatingBlockEntity extends BlockEntity
                     continue;
                 }
                 BlockPos next = cur.relative(tangent);
-                if (members.contains(next) || !isSameVisualGroup(world, next, plateDir, side)) {
+                if (members.contains(next)) {
                     continue;
                 }
-                if (members.size() >= 121) {
+                // a plated neighbor, or a bridged doorway with a plated cell
+                // beyond it (the doorway cell joins the group as a member so
+                // the rectangle test still holds — see getPrimaryBox)
+                BlockPos plate = null;
+                BlockPos gap = null;
+                if (isSameVisualGroup(world, next, plateDir, side)) {
+                    plate = next;
+                }
+                else if (isBridgeableGap(world.getBlockState(next))) {
+                    BlockPos beyond = next.relative(tangent);
+                    if (!members.contains(beyond) && isSameVisualGroup(world, beyond, plateDir, side)) {
+                        gap = next;
+                        plate = beyond;
+                    }
+                }
+                if (plate == null) {
+                    continue;
+                }
+                if (members.size() + (gap != null ? 2 : 1) > 121) {
                     overflow = true;
                     break;
                 }
-                members.add(next.immutable());
-                queue.add(next);
-                minX = Math.min(minX, next.getX());
-                minY = Math.min(minY, next.getY());
-                minZ = Math.min(minZ, next.getZ());
-                maxX = Math.max(maxX, next.getX());
-                maxY = Math.max(maxY, next.getY());
-                maxZ = Math.max(maxZ, next.getZ());
+                if (gap != null) {
+                    members.add(gap.immutable());
+                    minX = Math.min(minX, gap.getX());
+                    minY = Math.min(minY, gap.getY());
+                    minZ = Math.min(minZ, gap.getZ());
+                    maxX = Math.max(maxX, gap.getX());
+                    maxY = Math.max(maxY, gap.getY());
+                    maxZ = Math.max(maxZ, gap.getZ());
+                }
+                members.add(plate.immutable());
+                queue.add(plate);
+                minX = Math.min(minX, plate.getX());
+                minY = Math.min(minY, plate.getY());
+                minZ = Math.min(minZ, plate.getZ());
+                maxX = Math.max(maxX, plate.getX());
+                maxY = Math.max(maxY, plate.getY());
+                maxZ = Math.max(maxZ, plate.getZ());
+                if (comparePos(plate, master) < 0) {
+                    master = plate.immutable();
+                }
             }
         }
 
@@ -669,8 +816,18 @@ public class GravityPlatingBlockEntity extends BlockEntity
             return;
         }
 
-        side.visualMaster = origin.getX() == minX && origin.getY() == minY && origin.getZ() == minZ;
+        side.visualMaster = origin.equals(master);
         side.visualBoxCache = buildFieldBox(minX, minY, minZ, maxX, maxY, maxZ, plateDir, side.getEffectRange());
+    }
+
+    private static int comparePos(BlockPos a, BlockPos b) {
+        if (a.getX() != b.getX()) {
+            return Integer.compare(a.getX(), b.getX());
+        }
+        if (a.getY() != b.getY()) {
+            return Integer.compare(a.getY(), b.getY());
+        }
+        return Integer.compare(a.getZ(), b.getZ());
     }
 
     private boolean isSameVisualGroup(Level world, BlockPos pos, Direction plateDir, SideData ref) {
@@ -960,7 +1117,7 @@ public class GravityPlatingBlockEntity extends BlockEntity
             if (sideDatum == null) {
                 continue;
             }
-            if (sideDatum.getPrimaryBox(worldPosition, plateDir).contains(center)) {
+            if (sideDatum.getPrimaryBox(worldPosition, plateDir, getLevel()).contains(center)) {
                 return sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
             }
         }

@@ -62,6 +62,11 @@ public class GravityCreativeTabs
                 output.accept(new ItemStack(GravityItems.STICKY_CASTER.get()));
                 output.accept(new ItemStack(GravityItems.STICKY_RAIL.get()));
 
+                // API showcase: boots that cling to any surface
+                output.accept(net.minecraft.world.item.EnchantedBookItem.createForEnchantment(
+                    new net.minecraft.world.item.enchantment.EnchantmentInstance(
+                        GravityEnchantments.SURFACE_CLING.get(), 1)));
+
 
                 output.accept(new ItemStack(GravityItems.GRAVITY_ANCHOR_UP.get()));
                 output.accept(new ItemStack(GravityItems.GRAVITY_ANCHOR_DOWN.get()));

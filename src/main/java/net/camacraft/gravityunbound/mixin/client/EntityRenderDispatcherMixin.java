@@ -43,6 +43,49 @@ public abstract class EntityRenderDispatcherMixin {
     @org.spongepowered.asm.mixin.Unique
     private final Quaternionf gravityunbound$scratchRotation = new Quaternionf();
 
+    /**
+     * VALKYRIEN SKIES RENDER-RIDE FOR MODELS. Each frame VS places entities
+     * riding a ship on the ship's DRAWN pose by rewriting their {@code xo}
+     * interpolation base — which the camera uses — but the level renderer
+     * interpolates entity MODELS from {@code xOld}, which VS leaves alone.
+     * So a rider's model was drawn along the chord between its tick
+     * positions while the camera (and the deck) rode the render transform:
+     * in third person the body visibly slid and bobbed against the deck it
+     * stood still on, worst at high spin. Shift the render position by the
+     * difference between the two interpolations, which is exactly VS's
+     * per-frame ride delta and exactly zero for every entity VS does not
+     * ride (both bases are written together by vanilla).
+     */
+    @ModifyVariable(
+        method = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;render(Lnet/minecraft/world/entity/Entity;DDDFFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V",
+        at = @At("HEAD"),
+        argsOnly = true,
+        ordinal = 0
+    )
+    private double gravityunbound$rideRenderX(double x, Entity entity, double px, double py, double pz, float yaw, float tickDelta, PoseStack poseStack, MultiBufferSource buffer, int light) {
+        return x + (1.0 - tickDelta) * (entity.xo - entity.xOld);
+    }
+
+    @ModifyVariable(
+        method = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;render(Lnet/minecraft/world/entity/Entity;DDDFFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V",
+        at = @At("HEAD"),
+        argsOnly = true,
+        ordinal = 1
+    )
+    private double gravityunbound$rideRenderY(double y, Entity entity, double px, double py, double pz, float yaw, float tickDelta, PoseStack poseStack, MultiBufferSource buffer, int light) {
+        return y + (1.0 - tickDelta) * (entity.yo - entity.yOld);
+    }
+
+    @ModifyVariable(
+        method = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;render(Lnet/minecraft/world/entity/Entity;DDDFFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V",
+        at = @At("HEAD"),
+        argsOnly = true,
+        ordinal = 2
+    )
+    private double gravityunbound$rideRenderZ(double z, Entity entity, double px, double py, double pz, float yaw, float tickDelta, PoseStack poseStack, MultiBufferSource buffer, int light) {
+        return z + (1.0 - tickDelta) * (entity.zo - entity.zOld);
+    }
+
     @Inject(
         method = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;render(Lnet/minecraft/world/entity/Entity;DDDFFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V",
         at = @At(

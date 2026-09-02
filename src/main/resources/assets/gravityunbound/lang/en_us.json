@@ -85,6 +85,8 @@
   "gravity_changer.plating.tooltip.0": "Generates Gravity Field",
   "gravity_changer.plating.tooltip.1": "Interact with bare hand in creative mode to open the settings screen",
   "itemGroup.gravityunbound": "GravityUnbound",
+  "enchantment.gravityunbound.surface_cling": "Surface Cling",
+  "enchantment.gravityunbound.surface_cling.desc": "Boots cling to any block surface: walk up walls, across ceilings and around ships, moving or not.",
   "direction.down": "Down",
   "direction.up": "Up",
   "direction.north": "North",

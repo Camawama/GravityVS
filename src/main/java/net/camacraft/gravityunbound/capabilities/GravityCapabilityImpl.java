@@ -216,6 +216,22 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // tick; only the first succeeds, so stacked fields never multiply it
     private long artificialPullTick = Long.MIN_VALUE;
 
+    // SURFACE CLING (enchantment.SurfaceClingEnchantment) state kept on the
+    // entity: the last cling direction (world space, plus its ship-space
+    // image when the surface belonged to a ship) so a wearer keeps being
+    // pulled toward the surface they left while airborne, and the target the
+    // controlling client reported to the server (the server mirrors it
+    // instead of guessing from input it cannot see)
+    public @Nullable Vec3 clingMemoryDown = null;
+    public @Nullable org.valkyrienskies.core.api.ships.Ship clingMemoryShip = null;
+    public @Nullable Vec3 clingMemoryLocalDown = null;
+    public @Nullable Vec3 clingReportedDown = null;
+    public long clingReportedShipId = -1L;
+    public @Nullable Vec3 clingReportedLocalDown = null;
+    public int clingReportedAge = Integer.MAX_VALUE;
+    public @Nullable Vec3 clingLastSentDown = null;
+    public long clingLastSentShipId = -1L;
+
     /** See {@code GravityPlatingBlockEntity.gravityunbound$applyArtificialGravityForce}. */
     public boolean tryClaimArtificialPull(long gameTime) {
         if (artificialPullTick == gameTime) {
@@ -1055,27 +1071,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // pressed against a wall it is blocked to ~zero, and approaching a
         // wall at a slight angle it SLIDES along the face, aiming the tangent
         // parallel to the wall so the concave probe could never hit it.
-        Vec3 inputTangentDir = null;
-        if (held
-            && entity instanceof LivingEntity living
-            && (Math.abs(living.xxa) > 0.01 || Math.abs(living.zza) > 0.01)
-            && entity.level().isClientSide() && entity.isControlledByLocalInstance()
-        ) {
-            float yawRad = living.getYRot() * ((float) Math.PI / 180.0F);
-            double sin = Math.sin(yawRad);
-            double cos = Math.cos(yawRad);
-            // vanilla getInputVector: input (strafe, forward) rotated by yaw
-            Vec3 inputLocal = new Vec3(
-                living.xxa * cos - living.zza * sin,
-                0,
-                living.zza * cos + living.xxa * sin
-            );
-            Vec3 inputWorld = RotationUtil.vecPlayerToWorld(inputLocal, visualRotation);
-            Vec3 inputTangent = inputWorld.subtract(heldNormal.scale(inputWorld.dot(heldNormal)));
-            if (inputTangent.lengthSqr() > 1.0E-6) {
-                inputTangentDir = inputTangent.normalize();
-            }
-        }
+        Vec3 inputTangentDir = held ? getInputTangentDirection(heldNormal) : null;
 
         // standing still with input held (e.g. walking in place against a
         // convex edge): let the input drive the wrap probe too
@@ -1328,11 +1324,54 @@ public class GravityCapabilityImpl implements IGravityCapability {
     }
 
     /**
+     * The tangential (along-surface) direction of the entity's movement
+     * INPUT relative to {@code surfaceNormal} — where the player is trying
+     * to go — or null without input. Client-controlled entities only: the
+     * server never sees input state.
+     */
+    public @Nullable Vec3 getInputTangentDirection(Vec3 surfaceNormal) {
+        if (!(entity instanceof LivingEntity living)
+            || (Math.abs(living.xxa) <= 0.01 && Math.abs(living.zza) <= 0.01)
+            || !entity.level().isClientSide() || !entity.isControlledByLocalInstance()) {
+            return null;
+        }
+        float yawRad = living.getYRot() * ((float) Math.PI / 180.0F);
+        double sin = Math.sin(yawRad);
+        double cos = Math.cos(yawRad);
+        // vanilla getInputVector: input (strafe, forward) rotated by yaw
+        Vec3 inputLocal = new Vec3(
+            living.xxa * cos - living.zza * sin,
+            0,
+            living.zza * cos + living.xxa * sin
+        );
+        Vec3 inputWorld = RotationUtil.vecPlayerToWorld(inputLocal, visualRotation);
+        Vec3 inputTangent = inputWorld.subtract(surfaceNormal.scale(inputWorld.dot(surfaceNormal)));
+        return inputTangent.lengthSqr() > 1.0E-6 ? inputTangent.normalize() : null;
+    }
+
+    /**
+     * The surface the entity is standing on (or held through the jump
+     * grace), as a world-space face normal — the probe-derived surface the
+     * frame aligns to. Null when nothing is held.
+     */
+    public @Nullable Vec3 getHeldSurfaceNormal() {
+        return lastGroundNormal;
+    }
+
+    /** The Valkyrien Skies ship the held surface belongs to, or null. */
+    public @Nullable org.valkyrienskies.core.api.ships.Ship getHeldSurfaceShip() {
+        if (lastGroundNormal == null) {
+            return null;
+        }
+        return capsuleGrounded && capsuleGroundShip != null ? capsuleGroundShip : lastGroundShip;
+    }
+
+    /**
      * Raycast against collision shapes and return the hit face's WORLD-space
      * normal (Valkyrien Skies raycasts hit ships natively in shipyard
      * coordinates; the face normal is transformed back), or null on a miss.
      */
-    private @Nullable Vec3 probeSurfaceNormal(Vec3 from, Vec3 direction, double distance) {
+    public @Nullable Vec3 probeSurfaceNormal(Vec3 from, Vec3 direction, double distance) {
         net.minecraft.world.phys.BlockHitResult hit = entity.level().clip(new net.minecraft.world.level.ClipContext(
             from,
             from.add(direction.scale(distance)),
@@ -1840,6 +1879,13 @@ public class GravityCapabilityImpl implements IGravityCapability {
             livingEntity.yHeadRot += deltaYaw;
             livingEntity.yHeadRotO += deltaYaw;
         }
+        // the first-person hand sways by (view yaw - smoothed yaw): a
+        // re-parametrization must shift the smoothed copy too, or every
+        // twist unwind on a spinning ship reads as the player turning and
+        // the hand swings / saws (client-only state, isolated for servers)
+        if (entity.level().isClientSide()) {
+            net.camacraft.gravityunbound.client.ClientHandSway.shiftYaw(entity, deltaYaw);
+        }
 
         Vec3 worldVelocity = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), oldFrame);
         entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(worldVelocity, newFrame));
@@ -1963,6 +2009,10 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 }
             }
             if (entity instanceof LivingEntity livingEntity) {
+                // API showcase: enchanted boots that cling to any surface
+                // (see enchantment.SurfaceClingEnchantment — it uses only the
+                // public effect API and the public probe/surface accessors)
+                net.camacraft.gravityunbound.enchantment.SurfaceClingEnchantment.applyTo(livingEntity, this);
                 for (GravityDirectionMobEffect dirEffect : GravityDirectionMobEffect.EFFECT_MAP.values()) {
                     MobEffectInstance effectInstance = livingEntity.getEffect(dirEffect);
                     if (effectInstance != null) {

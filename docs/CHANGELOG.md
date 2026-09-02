@@ -1,5 +1,54 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-09-02 (round 77: hands, bodies, doorways and Surface Cling)
+
+- **The first-person hand no longer sways or snaps on a rotating ship.**
+  Vanilla sways the hand by the gap between the view yaw and a smoothed
+  copy of it that only the local player keeps. The gravity frame
+  re-parametrizes yaw whenever it unwinds a twist — every tick on a
+  spinning ship, about ninety degrees at each cardinal flip on its walls —
+  with exact camera compensation, but the smoothed copy still registered
+  a "turn": a per-tick hand sawtooth while riding, and a big swing four
+  times per revolution. The compensation now shifts the smoothed copy by
+  the same amount; the sway again only reacts to the player actually
+  turning.
+- **Bodies stand still on the deck in third person.** Valkyrien Skies
+  places riders on the ship's DRAWN pose each frame by rewriting the
+  interpolation base the camera uses — but the level renderer draws
+  entity MODELS from a second base VS never touches, so a rider's body was
+  drawn along the chord between its tick positions while the camera and
+  the deck rode the render transform: in F5 the body slid and bobbed
+  against the deck it stood still on. Entity render positions now include
+  the same per-frame ride delta (exactly zero for anything VS is not
+  riding), so models, shadows and nametags sit where the camera says.
+- **Gravity plating connects across doorways.** A door, trapdoor or fence
+  gate can never share a cell with plating, so a plated floor or ceiling
+  always had a one-cell hole at each doorway where gravity lapsed (the
+  hidden bleed covered it only as a blend-support, which is dropped when
+  standing still). When the cell beside a plate holds such a block and the
+  cell beyond holds a plate with the same facing and polarity, both plates
+  extend their primary field across the gap — the doorway is fully inside
+  the field — and each draws a connecting half-panel into it with the
+  plate texture, so the plating reads as one continuous surface through
+  the door. The field visualization merges the doorway into the group.
+- **New: Surface Cling, an API-showcase enchantment for boots.** Wearers
+  cling to whatever surface they stand on and walk up walls, across
+  ceilings and around any structure — Valkyrien Skies ships included,
+  moving or spinning, because the effect is anchored to the ship exactly
+  like a ship-mounted plate. It is built entirely on the public API: one
+  `applyGravityDirectionEffect` call per tick (priority 500, below
+  engineered fields, above ambient and potion gravity), the public
+  held-surface accessors, and two short probes that endorse the face the
+  wearer pushes into or steps around, which is exactly how a plate field
+  lets players walk around a cube's edges. Endorsement needs the movement
+  input only the client sees, so the client reports its cling target to
+  the server (a small packet, sent only when the direction changes) and
+  the server mirrors it; mobs wearing the boots cling to what they stand
+  on and follow their own velocity. Enchanting-table and trade obtainable
+  (rare, boots only); an enchanted book sits in the creative tab.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-09-02 (round 76: ship attachment — one mechanism for riding a rotating ship)
 
 - **The axis-dependent stutter on rotating ships had a structural cause:
