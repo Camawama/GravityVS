@@ -507,8 +507,11 @@ public abstract class EntityMixin {
         cancellable = true
     )
     private void inject_getCameraPosVec(float tickDelta, CallbackInfoReturnable<Vec3> cir) {
-        GravityCapabilityImpl comp = gravityunbound$comp();
-        if (comp == null) return;
+        // RENDER gate, not the physics one: on a spinning ship's level deck
+        // the tick frame is vanilla while the render frame still carries the
+        // drawn deck's sub-tick lead
+        GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull((Entity) (Object) this);
+        if (comp == null || comp.isRenderDefault()) return;
 
         Vec3 vec3d = RotationUtil.vecPlayerToWorld(0.0D, this.eyeHeight, 0.0D, comp.getRenderRotation(tickDelta));
 

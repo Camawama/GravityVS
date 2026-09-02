@@ -505,11 +505,17 @@ public class GravityPlatingBlockEntity extends BlockEntity
                     double surfaceDistance = Math.max(0.0, distanceToPlate - adjustment);
                     strengthScale *= Mth.clamp(1.0 - surfaceDistance / sideDatum.getEffectRange(), 0.0, 1.0);
                 }
+                // the PRIMARY column (footprint + outward range, what the
+                // visual shows) is the region reported for the held-surface
+                // sustain: standing on a face the plate endorsed keeps the
+                // field alive through effect dropouts only while still
+                // inside it — walking off the plating releases
                 comp.applyGravityDirectionEffect(
                         worldEffectDir, PLATING_ROTATION_PARAMS, priority, secondary, strengthScale,
                         sideDatum.surfaceSnap,
                         ship, ship != null
-                            ? Vec3.atLowerCornerOf(localEffectDir.getNormal()) : null
+                            ? Vec3.atLowerCornerOf(localEffectDir.getNormal()) : null,
+                        sideDatum.getPrimaryBox(blockPos, plateDir)
                 );
                 applies = true;
                 primaryApplies = primaryApplies || !secondary;

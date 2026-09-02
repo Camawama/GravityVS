@@ -75,7 +75,7 @@ public abstract class CameraMixin {
     ) {
         GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(focusedEntity);
 
-        if (comp == null || comp.isVisuallyDefault()) {
+        if (comp == null || comp.isRenderDefault()) {
             original.call(this, x, y, z);
             return;
         }
@@ -125,50 +125,18 @@ public abstract class CameraMixin {
             return;
         }
 
-        if (!comp.isVisuallyDefault()) {
+        // the render frame carries everything — including, while riding a
+        // Valkyrien Skies ship, the sub-tick lead of the ship's DRAWN pose
+        // over its tick pose (swing and twist alike; see the ship-relative
+        // reconstruction in GravityCapabilityImpl.getRenderRotation). No
+        // separate camera-side ship correction exists any more.
+        if (!comp.isRenderDefault()) {
             Quaternionf gravityRotation = comp.getRenderRotation(this.gravityunbound$tickDelta);
 
             Quaternionf rotation = new Quaternionf(gravityRotation);
             rotation.conjugate();
             rotation.mul(this.rotation);
             this.rotation.set(rotation.x(), rotation.y(), rotation.z(), rotation.w());
-        }
-
-        // SUB-TICK SHIP TWIST. The spin-follow applies the ship's twist to
-        // yaw at TICK rate, but the ship is DRAWN at its per-frame render
-        // transform — that gap alone reads as tick-rate stepping while
-        // standing on a spinning ship. Rotate the CAMERA by the twist
-        // (about the frame's up) of renderTransform o tickTransform^-1 so
-        // the view tracks the drawn pose between ticks. Identity on
-        // stationary ships; purely visual — no entity state is touched.
-        if (comp.isShipFieldAnchored()
-            && comp.getFieldAnchorShip()
-                instanceof org.valkyrienskies.core.api.ships.ClientShip clientShip) {
-            org.joml.Quaterniond drawn = new org.joml.Quaterniond(
-                clientShip.getRenderTransform().getShipToWorldRotation());
-            org.joml.Quaterniond tick = new org.joml.Quaterniond(
-                clientShip.getTransform().getShipToWorldRotation());
-            org.joml.Quaterniond delta = drawn.mul(tick.conjugate(), new org.joml.Quaterniond()).normalize();
-            if (delta.w < 0) {
-                delta.set(-delta.x, -delta.y, -delta.z, -delta.w);
-            }
-            if (delta.w < 0.9999999999) {
-                Vec3 up = comp.getUpVector();
-                double s = delta.x * up.x + delta.y * up.y + delta.z * up.z;
-                double angle = 2.0 * Math.atan2(s, delta.w);
-                // SUBTRACT the fraction vanilla's yRotO lerp already shows:
-                // the spin-follow's tick twist is interpolated by the yaw
-                // lerp, so the camera only needs the REMAINDER of the
-                // drawn-vs-tick delta (the render transform's lead). Adding
-                // the full delta double-counted the intra-tick rotation —
-                // a one-tick sawtooth felt as spinning-ship jitter.
-                angle -= this.gravityunbound$tickDelta * comp.getLastSpinFollowTwist();
-                if (Math.abs(angle) > 1.0E-6) {
-                    Quaternionf twist = new Quaternionf().rotationAxis(
-                        (float) angle, (float) up.x, (float) up.y, (float) up.z);
-                    this.rotation.premul(twist);
-                }
-            }
         }
     }
 }

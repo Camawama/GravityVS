@@ -96,13 +96,13 @@ public abstract class VSEntityDraggerMixin {
         if (comp == null) {
             return newYaw;
         }
-        // FIELD-ANCHORED entities: the capability owns the spin-follow — it
-        // computes the EXACT twist about the frame's up from the ship's
-        // full rotation delta (VS only knows its world-yaw component, which
-        // misses the twist a rolling/pitching ship applies to its riders).
-        // Suppress VS's yaw entirely so nothing double-turns; the sub-tick
-        // camera twist (CameraMixin) provides the between-tick smoothness.
-        if (comp.isShipFieldAnchored()) {
+        // ATTACHED entities: the capability carries the ship's FULL rotation
+        // in the visual frame — twist included (VS only knows the world-yaw
+        // component, which misses the twist a rolling/pitching ship applies
+        // to its riders) — and moves the twist into yaw itself with exact
+        // compensation when the frame is settled. Suppress VS's yaw entirely
+        // so nothing double-turns.
+        if (comp.isShipAttached()) {
             return currentYaw;
         }
         if (comp.isVisuallyDefault()) {

@@ -58,7 +58,7 @@ public abstract class EntityRenderDispatcherMixin {
             && !(entity instanceof Projectile) && !(entity instanceof ExperienceOrb) && EntityTags.allowGravityTransformationInRendering(entity)) {
             net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
                 GravityChangerAPI.getGravityComponentOrNull(entity);
-            if (comp != null && !comp.isVisuallyDefault()) {
+            if (comp != null && !comp.isRenderDefault()) {
                 // the model follows the smooth visual frame
                 matrices.pushPose();
                 pushed = true;

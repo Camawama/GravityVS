@@ -32,7 +32,7 @@ public abstract class EntityRenderMixin {
     )
     private Quaternionf modifyExpressionValue_renderLabelIfPresent_getRotation_0(Quaternionf originalRotation, Entity entity) {
         GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(entity);
-        if (comp == null || comp.isVisuallyDefault()) {
+        if (comp == null || comp.isRenderDefault()) {
             return originalRotation;
         }
         float partialTick = Minecraft.getInstance().getPartialTick();

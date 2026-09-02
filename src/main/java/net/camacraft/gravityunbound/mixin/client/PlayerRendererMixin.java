@@ -28,7 +28,7 @@ public abstract class PlayerRendererMixin {
         Vec3 viewVector = instance.getViewVector(partialTick);
 
         GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(instance);
-        if (comp == null || comp.isVisuallyDefault()) {
+        if (comp == null || comp.isRenderDefault()) {
             return viewVector;
         }
 

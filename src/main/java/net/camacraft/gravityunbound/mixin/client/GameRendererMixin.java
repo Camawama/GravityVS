@@ -51,7 +51,7 @@ public abstract class GameRendererMixin {
         }
 
         GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(focusedEntity);
-        if (comp == null || comp.isVisuallyDefault()) {
+        if (comp == null || comp.isRenderDefault()) {
             return;
         }
 

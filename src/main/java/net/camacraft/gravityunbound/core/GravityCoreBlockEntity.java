@@ -285,9 +285,18 @@ public class GravityCoreBlockEntity extends BlockEntity
                     shipLocalPos = Vec3.atCenterOf(worldPosition);
                 }
             }
+            // region for the held-surface sustain: the field's bounding cube
+            // in the core's OWN grid (this.range is grid-authored; the
+            // world-scaled reach is the method parameter)
+            Vec3 gridCenter = Vec3.atCenterOf(worldPosition);
+            AABB gridRegion = new AABB(
+                gridCenter.x - this.range, gridCenter.y - this.range, gridCenter.z - this.range,
+                gridCenter.x + this.range, gridCenter.y + this.range, gridCenter.z + this.range
+            );
             comp.applyGravityDirectionEffect(
                 direction, CORE_ROTATION_PARAMS, CORE_BASE_PRIORITY - distance, false, strengthScale,
-                surfaceSnap, anchorShip, shipLocalDir, shipLocalPos, attracting ? 1.0 : -1.0
+                surfaceSnap, anchorShip, shipLocalDir, shipLocalPos, attracting ? 1.0 : -1.0,
+                gridRegion
             );
         }
     }

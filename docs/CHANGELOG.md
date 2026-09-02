@@ -1,5 +1,66 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-09-02 (round 76: ship attachment — one mechanism for riding a rotating ship)
+
+- **The axis-dependent stutter on rotating ships had a structural cause:
+  the ship's rotation reached the rider through two different paths.** The
+  SWING part (the stood-on face's normal turning) was carried into the
+  visual frame and rebuilt against the ship's drawn pose every frame; the
+  TWIST part (rotation about the rider's own up) was written into yaw at
+  tick rate, with a camera-side correction on top. Faces whose normal is
+  parallel to the spin axis — the deck under a yaw spin, the north/south
+  walls under roll, the east/west walls under pitch — are pure twist for
+  the rider, so they only ever got the tick-rate path, standing or moving;
+  faces perpendicular to the axis got the exact path, which is why walls
+  under a yaw spin walked smoothly. Flying in an up/down field under yaw
+  spin stuttered for the same reason.
+- **Verified against the Valkyrien Skies 2.4.11 bytecode**: on the client,
+  ship tick transforms advance and the entity dragger carries riders at the
+  TAIL of `Minecraft.tick`, after every entity tick, and VS's per-frame
+  render-ride rewrites the interpolation base so the camera lands on the
+  DRAWN ship pose. So every ship transform read during the player tick is
+  the pose the rider was placed on at the end of the previous tick.
+  Round 75's "pin the idle anchor to the prev-tick transform" was built on
+  the opposite ordering and left the standing player permanently one tick
+  of ship motion behind the deck (the "standing still stutters, walking
+  doesn't" report on wall faces). The anchor pins to the current transform
+  again, which is a no-op in steady state.
+- **Fix — SHIP ATTACHMENT, one mechanism.** While the entity rides a ship
+  (the dominant field is mounted on it, or one of its faces is the held
+  surface): the capability composes the ship's FULL tick rotation — swing
+  AND twist — onto the visual frame and the held normals each tick (the
+  twist unwinder then moves twist into yaw only when the frame is settled,
+  invisibly, with both interpolation endpoints shifted); at render time
+  the two tick frames are expressed in the SHIP's own coordinates,
+  interpolated there, and re-expressed against the pose the ship is drawn
+  at. A rider's ship-relative orientation is constant while standing, so
+  the render frame follows the drawn deck exactly, whatever the spin axis
+  or face, and however lumpy the network-fed tick poses are. The old
+  spin-follow yaw writes and the camera's sub-tick twist are gone; VS's own
+  dragger yaw stays suppressed while attached. The engagement eases over
+  ~7 ticks so entering and leaving a ship's field never snaps. The physics
+  gate now judges the current frame only, so a spinning ship's level deck
+  keeps bit-vanilla physics (VS's own riding stack) while the render frame
+  carries the deck's sub-tick lead; render code has its own gate.
+- **Flying up inside a ship's field no longer leaves you behind.** VS stops
+  dragging an entity 25 ticks after it last stood on the ship and nothing
+  re-registered an airborne rider. While attached and airborne the entity
+  is re-registered with VS's dragging every tick (its own ground-stand
+  hand-off paths are untouched), so creative flight inside a spinning
+  ship's plating or normalizer field rides the ship exactly.
+- **Walking off plating releases again.** Round 47's held-surface field
+  sustain is a self-sustaining loop (probe -> sustain -> gravity active ->
+  probe) and on a continuous floor the probe never misses, so stepping from
+  the plated part of a deck onto its unplated part stayed snapped forever.
+  Every field source now reports its REGION in its own block grid (plating:
+  the primary column the visual shows; normalizer: its zone; core: its
+  bounding cube), and the sustain only bridges dropouts while the entity is
+  still inside it — one grid block of tolerance on ships for the
+  server-side packet lag the sustain exists for, none in the world. Past
+  that the grounded release (2 ticks) runs as before.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-22 (round 75: one pull per field, one carry per tick)
 
 - **The Great Unknown "plating slams me down at scale 1" was a

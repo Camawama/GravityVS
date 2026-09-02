@@ -67,7 +67,7 @@ public abstract class FishingHookEntityRendererMixin extends EntityRenderer<Fish
         // cardinal was still DOWN)
         net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
             GravityChangerAPI.getGravityComponentOrNull(playerEntity);
-        if (comp == null || comp.isVisuallyDefault()) return;
+        if (comp == null || comp.isRenderDefault()) return;
         org.joml.Quaternionf renderRotation = comp.getRenderRotation(tickDelta);
 
         ci.cancel();
