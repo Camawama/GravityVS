@@ -735,9 +735,20 @@ public class GravityPlatingBlockEntity extends BlockEntity
     }
 
     /**
-     * In configured zero-g dimensions the field also accelerates the entity
-     * (vanilla gravity is absent there). Scaled by the entity's gravity strength
-     * so it agrees with normal gravity handling.
+     * In configured zero-g dimensions the field also accelerates NON-LIVING
+     * entities (items, minecarts, TNT — their hardcoded gravity paths are the
+     * ones a zero-g dimension suppresses and the capability's deficit skips).
+     * Scaled by the entity's gravity strength so it agrees with normal
+     * gravity handling.
+     *
+     * LIVING entities are excluded: applyFieldPullDeficit already supplies
+     * their FULL intended pull every field tick (round 68/70 — an active
+     * field owns gravity, no-gravity zero-g dimensions included), so this
+     * force on top DOUBLED the pull — and it stacked once more for EVERY
+     * plate whose field contains the entity (a plated floor is many plates,
+     * each within its 1-block bleed of the player). Scale-1 ships showed the
+     * full slam; scaled ships hid it, because transformDirection through the
+     * scaled ship matrix shrank the redundant force by the ship scale.
      */
     private static void gravityunbound$applyArtificialGravityForce(
             Level world, @Nullable Ship ship, GravityPlatingBlockEntity be,
@@ -745,6 +756,14 @@ public class GravityPlatingBlockEntity extends BlockEntity
     ) {
         String currentDim = world.dimension().location().toString();
         if (!GravityConfig.artificialGravityDimensions.get().contains(currentDim)) {
+            return;
+        }
+        if (entity instanceof LivingEntity) {
+            return;
+        }
+        // one application per entity per tick, however many plates claim it —
+        // stacked fields must not multiply the acceleration
+        if (!comp.tryClaimArtificialPull(world.getGameTime())) {
             return;
         }
 
@@ -761,6 +780,9 @@ public class GravityPlatingBlockEntity extends BlockEntity
         );
         if (ship != null) {
             ship.getTransform().getShipToWorldMatrix().transformDirection(accel);
+            // a scaled ship's matrix scales direction lengths by the ship
+            // scale — the ACCELERATION must not shrink or grow with it
+            accel.normalize();
         }
 
         accel.mul(GravityConfig.artificialGravityAcceleration.get() * comp.getCurrGravityStrength());

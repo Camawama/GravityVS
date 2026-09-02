@@ -104,6 +104,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // ship's normal is exactly renderRotation * this at any frame time
     @Nullable
     private org.joml.Vector3d shipLocalUp = null;
+    // ship owning the held surface for the render alignment (survives the
+    // hold grace, unlike capsuleGroundShip)
+    @Nullable
+    private org.valkyrienskies.core.api.ships.Ship heldAlignShip = null;
+    // drawn-ship alignment branch tracking + switch easing (see the
+    // maintenance block in tickCapability)
+    private int renderAlignBranch = 0;
+    private volatile float alignBranchBlend = 1.0f;
     // after the ground probe stops hitting, keep the surface alignment for a
     // few ticks (jumps and probe flicker must not wobble the frame; the probe
     // re-acquires during a jump's descent, so this only needs to bridge the
@@ -191,6 +199,20 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // movement — firing the edge probes spuriously — and a descending ship
     // reads as "falling away from the held face", releasing the hold early
     private @Nullable org.valkyrienskies.core.api.ships.Ship lastGroundShip = null;
+
+    // last game time the plating artificial-gravity force (zero-g dimensions,
+    // non-living entities) was applied — every plate in range tries each
+    // tick; only the first succeeds, so stacked fields never multiply it
+    private long artificialPullTick = Long.MIN_VALUE;
+
+    /** See {@code GravityPlatingBlockEntity.gravityunbound$applyArtificialGravityForce}. */
+    public boolean tryClaimArtificialPull(long gameTime) {
+        if (artificialPullTick == gameTime) {
+            return false;
+        }
+        artificialPullTick = gameTime;
+        return true;
+    }
 
     // ship-relative idle anchor: standing still on ship plating pins the feet
     // to a fixed SHIPYARD-space point (drift-free on rotating contraptions by
@@ -402,15 +424,44 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // our frame ROTATION interpolated tick poses; the mismatch on the
         // 1.62-block eye arm was the camera jitter, and the same rotational
         // lag was the visible model/hitbox tilt on a position-glued body.
-        if (capsuleGroundShip != null && lastGroundNormal != null) {
+        // the held SHIP survives the hold grace: capsuleGroundShip clears
+        // the instant the capsule un-grounds (jump frame 1), which flipped
+        // the render alignment to the radial branch immediately and made
+        // every hop "unsnap with no smoothing" despite the held-normal
+        // grace — the graced hold keeps lastGroundShip alongside it
+        org.valkyrienskies.core.api.ships.Ship heldShip =
+            capsuleGroundShip != null ? capsuleGroundShip
+                : lastGroundNormal != null ? lastGroundShip : null;
+        if (heldShip != null && lastGroundNormal != null) {
             org.joml.Quaterniond worldToShip = new org.joml.Quaterniond(
-                capsuleGroundShip.getTransform().getShipToWorldRotation()).conjugate();
+                heldShip.getTransform().getShipToWorldRotation()).conjugate();
             shipLocalUp = worldToShip.transform(new org.joml.Vector3d(
                 lastGroundNormal.x, lastGroundNormal.y, lastGroundNormal.z));
+            heldAlignShip = heldShip;
         }
         else {
             shipLocalUp = null;
+            heldAlignShip = null;
         }
+
+        // BRANCH-SWITCH EASING for the drawn-ship alignment: track which
+        // branch the render pass will take; on any switch (landing:
+        // radial->surface, hold expiry: surface->radial) the alignment
+        // strength ramps 0 -> 1 over ~7 ticks, so the interpolated tick
+        // frame (already smooth, already chasing) shows through during the
+        // transition instead of the arc snapping to the new target. In
+        // steady state the blend is 1 and tracking is FULL-STRENGTH and
+        // uncapped — the round-72 blanket 10-degree/frame cap throttled
+        // legitimate radial tracking while flying fast around a core (the
+        // fly-mode stutter) and is replaced by this.
+        int branch = shipLocalUp != null && heldAlignShip != null ? 1
+            : fieldAnchorShip != null && fieldAnchorLocalPos != null ? 2
+            : fieldAnchorShip != null && fieldAnchorLocalDown != null ? 3 : 0;
+        if (branch != renderAlignBranch) {
+            renderAlignBranch = branch;
+            alignBranchBlend = 0.0f;
+        }
+        alignBranchBlend = Math.min(1.0f, alignBranchBlend + 0.15f);
         advanceVisualRotation();
         applyTransitionPull();
         applyStaticFriction();
@@ -792,16 +843,39 @@ public class GravityCapabilityImpl implements IGravityCapability {
             return;
         }
 
+        // DRAGGER-AWARE TRANSFORM CHOICE. Valkyrien Skies' client
+        // EntityDragger runs AFTER the entity tick and carries dragged
+        // entities by the ship's full tick delta (computed from their
+        // tick-START position). Pinning to the CURRENT tick transform here
+        // made that carry apply TWICE: the tick-end position permanently led
+        // the anchored spot by one tick of ship motion, addedMovementLastTick
+        // no longer matched the player's real displacement, and VS's
+        // per-frame render-ride (which rewrites xo/yo/zo so the camera lands
+        // on the DRAWN ship pose) was fed inconsistent inputs — a tick-rate
+        // positional sawtooth. Invisible on the deck (identity frame skips
+        // the anchor entirely; on the down face the residual is a twist about
+        // the vertical eye arm), but on N/E/S/W wall faces the horizontal
+        // 1.62-block eye arm and the hull radius amplified it into the
+        // rotating-ship wall stutter. While VS is actively dragging, pin to
+        // the PREV-tick pose so the dragger's own carry lands the player
+        // exactly on the anchor (steady state: this setPos is a no-op and
+        // VS owns the whole carry, so its render-ride math is exact).
+        boolean vsWillCarry =
+            ((org.valkyrienskies.mod.common.util.IEntityDraggingInformationProvider) entity)
+                .getDraggingInformation().isEntityBeingDraggedByAShip();
+        org.valkyrienskies.core.api.ships.properties.ShipTransform anchorTransform =
+            vsWillCarry ? ship.getPrevTickTransform() : ship.getTransform();
+
         if (shipAnchorPos == null || shipAnchorShipId != ship.getId()) {
             org.joml.Vector3d p = new org.joml.Vector3d(entity.getX(), entity.getY(), entity.getZ());
-            ship.getTransform().getWorldToShipMatrix().transformPosition(p);
+            anchorTransform.getWorldToShipMatrix().transformPosition(p);
             shipAnchorPos = p;
             shipAnchorShipId = ship.getId();
             return;
         }
 
         org.joml.Vector3d w = new org.joml.Vector3d(shipAnchorPos);
-        ship.getTransform().getShipToWorldMatrix().transformPosition(w);
+        anchorTransform.getShipToWorldMatrix().transformPosition(w);
         if (entity.position().distanceToSqr(w.x, w.y, w.z) > 1.0) {
             // ship teleported or badly desynced: don't yank the player around
             shipAnchorPos = null;
@@ -2778,8 +2852,10 @@ public class GravityCapabilityImpl implements IGravityCapability {
         org.valkyrienskies.core.api.ships.Ship alignShip = null;
         org.joml.Vector3d localUp = null;
         Vec3 radialLocalPos = null;
-        if (shipLocalUp != null && capsuleGroundShip != null) {
-            alignShip = capsuleGroundShip;
+        if (shipLocalUp != null && heldAlignShip != null) {
+            // the GRACED held ship, not capsuleGroundShip: the latter clears
+            // on the first airborne frame and flipped this branch mid-jump
+            alignShip = heldAlignShip;
             localUp = shipLocalUp;
         }
         else if (fieldAnchorShip != null && fieldAnchorLocalPos != null) {
@@ -2816,22 +2892,15 @@ public class GravityCapabilityImpl implements IGravityCapability {
             double align = frameUp.dot(drawnUp);
             if (align < 0.999999 && align > 0.5) {
                 Quaternionf arc = QuaternionUtil.getRotationBetween(frameUp, drawnUp);
-                if (shipAlignWeight < 0.999f) {
-                    arc = new Quaternionf().slerp(arc, shipAlignWeight);
-                }
-                // RATE-CAP large corrections. The arc is normally the tiny
-                // tick-vs-drawn residual — but when the alignment TARGET
-                // switches (landing swaps the radial anchor for the held
-                // surface, round 71), the residual jumps by the whole
-                // radial-vs-face angle and applying it in one frame was a
-                // hard camera snap. Capped, the transient sweeps at the
-                // tick chase's own smooth convergence rate (the true arc
-                // shrinks as the frame catches up); steady-state
-                // corrections are far below the cap and untouched.
-                double arcAngle = 2.0 * Math.acos(Mth.clamp(Math.abs(arc.w), 0.0f, 1.0f));
-                double maxArc = Math.toRadians(10.0);
-                if (arcAngle > maxArc) {
-                    arc = new Quaternionf().slerp(arc, (float) (maxArc / arcAngle));
+                // strength = eased engage weight x BRANCH-SWITCH blend: a
+                // target switch (landing, hold expiry) fades the correction
+                // in over ~7 ticks — the smooth tick chase shows through
+                // during the transition — while steady-state tracking runs
+                // at FULL strength with no per-frame cap (a blanket cap
+                // throttled fast radial tracking: the fly-mode stutter).
+                float strength = Math.min(shipAlignWeight, alignBranchBlend);
+                if (strength < 0.999f) {
+                    arc = new Quaternionf().slerp(arc, strength);
                 }
                 // frame maps world -> player: world rotation S composes as
                 // frame * conj(S)

@@ -1,5 +1,69 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 75: one pull per field, one carry per tick)
+
+- **The Great Unknown "plating slams me down at scale 1" was a
+  TRIPLE-application of the pull.** Since rounds 68/70 the capability's
+  applyFieldPullDeficit supplies a living entity's FULL intended pull
+  (BASE x strength) every field tick — but the plating's older
+  artificial-gravity force (zero-g dimensions) was still applied on
+  top, and it fired once for EVERY plate whose field contains the
+  entity (the 1-block bleed means a plated floor is several plates),
+  stacking to many times vanilla gravity. Scaled ships accidentally
+  hid it: transformDirection through the scaled ship matrix shrank the
+  redundant force by the ship scale (16x at 1/16), which is exactly
+  why 0.0625 felt normal while 1.0 slammed. The force now skips living
+  entities entirely (the deficit owns them, at every scale), and for
+  the non-living entities that still need it (items, carts — the
+  deficit's known gap) it is normalized after the ship transform
+  (scale-invariant) and applied at most once per entity per tick via a
+  capability claim, no matter how many plates overlap.
+- **The rotating-ship wall stutter: the ship idle anchor and VS's
+  dragger both carried the player.** VS's client EntityDragger runs
+  AFTER the entity tick and carries dragged entities by the ship's
+  full tick delta; the anchor pinning to the CURRENT tick pose during
+  the player tick meant the carry applied twice — the tick-end
+  position permanently led the anchor by one tick of ship motion,
+  addedMovementLastTick stopped matching the real displacement, and
+  VS's per-frame render-ride (which rewrites xo/yo/zo so the camera
+  lands on the drawn ship pose) was fed inconsistent inputs: a
+  tick-rate positional sawtooth. Up/down faces never showed it (the
+  deck's identity frame skips the anchor; on the ceiling the residual
+  is a twist about the VERTICAL eye arm — invisible), but on N/E/S/W
+  faces the horizontal 1.62-block eye arm and the hull radius
+  amplified it into the "major stuttering the moment I step onto a
+  wall face" report. While VS is actively dragging, the anchor now
+  pins to the PREV-tick pose so the dragger's own carry lands the
+  player exactly on the anchor — in steady state the anchor's setPos
+  is a no-op, VS owns the whole carry, and its render-ride math is
+  exact. Undragged entities keep the current-transform behavior.
+
+
+
+## Unreleased (2.0.0-dev) — 2026-08-22 (round 74: switch-easing, not caps — the smoothness architecture settles)
+
+- **Jumping STILL unsnapped after round 73 because the render branch
+  gated on the wrong ship reference**: capsuleGroundShip clears on the
+  first airborne frame, so the drawn-ship alignment flipped
+  surface->radial the instant a hop left the deck, bypassing the
+  held-normal grace entirely. The held surface's shipyard image (and
+  its ship) now survives through the grace via lastGroundShip — a hop
+  keeps the surface branch for its whole arc.
+- **The round-72 blanket 10-degree/frame arc cap is removed — it WAS
+  the fly-mode stutter.** Capping every correction throttled the
+  radial branch's legitimate full-strength per-frame tracking while
+  flying fast or close around a core (exactly the smoothness round 52
+  built). Replaced by BRANCH-SWITCH EASING: the capability tracks
+  which alignment branch the render pass takes; on any switch
+  (landing: radial->surface; hold expiry: surface->radial) the
+  correction strength ramps 0->1 over ~7 ticks, letting the smooth
+  tick chase show through the transition — while steady-state tracking
+  (standing on a spinning deck, orbiting a core, flying through the
+  field) runs at full strength with NO cap. Ease the switches, never
+  the tracking: the rule this whole smoothness saga converged on.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-08-22 (round 73: the sawtooth found — and jumps keep their snap)
 
 - **The spinning-ship jitter had an exact cause: the sub-tick camera
