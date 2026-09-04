@@ -35,10 +35,23 @@ import net.minecraftforge.fml.loading.FMLEnvironment;
  */
 public final class GravityFieldLookup {
 
+    /**
+     * WHO is asking a block-grid position query: fluids and particles can be
+     * switched off per field block (see {@code util.FieldTargets}); ANY is
+     * the plain "is there a field here" question (seat detection, the
+     * server's movement acceptance).
+     */
+    public enum Kind {
+        FLUID, PARTICLE, ANY
+    }
+
     /** How a field block entity answers position queries. */
     public interface Source {
-        /** Grid-space cardinal down at {@code pos}, or null when out of range. */
-        @Nullable Direction fluidDownAt(BlockPos pos);
+        /**
+         * Grid-space cardinal down at {@code pos} for {@code kind}, or null
+         * when out of range or when the block's settings exclude that kind.
+         */
+        @Nullable Direction downAt(BlockPos pos, Kind kind);
 
         /** Chebyshev-distance prefilter radius around {@link #sourcePos()}. */
         int sourceMaxRange();
@@ -89,20 +102,27 @@ public final class GravityFieldLookup {
             new ConcurrentHashMap<>();
         final java.util.concurrent.atomic.AtomicInteger maxRange =
             new java.util.concurrent.atomic.AtomicInteger(1);
+        // sources living in a ship's grid: only when any exist do WORLD
+        // fluid queries look across grids (see fluidDownAt)
+        final java.util.Set<BlockPos> shipSources = ConcurrentHashMap.newKeySet();
 
         static long chunkKey(int chunkX, int chunkZ) {
             return net.minecraft.world.level.ChunkPos.asLong(chunkX, chunkZ);
         }
 
-        void put(BlockPos pos, Entry entry) {
+        void put(BlockPos pos, Entry entry, boolean onShip) {
             byPos.put(pos, entry);
             byChunk.computeIfAbsent(chunkKey(pos.getX() >> 4, pos.getZ() >> 4),
                 k -> new ConcurrentHashMap<>()).put(pos, entry);
             maxRange.accumulateAndGet(entry.source().sourceMaxRange(), Math::max);
+            if (onShip) {
+                shipSources.add(pos);
+            }
         }
 
         void remove(BlockPos pos) {
             byPos.remove(pos);
+            shipSources.remove(pos);
             long key = chunkKey(pos.getX() >> 4, pos.getZ() >> 4);
             ConcurrentHashMap<BlockPos, Entry> bucket = byChunk.get(key);
             if (bucket != null) {
@@ -119,8 +139,10 @@ public final class GravityFieldLookup {
 
     /** Called by field block entities every tick they are active. */
     public static void register(Level level, BlockPos pos, Source source) {
+        BlockPos key = pos.immutable();
+        boolean onShip = org.valkyrienskies.mod.common.VSGameUtilsKt.isBlockInShipyard(level, key);
         SOURCES.computeIfAbsent(level, l -> new LevelIndex())
-            .put(pos.immutable(), new Entry(source, level.getGameTime()));
+            .put(key, new Entry(source, level.getGameTime()), onShip);
     }
 
     /**
@@ -225,7 +247,7 @@ public final class GravityFieldLookup {
      * could still mint permanent sources.
      */
     public static boolean hasFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
-        return bestFieldDownAt(getter, pos) != null;
+        return bestFluidFieldAt(getter, pos) != null;
     }
 
     /**
@@ -234,7 +256,7 @@ public final class GravityFieldLookup {
      * disabled, or when {@code getter} cannot be resolved to a level.
      */
     public static Direction fluidDownAt(@Nullable BlockGetter getter, BlockPos pos) {
-        Best best = bestFieldAt(getter, pos);
+        Best best = bestFluidFieldAt(getter, pos);
         return best != null ? best.down() : Direction.DOWN;
     }
 
@@ -245,17 +267,81 @@ public final class GravityFieldLookup {
      * sources (plates, normalizers).
      */
     public static boolean isRadialFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
-        Best best = bestFieldAt(getter, pos);
+        Best best = bestFluidFieldAt(getter, pos);
         return best != null && best.source().radialSkin();
     }
 
+    /**
+     * The fluid query: the position's own grid first; then — for WORLD
+     * positions, on the game threads — the grids of ships whose fields reach
+     * the point, so a ship carrying a field pulls the water it flies over
+     * (the grid cardinal rotated to the world and snapped to the nearest
+     * world cardinal, which world fluid can flow along). Ship grids never
+     * consult the world in return, and chunk-building threads (render
+     * regions) never consult ships at all — the ship index is not theirs to
+     * read concurrently; the server's fluid states carry the shape anyway.
+     */
     @Nullable
-    private static Direction bestFieldDownAt(@Nullable BlockGetter getter, BlockPos pos) {
-        Best best = bestFieldAt(getter, pos);
-        return best != null ? best.down() : null;
+    private static Best bestFluidFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
+        Best own = bestFieldAt(getter, pos, GravityConfig.gravityAffectsFluids.get(), Kind.FLUID);
+        if (own != null || !(getter instanceof Level level)) {
+            return own;
+        }
+        if (!GravityConfig.gravityAffectsFluids.get() || !GravityConfig.shipFieldsAffectWorldFluids.get()) {
+            return null;
+        }
+        LevelIndex index = SOURCES.get(level);
+        if (index == null || index.shipSources.isEmpty()) {
+            return null;
+        }
+        if (org.valkyrienskies.mod.common.VSGameUtilsKt.isBlockInShipyard(level, pos)) {
+            return null;
+        }
+        return shipFieldAt(level, index, pos, Kind.FLUID);
     }
 
     private record Best(Direction down, Source source) {}
+
+    /**
+     * The best ship-mounted field covering a WORLD block position, answered
+     * as the grid cardinal snapped to the nearest WORLD cardinal (fluids can
+     * only flow along the world's axes). Cached per world cell per tick.
+     */
+    @Nullable
+    private static Best shipFieldAt(Level level, LevelIndex index, BlockPos worldPos, Kind kind) {
+        KindCache cache = kindCache(level, kind);
+        Long key = worldPos.asLong();
+        Object cached = cache.ship.get(key);
+        if (cached != null) {
+            return cached == NULL_BEST ? null : (Best) cached;
+        }
+        Best result = null;
+        double reach = index.maxRange.get() + 1.0;
+        double cx = worldPos.getX() + 0.5;
+        double cy = worldPos.getY() + 0.5;
+        double cz = worldPos.getZ() + 0.5;
+        net.minecraft.world.phys.AABB probe = new net.minecraft.world.phys.AABB(
+            cx - reach, cy - reach, cz - reach, cx + reach, cy + reach, cz + reach);
+        for (org.valkyrienskies.core.api.ships.Ship ship
+            : org.valkyrienskies.mod.common.VSGameUtilsKt.getShipsIntersecting(level, probe)) {
+            org.joml.Vector3d local = new org.joml.Vector3d(cx, cy, cz);
+            ship.getTransform().getWorldToShipMatrix().transformPosition(local);
+            Best onShip = computeBestFieldAt(level, index, BlockPos.containing(local.x, local.y, local.z), kind);
+            if (onShip == null) {
+                continue;
+            }
+            org.joml.Vector3d dir = new org.joml.Vector3d(
+                onShip.down().getStepX(), onShip.down().getStepY(), onShip.down().getStepZ());
+            ship.getTransform().getShipToWorldMatrix().transformDirection(dir);
+            if (dir.lengthSquared() < 1.0E-12) {
+                continue;
+            }
+            result = new Best(Direction.getNearest(dir.x, dir.y, dir.z), onShip.source());
+            break;
+        }
+        cache.ship.put(key, result == null ? NULL_BEST : result);
+        return result;
+    }
 
     /**
      * PER-TICK QUERY MEMO. The fluid hooks ask for the field at the same
@@ -272,26 +358,39 @@ public final class GravityFieldLookup {
      */
     private static final Object NULL_BEST = new Object();
 
+    /** One memo per consumer kind: a source may answer fluids but not particles. */
+    private static final class KindCache {
+        // grid cell -> best source in that cell's own grid
+        final java.util.HashMap<Long, Object> grid = new java.util.HashMap<>(256);
+        // world cell -> best ship-mounted source reaching it (cross-grid)
+        final java.util.HashMap<Long, Object> ship = new java.util.HashMap<>(64);
+
+        void clear() {
+            grid.clear();
+            ship.clear();
+        }
+    }
+
     private static final class QueryCache {
         @Nullable Level level;
         long time = Long.MIN_VALUE;
-        final java.util.HashMap<Long, Object> results = new java.util.HashMap<>(256);
-        // world-cell -> ship field answer for particles (see particleDownVecAt)
-        final java.util.HashMap<Long, Object> shipResults = new java.util.HashMap<>(64);
+        final KindCache[] kinds = {new KindCache(), new KindCache(), new KindCache()};
     }
 
     private static final ThreadLocal<QueryCache> QUERY_CACHE = ThreadLocal.withInitial(QueryCache::new);
 
-    /**
-     * The field down for a PARTICLE at {@code pos} — the particle's OWN grid
-     * (shipyard coordinates for particles living on a ship, so a ship's
-     * fields answer in the ship's frame) — or null outside every field or
-     * when the feature is disabled.
-     */
-    @Nullable
-    public static Direction particleDownAt(@Nullable BlockGetter getter, BlockPos pos) {
-        Best best = bestFieldAt(getter, pos, GravityConfig.gravityAffectsParticles.get());
-        return best != null ? best.down() : null;
+    /** The current tick's memo for {@code kind} on this thread. */
+    private static KindCache kindCache(Level level, Kind kind) {
+        QueryCache cache = QUERY_CACHE.get();
+        long time = level.getGameTime();
+        if (cache.level != level || cache.time != time) {
+            cache.level = level;
+            cache.time = time;
+            for (KindCache k : cache.kinds) {
+                k.clear();
+            }
+        }
+        return cache.kinds[kind.ordinal()];
     }
 
     /**
@@ -302,7 +401,7 @@ public final class GravityFieldLookup {
      * state, so "is this seat under a field" is answered by the grid).
      */
     public static boolean hasEntityFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
-        return bestFieldAt(getter, pos, true) != null;
+        return bestFieldAt(getter, pos, true, Kind.ANY) != null;
     }
 
     /**
@@ -407,21 +506,18 @@ public final class GravityFieldLookup {
         }
 
         BlockPos worldPos = BlockPos.containing(x, y, z);
-        Best world = bestFieldAt(level, worldPos, true);
+        Best world = bestFieldAt(level, worldPos, true, Kind.PARTICLE);
         if (world != null) {
             return net.camacraft.gravityunbound.util.RotationUtil.getWorldRotationQuaternion(world.down());
         }
-
-        QueryCache cache = QUERY_CACHE.get();
-        long time = level.getGameTime();
-        if (cache.level != level || cache.time != time) {
-            cache.level = level;
-            cache.time = time;
-            cache.results.clear();
-            cache.shipResults.clear();
+        if (index.shipSources.isEmpty()) {
+            return null;
         }
+
+        // (the particle cache holds frames, not Best records: its own slot)
+        KindCache cache = kindCache(level, Kind.PARTICLE);
         Long key = worldPos.asLong();
-        Object cached = cache.shipResults.get(key);
+        Object cached = cache.ship.get(key);
         if (cached != null) {
             return cached == NULL_BEST ? null : (org.joml.Quaternionf) cached;
         }
@@ -434,7 +530,7 @@ public final class GravityFieldLookup {
             : org.valkyrienskies.mod.common.VSGameUtilsKt.getShipsIntersecting(level, probe)) {
             org.joml.Vector3d local = new org.joml.Vector3d(x, y, z);
             ship.getTransform().getWorldToShipMatrix().transformPosition(local);
-            Best onShip = bestFieldAt(level, BlockPos.containing(local.x, local.y, local.z), true);
+            Best onShip = computeBestFieldAt(level, index, BlockPos.containing(local.x, local.y, local.z), Kind.PARTICLE);
             if (onShip == null) {
                 continue;
             }
@@ -449,17 +545,12 @@ public final class GravityFieldLookup {
             result = frame;
             break;
         }
-        cache.shipResults.put(key, result == null ? NULL_BEST : result);
+        cache.ship.put(key, result == null ? NULL_BEST : result);
         return result;
     }
 
     @Nullable
-    private static Best bestFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
-        return bestFieldAt(getter, pos, GravityConfig.gravityAffectsFluids.get());
-    }
-
-    @Nullable
-    private static Best bestFieldAt(@Nullable BlockGetter getter, BlockPos pos, boolean enabled) {
+    private static Best bestFieldAt(@Nullable BlockGetter getter, BlockPos pos, boolean enabled, Kind kind) {
         if (!enabled) {
             return null;
         }
@@ -472,26 +563,19 @@ public final class GravityFieldLookup {
             return null;
         }
 
-        QueryCache cache = QUERY_CACHE.get();
-        long time = level.getGameTime();
-        if (cache.level != level || cache.time != time) {
-            cache.level = level;
-            cache.time = time;
-            cache.results.clear();
-            cache.shipResults.clear();
-        }
+        KindCache cache = kindCache(level, kind);
         Long key = pos.asLong();
-        Object cached = cache.results.get(key);
+        Object cached = cache.grid.get(key);
         if (cached != null) {
             return cached == NULL_BEST ? null : (Best) cached;
         }
-        Best best = computeBestFieldAt(level, index, pos);
-        cache.results.put(key, best == null ? NULL_BEST : best);
+        Best best = computeBestFieldAt(level, index, pos, kind);
+        cache.grid.put(key, best == null ? NULL_BEST : best);
         return best;
     }
 
     @Nullable
-    private static Best computeBestFieldAt(Level level, LevelIndex index, BlockPos pos) {
+    private static Best computeBestFieldAt(Level level, LevelIndex index, BlockPos pos, Kind kind) {
         long now = level.getGameTime();
         Direction best = null;
         Source bestSource = null;
@@ -530,7 +614,7 @@ public final class GravityFieldLookup {
                     if (priority < bestPriority || (priority == bestPriority && distance > bestDistance)) {
                         continue;
                     }
-                    Direction down = source.fluidDownAt(pos);
+                    Direction down = source.downAt(pos, kind);
                     if (down == null) {
                         continue;
                     }

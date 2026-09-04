@@ -915,10 +915,22 @@ public class GravityCapabilityImpl implements IGravityCapability {
         org.valkyrienskies.core.api.ships.properties.ShipTransform anchorTransform = ship.getTransform();
 
         if (shipAnchorPos == null || shipAnchorShipId != ship.getId()) {
+            // ENGAGE ONLY ONCE THE PLAYER HAS COME TO REST. Anchoring on the
+            // first input-free tick captured the feet BEFORE that tick's
+            // residual walking momentum moved them, and the next tick pinned
+            // them back: releasing a key glided for a moment and snapped
+            // back to where the key was let go. Let vanilla's ground friction
+            // finish the stop first (a few ticks, the same glide the plain
+            // world has); the remaining creep is then stripped on capture so
+            // the pinned point is exactly where the body already is.
+            if (tangentialVel.lengthSqr() > 0.03 * 0.03 * velScale * velScale) {
+                return;
+            }
             org.joml.Vector3d p = new org.joml.Vector3d(entity.getX(), entity.getY(), entity.getZ());
             anchorTransform.getWorldToShipMatrix().transformPosition(p);
             shipAnchorPos = p;
             shipAnchorShipId = ship.getId();
+            entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(normal.scale(normalVel), visualRotation));
             return;
         }
 

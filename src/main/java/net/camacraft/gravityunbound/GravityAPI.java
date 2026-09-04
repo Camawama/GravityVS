@@ -53,6 +53,11 @@ public class GravityAPI
 
 		// soft compatibility layers (each is a no-op when its mod is absent)
 		bus.addListener((net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent e) ->
-			e.enqueueWork(net.camacraft.gravityunbound.compat.AdAstraCompat::initIfLoaded));
+			e.enqueueWork(() ->
+			{
+				net.camacraft.gravityunbound.compat.AdAstraCompat.initIfLoaded();
+				// ship force inducer: attachment registration + attach-on-load
+				net.camacraft.gravityunbound.core.GravityCoreForceInducer.registerWithValkyrienSkies();
+			}));
 	}
 }

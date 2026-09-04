@@ -59,6 +59,9 @@ public class GravityNormalizerBlockEntity extends BlockEntity
     private boolean showParticles = false;
     // gravity acceleration (blocks/tick^2) inside the zone; 0.08 = vanilla
     private double gravityAccel = GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
+    // what the zone acts on (players / mobs / objects / particles / fluids),
+    // see util.FieldTargets
+    private int targets = net.camacraft.gravityunbound.util.FieldTargets.ALL;
 
     // client BEs stay inert until authoritative data arrives (same rollback
     // protection as plating/core — see GravityPlatingBlockEntity)
@@ -94,6 +97,9 @@ public class GravityNormalizerBlockEntity extends BlockEntity
         gravityAccel = tag.contains("gravityAccel")
             ? Mth.clamp(tag.getDouble("gravityAccel"), 0.0, 1.0)
             : GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
+        targets = tag.contains("targets")
+            ? net.camacraft.gravityunbound.util.FieldTargets.sanitize(tag.getInt("targets"))
+            : net.camacraft.gravityunbound.util.FieldTargets.ALL;
     }
 
     @Override
@@ -103,6 +109,7 @@ public class GravityNormalizerBlockEntity extends BlockEntity
         tag.putString("localDown", localDown.getName());
         tag.putBoolean("showParticles", showParticles);
         tag.putDouble("gravityAccel", gravityAccel);
+        tag.putInt("targets", targets);
     }
 
     @Nullable
@@ -222,6 +229,10 @@ public class GravityNormalizerBlockEntity extends BlockEntity
             if (comp == null) {
                 continue;
             }
+            // target categories (GUI)
+            if (!net.camacraft.gravityunbound.util.FieldTargets.appliesTo(be.targets, entity)) {
+                continue;
+            }
 
             // membership is tested in GRID space so the zone is exactly the
             // cube around the block even on a rotated ship
@@ -275,7 +286,12 @@ public class GravityNormalizerBlockEntity extends BlockEntity
     // ---- GravityFieldLookup.Source (fluid gravity queries) ----
 
     @Override
-    public @Nullable Direction fluidDownAt(net.minecraft.core.BlockPos pos) {
+    public @Nullable Direction downAt(
+        net.minecraft.core.BlockPos pos, net.camacraft.gravityunbound.util.GravityFieldLookup.Kind kind
+    ) {
+        if (!net.camacraft.gravityunbound.util.FieldTargets.has(targets, kind)) {
+            return null;
+        }
         AABB zone = fluidZoneCache;
         return zone != null && zone.contains(Vec3.atCenterOf(pos)) ? localDown : null;
     }
@@ -316,6 +332,10 @@ public class GravityNormalizerBlockEntity extends BlockEntity
         return showParticles;
     }
 
+    public int getTargets() {
+        return targets;
+    }
+
     /**
      * Server-side entry point for the settings GUI (arrives via
      * {@code network.UpdateGravityBlockSettingsPacket}). Every value is
@@ -323,6 +343,12 @@ public class GravityNormalizerBlockEntity extends BlockEntity
      */
     public void applySettingsFromGui(
         Direction newLocalDown, int newRange, double gravityAccel, boolean showParticles
+    ) {
+        applySettingsFromGui(newLocalDown, newRange, gravityAccel, showParticles, this.targets);
+    }
+
+    public void applySettingsFromGui(
+        Direction newLocalDown, int newRange, double gravityAccel, boolean showParticles, int targets
     ) {
         Level world = getLevel();
         if (world == null || world.isClientSide()) {
@@ -332,6 +358,7 @@ public class GravityNormalizerBlockEntity extends BlockEntity
         this.range = Mth.clamp(newRange, 1, GravityConfig.normalizerMaxRange.get());
         this.gravityAccel = Mth.clamp(gravityAccel, 0.0, 1.0);
         this.showParticles = showParticles;
+        this.targets = net.camacraft.gravityunbound.util.FieldTargets.sanitize(targets);
         sync();
     }
 }

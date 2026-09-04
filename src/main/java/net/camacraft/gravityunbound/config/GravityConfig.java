@@ -35,6 +35,8 @@ public class GravityConfig
 	public static ForgeConfigSpec.IntValue gravityCoreDefaultRange;
 	public static ForgeConfigSpec.IntValue gravityCoreMaxRange;
 	public static ForgeConfigSpec.BooleanValue gravityCoreAffectsShips;
+	public static ForgeConfigSpec.BooleanValue gravityPlatingAffectsShips;
+	public static ForgeConfigSpec.BooleanValue shipFieldsAffectWorldFluids;
 	public static ForgeConfigSpec.DoubleValue gravityCoreShipForceMultiplier;
 
 	// gravity normalizer
@@ -91,6 +93,8 @@ public class GravityConfig
         GravityConfig.gravityCoreDefaultRange = config.comment("default radius (blocks) of a freshly placed gravity core's field").defineInRange("gravityCoreDefaultRange", 8, 1, 128);
         GravityConfig.gravityCoreMaxRange = config.comment("maximum radius (blocks) a gravity core can be upgraded to").defineInRange("gravityCoreMaxRange", 32, 1, 128);
         GravityConfig.gravityCoreAffectsShips = config.comment("whether gravity cores pull/push Valkyrien Skies ships").define("gravityCoreAffectsShips", true);
+        GravityConfig.gravityPlatingAffectsShips = config.comment("whether gravity plating fields pull/push Valkyrien Skies ships (per-plate toggle in the settings GUI)").define("gravityPlatingAffectsShips", true);
+        GravityConfig.shipFieldsAffectWorldFluids = config.comment("whether fields mounted on Valkyrien Skies ships also bend the WORLD's liquids they fly over (a ship's field pulling water out of a lake)").define("shipFieldsAffectWorldFluids", true);
         GravityConfig.gravityCoreShipForceMultiplier = config.comment("multiplier for the force gravity cores apply to ships (1.0 = 1g)").defineInRange("gravityCoreShipForceMultiplier", 1.0, 0.0, 10.0);
         config.pop();
 

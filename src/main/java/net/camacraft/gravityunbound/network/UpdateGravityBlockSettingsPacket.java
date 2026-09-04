@@ -74,6 +74,14 @@ public class UpdateGravityBlockSettingsPacket
 		// position — the ship check below covers that case
 		private static final double MAX_DISTANCE_SQ = 4096.0;
 
+		/** Target-category mask; a payload from an older client means "everything". */
+		private static int readTargets(CompoundTag tag)
+		{
+			return tag.contains("targets")
+				? net.camacraft.gravityunbound.util.FieldTargets.sanitize(tag.getInt("targets"))
+				: net.camacraft.gravityunbound.util.FieldTargets.ALL;
+		}
+
 		public static boolean onMessage(UpdateGravityBlockSettingsPacket message, Supplier<NetworkEvent.Context> ctx)
 		{
 			ctx.get().enqueueWork(() ->
@@ -125,6 +133,8 @@ public class UpdateGravityBlockSettingsPacket
 									tag.getDouble("gravityAccel"),
 									tag.getBoolean("surfaceSnap"),
 									tag.getBoolean("showParticles"),
+									!tag.contains("affectsShips") || tag.getBoolean("affectsShips"),
+									readTargets(tag),
 									tag.getBoolean("applyToConnected")
 								);
 								// wake fluids so they re-settle under the new field state;
@@ -147,7 +157,8 @@ public class UpdateGravityBlockSettingsPacket
 								tag.getDouble("gravityAccel"),
 								tag.getBoolean("surfaceSnap"),
 								tag.getBoolean("showParticles"),
-								!tag.contains("affectsShips") || tag.getBoolean("affectsShips")
+								!tag.contains("affectsShips") || tag.getBoolean("affectsShips"),
+								readTargets(tag)
 							);
 							net.camacraft.gravityunbound.util.GravityFieldLookup.resettleFluidsAround(
 								level, pos, Math.max(oldRange, be.sourceMaxRange()));
@@ -165,7 +176,8 @@ public class UpdateGravityBlockSettingsPacket
 									localDown,
 									tag.getInt("range"),
 									tag.getDouble("gravityAccel"),
-									tag.getBoolean("showParticles")
+									tag.getBoolean("showParticles"),
+									readTargets(tag)
 								);
 								net.camacraft.gravityunbound.util.GravityFieldLookup.resettleFluidsAround(
 									level, pos, Math.max(oldRange, be.sourceMaxRange()));

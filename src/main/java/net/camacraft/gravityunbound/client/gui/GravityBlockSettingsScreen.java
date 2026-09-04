@@ -14,13 +14,16 @@ import net.camacraft.gravityunbound.network.UpdateGravityBlockSettingsPacket;
 import net.camacraft.gravityunbound.network.UpdateGravityBlockSettingsPacket.TargetType;
 import net.camacraft.gravityunbound.normalizer.GravityNormalizerBlockEntity;
 import net.camacraft.gravityunbound.plating.GravityPlatingBlockEntity;
+import net.camacraft.gravityunbound.util.FieldTargets;
 
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -40,8 +43,10 @@ import net.minecraft.world.level.block.entity.BlockEntity;
  *
  * Layout: widgets are grouped into labeled SECTIONS (small gray header +
  * separator line) — "Field" (direction/force, size, falloff), "Gravity"
- * (acceleration + presets, surface snap), "Ship &amp; Visuals" / "Visuals" —
- * with the action row at the bottom. "Copy to Connected Plates" (plating
+ * (acceleration + presets, surface snap), "Ship &amp; Visuals" / "Visuals",
+ * "Affects" (which categories the field acts on: players, mobs, objects,
+ * particles, fluids — green = on, red = off) — with the action row at the
+ * bottom. "Copy to Connected Plates" (plating
  * only) applies the on-screen values to the whole connected plate group
  * IMMEDIATELY without closing, and briefly shows "Copied!".
  */
@@ -75,6 +80,7 @@ public class GravityBlockSettingsScreen extends Screen {
     private boolean surfaceSnap = true;
     private boolean affectsShips = true;
     private boolean showParticles = false;
+    private int targets = FieldTargets.ALL;
     private Direction localDown = Direction.DOWN;
     private double initialAccel = GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
     private String accelText;
@@ -131,6 +137,8 @@ public class GravityBlockSettingsScreen extends Screen {
                         gradualFalloff = side.gradualFalloff;
                         surfaceSnap = side.surfaceSnap;
                         showParticles = side.showParticles;
+                        affectsShips = side.affectsShips;
+                        targets = side.targets;
                         initialAccel = side.gravityAccel;
                     }
                 }
@@ -143,6 +151,7 @@ public class GravityBlockSettingsScreen extends Screen {
                     surfaceSnap = be.isSurfaceSnap();
                     affectsShips = be.isAffectsShips();
                     showParticles = be.isShowParticles();
+                    targets = be.getTargets();
                     initialAccel = be.getGravityAccel();
                 }
             }
@@ -151,6 +160,7 @@ public class GravityBlockSettingsScreen extends Screen {
                     localDown = be.getLocalDown();
                     rangeValue = be.getRange();
                     showParticles = be.isShowParticles();
+                    targets = be.getTargets();
                     initialAccel = be.getGravityAccel();
                 }
             }
@@ -164,11 +174,11 @@ public class GravityBlockSettingsScreen extends Screen {
 
         // rows + section gaps per variant, vertically centered
         int rows = switch (type) {
-            case PLATING -> 7;   // force|falloff, slider | accel, presets, snap | visuals | actions
-            case CORE -> 7;
-            case NORMALIZER -> 6;
+            case PLATING -> 9;   // force|falloff, slider | accel, presets, snap | ships|visuals | targets x2 | actions
+            case CORE -> 9;
+            case NORMALIZER -> 8;
         };
-        int sections = 3;
+        int sections = 4;
         int total = rows * ROW_HEIGHT + sections * SECTION_GAP;
         int x = this.width / 2 - WIDGET_WIDTH / 2;
         int y = Math.max(28, (this.height - total) / 2);
@@ -260,11 +270,11 @@ public class GravityBlockSettingsScreen extends Screen {
         }
 
         // ---- Ship & Visuals / Visuals section ----
-        y = sectionHeader(type == TargetType.CORE
+        y = sectionHeader(type != TargetType.NORMALIZER
             ? "gravity_changer.gui.section.ship_visuals"
             : "gravity_changer.gui.section.visuals", y);
 
-        if (type == TargetType.CORE) {
+        if (type != TargetType.NORMALIZER) {
             // Affects Ships | Field Visualization share one row
             addRenderableWidget(CycleButton.onOffBuilder(affectsShips)
                 .create(x, y, HALF_WIDTH, WIDGET_HEIGHT,
@@ -281,6 +291,17 @@ public class GravityBlockSettingsScreen extends Screen {
                     Component.translatable("gravity_changer.gui.field_visual"),
                     (button, value) -> showParticles = value));
         }
+        y += ROW_HEIGHT;
+
+        // ---- Affects section: per-category toggles (green on / red off) ----
+        y = sectionHeader("gravity_changer.gui.section.targets", y);
+        int thirdWidth = (WIDGET_WIDTH - 2 * 4) / 3;
+        addRenderableWidget(targetToggle(x, y, thirdWidth, FieldTargets.PLAYERS, "players"));
+        addRenderableWidget(targetToggle(x + thirdWidth + 4, y, thirdWidth, FieldTargets.MOBS, "mobs"));
+        addRenderableWidget(targetToggle(x + 2 * (thirdWidth + 4), y, thirdWidth, FieldTargets.OBJECTS, "objects"));
+        y += ROW_HEIGHT;
+        addRenderableWidget(targetToggle(x, y, HALF_WIDTH, FieldTargets.PARTICLES, "particles"));
+        addRenderableWidget(targetToggle(x + HALF_WIDTH + 4, y, HALF_WIDTH, FieldTargets.FLUIDS, "fluids"));
         y += ROW_HEIGHT;
 
         // ---- action row ----
@@ -308,6 +329,23 @@ public class GravityBlockSettingsScreen extends Screen {
             addRenderableWidget(Button.builder(Component.translatable("gui.cancel"), button -> onClose())
                 .bounds(x + HALF_WIDTH + 4, y, HALF_WIDTH, WIDGET_HEIGHT).build());
         }
+    }
+
+    /** One target-category toggle: flips a bit of {@link #targets}. */
+    private Button targetToggle(int x, int y, int width, int bit, String name) {
+        Button button = Button.builder(targetLabel(bit, name), b -> {
+                targets ^= bit;
+                b.setMessage(targetLabel(bit, name));
+            })
+            .bounds(x, y, width, WIDGET_HEIGHT).build();
+        button.setTooltip(Tooltip.create(Component.translatable("gravity_changer.gui.target." + name + ".tooltip")));
+        return button;
+    }
+
+    private Component targetLabel(int bit, String name) {
+        boolean on = (targets & bit) != 0;
+        return Component.translatable("gravity_changer.gui.target." + name)
+            .withStyle(on ? ChatFormatting.GREEN : ChatFormatting.RED);
     }
 
     private Component connectedLabel() {
@@ -340,6 +378,8 @@ public class GravityBlockSettingsScreen extends Screen {
                 tag.putDouble("gravityAccel", accel);
                 tag.putBoolean("surfaceSnap", surfaceSnap);
                 tag.putBoolean("showParticles", showParticles);
+                tag.putBoolean("affectsShips", affectsShips);
+                tag.putInt("targets", targets);
                 tag.putBoolean("applyToConnected", applyToConnected);
             }
             case CORE -> {
@@ -350,12 +390,14 @@ public class GravityBlockSettingsScreen extends Screen {
                 tag.putBoolean("surfaceSnap", surfaceSnap);
                 tag.putBoolean("showParticles", showParticles);
                 tag.putBoolean("affectsShips", affectsShips);
+                tag.putInt("targets", targets);
             }
             case NORMALIZER -> {
                 tag.putString("localDown", localDown.getName());
                 tag.putInt("range", rangeValue);
                 tag.putDouble("gravityAccel", accel);
                 tag.putBoolean("showParticles", showParticles);
+                tag.putInt("targets", targets);
             }
         }
         GravityNetwork.sendToServer(new UpdateGravityBlockSettingsPacket(pos, type, tag));

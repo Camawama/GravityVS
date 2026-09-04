@@ -470,8 +470,13 @@ public abstract class EntityRenderDispatcherMixin {
      */
     @org.spongepowered.asm.mixin.Unique
     private static double gravityunbound$dollScale(Entity entity) {
-        float natural = entity.getType().getDimensions().height;
-        float actual = entity.getDimensions(net.minecraft.world.entity.Pose.STANDING).height;
+        // the pose's UNSCALED dimensions come from the direct lookup (a
+        // player's pose table is not touched by Pehkui), the SCALED ones are
+        // the entity's live body size — the ratio is the scale to undo.
+        // (Comparing the direct lookup against the type's default height was
+        // 1 for players at any scale, which left the doll's spheres tiny.)
+        float natural = entity.getDimensions(entity.getPose()).height;
+        float actual = entity.getBbHeight();
         if (natural <= 1.0E-4F || actual <= 1.0E-4F) {
             return 1.0D;
         }

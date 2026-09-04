@@ -33,6 +33,10 @@ public class GravityMixinPlugin implements IMixinConfigPlugin
 		{
 			return false;
 		}
+		if(mixinClassName.equals("net.camacraft.gravityunbound.mixin.compat.AdAstraFluidMixin") && LoadingModList.get().getModFileById("ad_astra") == null)
+		{
+			return false;
+		}
 		return true;
 	}
 

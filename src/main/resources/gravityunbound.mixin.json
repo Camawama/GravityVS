@@ -58,6 +58,7 @@
     "WitchMixin",
     "WitherBossMixin",
     "compat.ACEntityMixin",
+    "compat.AdAstraFluidMixin",
     "compat.VSEntityDraggerMixin",
     "compat.VSEntityShipCollisionMixin",
     "fall_distance.ServerGamePacketListenerImplMixin",

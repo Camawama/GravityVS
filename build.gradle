@@ -177,10 +177,16 @@ dependencies {
     implementation fg.deobf("thedarkcolour:kotlinforforge:4.11.0")
     implementation fg.deobf("org.valkyrienskies:valkyrienskies-120-forge:2.4.11")
 
-    // Core API: Using '+' allows Gradle to find the version matching the mod automatically
-    implementation "org.valkyrienskies.core:api:+"
-    implementation "org.valkyrienskies.core:impl:+"
-    implementation "org.valkyrienskies.core:util:+"
+    // Core API: PINNED to the exact build VS 2.4.11 bundles (see its
+    // META-INF/jars: api-1.1.0+cf208d8b56, util-1.1.0+cf208d8b56). A '+'
+    // wildcard once resolved to a NEWER core build whose
+    // LoadedServerShip.setAttachment returns void instead of Object — the
+    // JVM matches the full descriptor, so the shipped jar threw
+    // NoSuchMethodError the first time a field pulled a ship. Bump this
+    // hash together with the VS version above, never independently.
+    implementation "org.valkyrienskies.core:api:1.1.0+cf208d8b56"
+    implementation "org.valkyrienskies.core:impl:1.1.0+cf208d8b56"
+    implementation "org.valkyrienskies.core:util:1.1.0+cf208d8b56"
 
     implementation("org.joml:joml:1.10.5")
 

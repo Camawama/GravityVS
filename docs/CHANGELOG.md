@@ -1,5 +1,77 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-09-04 (round 83: lakes, orbit liquids, what a field touches, ships in the field)
+
+- **Still water now answers a field.** A lake never noticed a field
+  brought next to it because settled fluid has no scheduled ticks — the
+  fluid hooks only run when something wakes the block. Placing a plate,
+  a core or a normalizer now wakes every fluid block in the source's
+  reach once, and a SHIP-MOUNTED field sweeps the world region it covers
+  (plus the region it just left, so pulled water settles back) every
+  eight ticks while it flies. World fluid inside a ship's field follows
+  it: the fluid lookup, after finding no field in the block's own grid,
+  asks the grids of ships whose fields reach the point and answers the
+  ship's grid cardinal rotated into the world and snapped to the nearest
+  world axis (config `shipFieldsAffectWorldFluids`). Ship grids never
+  consult the world in return, and render-thread regions never consult
+  ships (their index is not safe to read there) — the server's fluid
+  states carry the shape either way.
+- **Ad Astra no longer freezes liquids inside a field in orbit.** Ad
+  Astra cancels `FlowingFluid.spread` at the head wherever planet gravity
+  is below 0.05 — so in its zero-g dimensions a liquid inside a gravity
+  field sat in its single block. The cancel is now itself cancelled
+  (MixinSquared handler injection, loaded only with Ad Astra present) for
+  blocks a field covers; Ad Astra's space outside fields stays frozen.
+- **Every field block chooses what it acts on.** A new "Affects" section
+  in the settings screen toggles Players, Mobs, Objects (items,
+  projectiles, vehicles, falling blocks), Particles and Fluids
+  independently (green on, red off) for plating sides, cores and
+  normalizers; stored per block (per side for plating), copied with
+  "Copy to Connected Plates". A field can bend leaves and pull items
+  while leaving everyone standing.
+- **Ships are pulled by fields at last.** The core's "Affects Ships"
+  never did anything: the ship intersection query hands back ship DATA
+  objects, and the code required them to be the LOADED ship — which they
+  never are — so every ship was skipped. The loaded ship is now looked up
+  by id. Plating sides get the same option ("Affects Ships", config
+  `gravityPlatingAffectsShips`): every other loaded ship whose center of
+  mass lies inside a side's field is pulled along that side (mass × 1 g ×
+  the side's acceleration setting × falloff), once per ship per tick no
+  matter how many plates of a deck hold it — a landing pad's field draws
+  a shuttle down onto it. Cores scale by their acceleration setting the
+  same way. Normalizers deliberately have no ship option.
+- **The first ship a field pulled crashed the server — the build was
+  compiling against the wrong Valkyrien Skies core.** `NoSuchMethodError`
+  for `LoadedServerShip.setAttachment`: build.gradle resolved the VS core
+  API with a `+` wildcard, which picked a NEWER core build than the one
+  VS 2.4.11 bundles (core 1.1.0+cf208d8b56); that build changed
+  `setAttachment` to return `void` instead of `Object`, and the JVM
+  matches the full method descriptor. The three core artifacts are now
+  pinned to the exact build inside VS 2.4.11 (bump them together with the
+  VS version). The same drift hid a second break: in 2.4.11
+  `ShipForcesInducer` is an empty marker and the physics thread calls
+  `ShipPhysicsListener.physTick`, so the inducer now implements both
+  entry points. It is also registered as a VS attachment and attached to
+  every server ship as it loads — the pattern VS's own buoyancy handler
+  uses — so it is in the physics ship's listener list from the first
+  frame. VS insists attachment classes are `final` and throws on
+  `setAttachment` for anything unregistered, so the inducer is final now,
+  and if a future VS build refuses the registration the fields simply
+  leave ships alone (one warning in the log) instead of crashing the
+  server. None of this had ever run in-game: the core's "Affects Ships"
+  bug above had skipped every ship before it reached the inducer.
+- **Releasing the walk key on a ship no longer glides and snaps back.**
+  The idle anchor (which pins a standing player to the deck of a moving
+  ship) was captured the instant the walk key came up, while the player
+  still carried a tick of momentum: the body kept moving, then the anchor
+  hauled it back to where it had been captured. The anchor is now only
+  taken once the player is at rest on the deck.
+- **Capsule spheres on the paper doll at 1/16 scale.** The doll's
+  reference height compared two unscaled numbers (Pehkui leaves a
+  player's pose table alone); it now compares the pose height with the
+  entity's actual scaled height, so the spheres match the doll at every
+  scale.
+
 ## Unreleased (2.0.0-dev) — 2026-09-04 (round 82: the world-cube rejection, particles in the field's frame, scaled limbs, the doll's scale)
 
 - **Plated cubes in the WORLD work again — the server was rejecting the

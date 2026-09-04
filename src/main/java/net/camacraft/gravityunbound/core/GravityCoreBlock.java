@@ -55,6 +55,20 @@ public class GravityCoreBlock extends BaseEntityBlock {
 
 
     @Override
+    public void onPlace(BlockState state, Level level, BlockPos pos, BlockState oldState, boolean isMoving) {
+        super.onPlace(state, level, pos, oldState, isMoving);
+        // a new field over STILL liquid: still blocks have no scheduled
+        // fluid ticks, so a lake in reach of a freshly placed core never
+        // noticed the field — wake everything in reach once
+        if (!level.isClientSide() && !state.is(oldState.getBlock())) {
+            int radius = level.getBlockEntity(pos)
+                instanceof net.camacraft.gravityunbound.util.GravityFieldLookup.Source source
+                ? source.sourceMaxRange() : net.camacraft.gravityunbound.config.GravityConfig.gravityCoreMaxRange.get() + 2;
+            net.camacraft.gravityunbound.util.GravityFieldLookup.resettleFluidsAround(level, pos, radius);
+        }
+    }
+
+    @Override
     public void onRemove(BlockState state, Level level, BlockPos pos, BlockState newState, boolean isMoving) {
         // breaking the field source: drop it from the fluid-gravity registry
         // IMMEDIATELY (the tick-expiry is too slow — re-settling fluids must

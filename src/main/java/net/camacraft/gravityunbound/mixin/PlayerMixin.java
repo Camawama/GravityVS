@@ -165,7 +165,9 @@ public abstract class PlayerMixin extends LivingEntity {
     private double gravityunbound$heightScale() {
         Pose pose = this.getPose();
         float unscaled = POSES.getOrDefault(pose, Player.STANDING_DIMENSIONS).height;
-        float scaled = this.getDimensions(pose).height;
+        // the live body height (Pehkui scales the refreshed dimensions, not
+        // the player's pose table lookup)
+        float scaled = this.getBbHeight();
         if (unscaled <= 1.0E-4F || scaled <= 1.0E-4F) {
             return 1.0D;
         }

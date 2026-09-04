@@ -55,6 +55,13 @@ public class GravityCoreBlockEntity extends BlockEntity
     // whether this core pulls/pushes Valkyrien Skies ships (per-block toggle,
     // ANDed with the global gravityCoreAffectsShips config)
     private boolean affectsShips = true;
+    // what the field acts on (players / mobs / objects / particles /
+    // fluids), see util.FieldTargets
+    private int targets = net.camacraft.gravityunbound.util.FieldTargets.ALL;
+    // the world-space box this ship-mounted core's field covered at its
+    // last world-fluid wake-up (see GravityPlatingBlockEntity)
+    private @Nullable AABB lastShipWakeBox = null;
+    private static final int SHIP_FLUID_WAKE_PERIOD = 8;
 
     // A client block entity that never received authoritative data (a break
     // prediction the server rejected rolls the block back with a FRESH BE)
@@ -89,6 +96,9 @@ public class GravityCoreBlockEntity extends BlockEntity
             : GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
         surfaceSnap = !tag.contains("surfaceSnap") || tag.getBoolean("surfaceSnap");
         affectsShips = !tag.contains("affectsShips") || tag.getBoolean("affectsShips");
+        targets = tag.contains("targets")
+            ? net.camacraft.gravityunbound.util.FieldTargets.sanitize(tag.getInt("targets"))
+            : net.camacraft.gravityunbound.util.FieldTargets.ALL;
     }
 
     @Override
@@ -101,6 +111,7 @@ public class GravityCoreBlockEntity extends BlockEntity
         tag.putDouble("gravityAccel", gravityAccel);
         tag.putBoolean("surfaceSnap", surfaceSnap);
         tag.putBoolean("affectsShips", affectsShips);
+        tag.putInt("targets", targets);
     }
 
     @Nullable
@@ -173,9 +184,53 @@ public class GravityCoreBlockEntity extends BlockEntity
                 );
             }
         }
-        else if (GravityConfig.gravityCoreAffectsShips.get() && be.affectsShips) {
-            be.applyToShips(world, ownShip, center, range, shipScale, searchBox);
+        else {
+            if (GravityConfig.gravityCoreAffectsShips.get() && be.affectsShips) {
+                be.applyToShips(world, ownShip, center, range, shipScale, searchBox);
+            }
+            if (ownShip != null) {
+                be.wakeWorldFluidsUnderShip(world, ownShip);
+            }
         }
+    }
+
+    /**
+     * A ship-mounted core flying over WORLD liquid: wake the fluid blocks in
+     * the region the field covers (and the region it just left) every few
+     * ticks — still water has no scheduled ticks of its own. See the plating
+     * counterpart; the cross-grid fluid lookup does the bending.
+     */
+    private void wakeWorldFluidsUnderShip(Level world, Ship ownShip) {
+        if (!GravityConfig.gravityAffectsFluids.get() || !GravityConfig.shipFieldsAffectWorldFluids.get()
+            || !net.camacraft.gravityunbound.util.FieldTargets.has(
+                targets, net.camacraft.gravityunbound.util.GravityFieldLookup.Kind.FLUID)) {
+            return;
+        }
+        long gameTime = world.getGameTime();
+        if (Math.floorMod(gameTime + worldPosition.hashCode(), SHIP_FLUID_WAKE_PERIOD) != 0) {
+            return;
+        }
+        Vec3 gridCenter = Vec3.atCenterOf(worldPosition);
+        AABB gridBox = new AABB(
+            gridCenter.x - range, gridCenter.y - range, gridCenter.z - range,
+            gridCenter.x + range, gridCenter.y + range, gridCenter.z + range);
+        Vector3d[] corners = {
+            new Vector3d(gridBox.minX, gridBox.minY, gridBox.minZ), new Vector3d(gridBox.maxX, gridBox.minY, gridBox.minZ),
+            new Vector3d(gridBox.minX, gridBox.maxY, gridBox.minZ), new Vector3d(gridBox.maxX, gridBox.maxY, gridBox.minZ),
+            new Vector3d(gridBox.minX, gridBox.minY, gridBox.maxZ), new Vector3d(gridBox.maxX, gridBox.minY, gridBox.maxZ),
+            new Vector3d(gridBox.minX, gridBox.maxY, gridBox.maxZ), new Vector3d(gridBox.maxX, gridBox.maxY, gridBox.maxZ)
+        };
+        double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
+        for (Vector3d corner : corners) {
+            ownShip.getTransform().getShipToWorldMatrix().transformPosition(corner);
+            minX = Math.min(minX, corner.x); minY = Math.min(minY, corner.y); minZ = Math.min(minZ, corner.z);
+            maxX = Math.max(maxX, corner.x); maxY = Math.max(maxY, corner.y); maxZ = Math.max(maxZ, corner.z);
+        }
+        AABB worldBox = new AABB(minX, minY, minZ, maxX, maxY, maxZ);
+        AABB sweep = lastShipWakeBox != null ? worldBox.minmax(lastShipWakeBox) : worldBox;
+        lastShipWakeBox = worldBox;
+        net.camacraft.gravityunbound.util.GravityFieldLookup.resettleFluids(world, sweep);
     }
 
     private void applyToEntities(Level world, Vec3 center, double range, double shipScale, AABB searchBox) {
@@ -209,6 +264,11 @@ public class GravityCoreBlockEntity extends BlockEntity
 
             GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull(entity);
             if (comp == null) {
+                continue;
+            }
+            // target categories (GUI): the field may leave players, mobs
+            // or objects alone entirely
+            if (!net.camacraft.gravityunbound.util.FieldTargets.appliesTo(targets, entity)) {
                 continue;
             }
 
@@ -337,8 +397,18 @@ public class GravityCoreBlockEntity extends BlockEntity
         }
 
         for (Ship ship : VSGameUtilsKt.getShipsIntersecting(serverLevel, searchBox)) {
-            // must be LOADED: attachment access on an unloaded ServerShip throws
-            if (ship == ownShip || !(ship instanceof org.valkyrienskies.core.api.ships.LoadedServerShip serverShip)) {
+            if (ownShip != null && ship.getId() == ownShip.getId()) {
+                continue;
+            }
+            // The intersection query answers with ship DATA objects, which
+            // never are the LOADED ship (the old instanceof test on them
+            // filtered every ship out — this is why "affects ships" never
+            // did anything). Forces need the loaded ship, looked up by id;
+            // null while the ship is unloaded, and attachment access on an
+            // unloaded ship would throw.
+            org.valkyrienskies.core.api.ships.LoadedServerShip serverShip =
+                VSGameUtilsKt.getShipObjectWorld(serverLevel).getLoadedShips().getById(ship.getId());
+            if (serverShip == null) {
                 continue;
             }
 
@@ -353,7 +423,9 @@ public class GravityCoreBlockEntity extends BlockEntity
             double distance = worldDistance / shipScale;
 
             double mass = serverShip.getInertiaData().getMass();
-            double acceleration = 10.0 * GravityConfig.gravityCoreShipForceMultiplier.get(); // ~1g in m/s^2
+            // ~1 g in m/s^2, scaled by the core's own acceleration setting
+            double acceleration = 10.0 * GravityConfig.gravityCoreShipForceMultiplier.get()
+                * (gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL);
             if (gradualFalloff) {
                 // ships obey the same inverse-square falloff as entities
                 acceleration *= Math.min(1.0, 16.0 / (distance * distance));
@@ -363,7 +435,11 @@ public class GravityCoreBlockEntity extends BlockEntity
                 force.negate();
             }
 
-            GravityCoreForceInducer.getOrCreate(serverShip).queueForce(force);
+            GravityCoreForceInducer inducer = GravityCoreForceInducer.getOrCreate(serverShip);
+            if (inducer == null) {
+                return; // inducer unavailable (registration refused): leave ships alone
+            }
+            inducer.queueForce(force);
         }
     }
 
@@ -383,7 +459,12 @@ public class GravityCoreBlockEntity extends BlockEntity
     // own block grid (a ship core bends ship fluids in shipyard space)
 
     @Override
-    public @Nullable net.minecraft.core.Direction fluidDownAt(net.minecraft.core.BlockPos pos) {
+    public @Nullable net.minecraft.core.Direction downAt(
+        net.minecraft.core.BlockPos pos, net.camacraft.gravityunbound.util.GravityFieldLookup.Kind kind
+    ) {
+        if (!net.camacraft.gravityunbound.util.FieldTargets.has(targets, kind)) {
+            return null;
+        }
         int dx = pos.getX() - worldPosition.getX();
         int dy = pos.getY() - worldPosition.getY();
         int dz = pos.getZ() - worldPosition.getZ();
@@ -475,6 +556,10 @@ public class GravityCoreBlockEntity extends BlockEntity
         return showParticles;
     }
 
+    public int getTargets() {
+        return targets;
+    }
+
     /**
      * Server-side entry point for the settings GUI (arrives via
      * {@code network.UpdateGravityBlockSettingsPacket}). Every value is
@@ -484,6 +569,15 @@ public class GravityCoreBlockEntity extends BlockEntity
         int newRange, boolean attracting, boolean gradualFalloff,
         double gravityAccel, boolean surfaceSnap, boolean showParticles,
         boolean affectsShips
+    ) {
+        applySettingsFromGui(newRange, attracting, gradualFalloff, gravityAccel, surfaceSnap, showParticles,
+            affectsShips, this.targets);
+    }
+
+    public void applySettingsFromGui(
+        int newRange, boolean attracting, boolean gradualFalloff,
+        double gravityAccel, boolean surfaceSnap, boolean showParticles,
+        boolean affectsShips, int targets
     ) {
         Level world = getLevel();
         if (world == null || world.isClientSide()) {
@@ -496,6 +590,7 @@ public class GravityCoreBlockEntity extends BlockEntity
         this.surfaceSnap = surfaceSnap;
         this.showParticles = showParticles;
         this.affectsShips = affectsShips;
+        this.targets = net.camacraft.gravityunbound.util.FieldTargets.sanitize(targets);
         sync();
     }
 }

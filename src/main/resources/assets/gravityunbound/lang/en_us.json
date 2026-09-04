@@ -147,5 +147,16 @@
   "gravity_changer.gui.section.field": "Field",
   "gravity_changer.gui.section.gravity": "Gravity",
   "gravity_changer.gui.section.ship_visuals": "Ship & Visuals",
-  "gravity_changer.gui.section.visuals": "Visuals"
+  "gravity_changer.gui.section.visuals": "Visuals",
+  "gravity_changer.gui.section.targets": "Affects",
+  "gravity_changer.gui.target.players": "Players",
+  "gravity_changer.gui.target.players.tooltip": "Whether the field acts on players",
+  "gravity_changer.gui.target.mobs": "Mobs",
+  "gravity_changer.gui.target.mobs.tooltip": "Whether the field acts on mobs and animals",
+  "gravity_changer.gui.target.objects": "Objects",
+  "gravity_changer.gui.target.objects.tooltip": "Whether the field acts on items, projectiles, vehicles and falling blocks",
+  "gravity_changer.gui.target.particles": "Particles",
+  "gravity_changer.gui.target.particles.tooltip": "Whether the field bends particles (smoke, drips, leaves...)",
+  "gravity_changer.gui.target.fluids": "Fluids",
+  "gravity_changer.gui.target.fluids.tooltip": "Whether the field pulls water and lava along its down"
 }

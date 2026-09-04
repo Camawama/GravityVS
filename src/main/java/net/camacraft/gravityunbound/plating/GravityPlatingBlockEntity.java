@@ -77,6 +77,13 @@ public class GravityPlatingBlockEntity extends BlockEntity
         // whether entities under this plate's field may planet-walk-snap to
         // the surfaces they stand on (GUI toggle)
         public boolean surfaceSnap = true;
+        // what the field acts on (players / mobs / objects / particles /
+        // fluids), see util.FieldTargets
+        public int targets = net.camacraft.gravityunbound.util.FieldTargets.ALL;
+        // whether this plate's field pulls/pushes OTHER Valkyrien Skies
+        // ships whose center enters it (a landing pad's field catching a
+        // shuttle); ANDed with the global gravityPlatingAffectsShips config
+        public boolean affectsShips = true;
 
         public @Nullable AABB effectBoxCache = null;
 
@@ -112,6 +119,10 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 ? Mth.clamp(tag.getDouble("gravityAccel"), 0.0, 1.0)
                 : GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
             data.surfaceSnap = !tag.contains("surfaceSnap") || tag.getBoolean("surfaceSnap");
+            data.targets = tag.contains("targets")
+                ? net.camacraft.gravityunbound.util.FieldTargets.sanitize(tag.getInt("targets"))
+                : net.camacraft.gravityunbound.util.FieldTargets.ALL;
+            data.affectsShips = !tag.contains("affectsShips") || tag.getBoolean("affectsShips");
             return data;
         }
 
@@ -123,6 +134,8 @@ public class GravityPlatingBlockEntity extends BlockEntity
             tag.putBoolean("gradualFalloff", gradualFalloff);
             tag.putDouble("gravityAccel", gravityAccel);
             tag.putBoolean("surfaceSnap", surfaceSnap);
+            tag.putInt("targets", targets);
+            tag.putBoolean("affectsShips", affectsShips);
             return tag;
         }
 
@@ -547,6 +560,11 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 if (sideDatum == null) {
                     continue;
                 }
+                // per-side target categories (GUI): a field may leave
+                // players, mobs or objects alone entirely
+                if (!net.camacraft.gravityunbound.util.FieldTargets.appliesTo(sideDatum.targets, entity)) {
+                    continue;
+                }
 
                 Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
 
@@ -687,6 +705,133 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 && !comp.useCapsuleCollision()
             ) {
                 tryToDoCornerAutoJump(blockState, blockPos, entity, comp, ship);
+            }
+        }
+
+        if (!world.isClientSide()) {
+            if (GravityConfig.gravityPlatingAffectsShips.get()) {
+                be.applyToShips(world, ship, blockPos, searchBox, gameTime);
+            }
+            if (ship != null) {
+                be.wakeWorldFluidsUnderShip(world, ship, roughBox, gameTime);
+            }
+        }
+    }
+
+    // the world-space box this ship-mounted plate's field covered at its
+    // last fluid wake-up (see wakeWorldFluidsUnderShip)
+    private @Nullable AABB lastShipWakeBox = null;
+    private static final int SHIP_FLUID_WAKE_PERIOD = 8;
+
+    /**
+     * A ship-mounted field flying over WORLD liquid: wake the fluid blocks
+     * in the region the field covers (and the region it just left, so water
+     * it pulled into shape settles back) every few ticks. Still water has no
+     * scheduled ticks of its own, so without this a lake under a passing
+     * ship's field never noticed the field at all. The cross-grid fluid
+     * lookup (GravityFieldLookup.fluidDownAt) then bends the woken blocks.
+     */
+    private void wakeWorldFluidsUnderShip(Level world, Ship ship, AABB gridBox, long gameTime) {
+        if (!GravityConfig.gravityAffectsFluids.get() || !GravityConfig.shipFieldsAffectWorldFluids.get()) {
+            return;
+        }
+        if (sideData == null || Math.floorMod(gameTime + worldPosition.hashCode(), SHIP_FLUID_WAKE_PERIOD) != 0) {
+            return;
+        }
+        boolean anyFluidSide = false;
+        for (SideData side : sideData) {
+            if (side != null && net.camacraft.gravityunbound.util.FieldTargets.has(
+                side.targets, net.camacraft.gravityunbound.util.GravityFieldLookup.Kind.FLUID)) {
+                anyFluidSide = true;
+                break;
+            }
+        }
+        if (!anyFluidSide) {
+            return;
+        }
+        AABB worldBox = gravityunbound$shipToWorldBox(ship, gridBox);
+        AABB sweep = lastShipWakeBox != null ? worldBox.minmax(lastShipWakeBox) : worldBox;
+        lastShipWakeBox = worldBox;
+        net.camacraft.gravityunbound.util.GravityFieldLookup.resettleFluids(world, sweep);
+    }
+
+    /**
+     * SHIPS IN THE FIELD (server). Every OTHER loaded ship whose center of
+     * mass lies inside a side's field gets one pull along that side's
+     * direction — mass x 1 g x the plate's acceleration setting (x falloff)
+     * — queued on the ship's force inducer, at most once per ship per tick
+     * however many plates of a deck hold it. A shuttle flying into a
+     * landing pad's field is drawn onto the pad.
+     */
+    private void applyToShips(Level world, @Nullable Ship ownShip, BlockPos blockPos, AABB searchBox, long gameTime) {
+        if (!(world instanceof net.minecraft.server.level.ServerLevel serverLevel) || sideData == null) {
+            return;
+        }
+        boolean anyShipSide = false;
+        for (SideData side : sideData) {
+            if (side != null && side.affectsShips) {
+                anyShipSide = true;
+                break;
+            }
+        }
+        if (!anyShipSide) {
+            return;
+        }
+
+        for (Ship other : VSGameUtilsKt.getShipsIntersecting(serverLevel, searchBox)) {
+            if (ownShip != null && other.getId() == ownShip.getId()) {
+                continue;
+            }
+            // the intersection query hands back ship DATA; forces need the
+            // LOADED ship object (null while the ship is unloaded)
+            org.valkyrienskies.core.api.ships.LoadedServerShip loaded =
+                VSGameUtilsKt.getShipObjectWorld(serverLevel).getLoadedShips().getById(other.getId());
+            if (loaded == null) {
+                continue;
+            }
+            Vector3d centerWorld = new Vector3d(loaded.getTransform().getPositionInWorld());
+            Vec3 testingPos = new Vec3(centerWorld.x, centerWorld.y, centerWorld.z);
+            if (ownShip != null) {
+                Vector3d local = new Vector3d(centerWorld);
+                ownShip.getTransform().getWorldToShipMatrix().transformPosition(local);
+                testingPos = new Vec3(local.x, local.y, local.z);
+            }
+
+            for (Direction plateDir : Direction.values()) {
+                SideData sideDatum = sideData[plateDir.ordinal()];
+                if (sideDatum == null || !sideDatum.affectsShips) {
+                    continue;
+                }
+                if (!sideDatum.getEffectBox(blockPos, plateDir, world).contains(testingPos)) {
+                    continue;
+                }
+                Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
+                Vector3d dir = new Vector3d(localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ());
+                if (ownShip != null) {
+                    ownShip.getTransform().getShipToWorldMatrix().transformDirection(dir);
+                }
+                if (dir.lengthSquared() < 1.0E-12) {
+                    continue;
+                }
+                dir.normalize();
+
+                double acceleration = 10.0 * GravityConfig.gravityCoreShipForceMultiplier.get()
+                    * (sideDatum.gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL);
+                if (sideDatum.gradualFalloff) {
+                    Vec3 plateDirVec = Vec3.atLowerCornerOf(plateDir.getNormal());
+                    Vec3 effectCenter = Vec3.atCenterOf(blockPos).add(plateDirVec.scale(0.5));
+                    double distanceToPlane = -testingPos.subtract(effectCenter).dot(plateDirVec);
+                    acceleration *= Mth.clamp(1.0 - Math.max(0.0, distanceToPlane) / sideDatum.getEffectRange(), 0.0, 1.0);
+                }
+                double mass = loaded.getInertiaData().getMass();
+                Vector3d force = dir.mul(mass * acceleration);
+                net.camacraft.gravityunbound.core.GravityCoreForceInducer inducer =
+                    net.camacraft.gravityunbound.core.GravityCoreForceInducer.getOrCreate(loaded);
+                if (inducer == null) {
+                    return; // inducer unavailable (registration refused): leave ships alone
+                }
+                inducer.queueForceOnce(force, gameTime);
+                break;
             }
         }
     }
@@ -1095,14 +1240,15 @@ public class GravityPlatingBlockEntity extends BlockEntity
     // bleed): the effect direction inside the plate's own footprint + range
 
     @Override
-    public @Nullable Direction fluidDownAt(BlockPos pos) {
+    public @Nullable Direction downAt(BlockPos pos, net.camacraft.gravityunbound.util.GravityFieldLookup.Kind kind) {
         if (sideData == null) {
             return null;
         }
         Vec3 center = Vec3.atCenterOf(pos);
         for (Direction plateDir : Direction.values()) {
             SideData sideDatum = sideData[plateDir.ordinal()];
-            if (sideDatum == null) {
+            if (sideDatum == null
+                || !net.camacraft.gravityunbound.util.FieldTargets.has(sideDatum.targets, kind)) {
                 continue;
             }
             if (sideDatum.getPrimaryBox(worldPosition, plateDir, getLevel()).contains(center)) {
@@ -1171,6 +1317,14 @@ public class GravityPlatingBlockEntity extends BlockEntity
         this.sideData[side.ordinal()] = sideData;
         invalidateBoxCaches();
         sync();
+        // a new field over STILL liquid: nothing schedules a still block's
+        // fluid tick, so a lake beside a freshly placed plate never noticed
+        // the field — wake everything in reach once
+        Level world = getLevel();
+        if (world != null && !world.isClientSide()) {
+            net.camacraft.gravityunbound.util.GravityFieldLookup.resettleFluidsAround(
+                world, worldPosition, sourceMaxRange());
+        }
     }
 
     /** Cap on how many plates one "apply to connected" flood-fill may touch. */
@@ -1190,6 +1344,18 @@ public class GravityPlatingBlockEntity extends BlockEntity
         Direction side, int newLevel, boolean isAttracting, boolean gradualFalloff,
         double gravityAccel, boolean surfaceSnap, boolean showParticles, boolean applyToConnected
     ) {
+        SideData own = getSideData(side);
+        applySettingsFromGui(side, newLevel, isAttracting, gradualFalloff, gravityAccel, surfaceSnap, showParticles,
+            own != null ? own.affectsShips : true,
+            own != null ? own.targets : net.camacraft.gravityunbound.util.FieldTargets.ALL,
+            applyToConnected);
+    }
+
+    public void applySettingsFromGui(
+        Direction side, int newLevel, boolean isAttracting, boolean gradualFalloff,
+        double gravityAccel, boolean surfaceSnap, boolean showParticles,
+        boolean affectsShips, int targets, boolean applyToConnected
+    ) {
         Level world = getLevel();
         if (world == null || world.isClientSide()) {
             return;
@@ -1203,9 +1369,11 @@ public class GravityPlatingBlockEntity extends BlockEntity
 
         int clampedLevel = Mth.clamp(newLevel, 1, maxLevel());
         double clampedAccel = Mth.clamp(gravityAccel, 0.0, 1.0);
+        int clampedTargets = net.camacraft.gravityunbound.util.FieldTargets.sanitize(targets);
 
         if (!applyToConnected) {
-            writeSideSettings(own, clampedLevel, isAttracting, gradualFalloff, clampedAccel, surfaceSnap, showParticles);
+            writeSideSettings(own, clampedLevel, isAttracting, gradualFalloff, clampedAccel, surfaceSnap, showParticles,
+                affectsShips, clampedTargets);
             invalidateBoxCaches();
             sync();
             return;
@@ -1256,7 +1424,8 @@ public class GravityPlatingBlockEntity extends BlockEntity
             if (memberSide == null) {
                 continue;
             }
-            writeSideSettings(memberSide, clampedLevel, isAttracting, gradualFalloff, clampedAccel, surfaceSnap, showParticles);
+            writeSideSettings(memberSide, clampedLevel, isAttracting, gradualFalloff, clampedAccel, surfaceSnap, showParticles,
+                affectsShips, clampedTargets);
             member.invalidateBoxCaches();
             member.sync();
         }
@@ -1264,7 +1433,8 @@ public class GravityPlatingBlockEntity extends BlockEntity
 
     private static void writeSideSettings(
         SideData side, int level, boolean isAttracting, boolean gradualFalloff,
-        double gravityAccel, boolean surfaceSnap, boolean showParticles
+        double gravityAccel, boolean surfaceSnap, boolean showParticles,
+        boolean affectsShips, int targets
     ) {
         side.level = level;
         side.isAttracting = isAttracting;
@@ -1272,6 +1442,8 @@ public class GravityPlatingBlockEntity extends BlockEntity
         side.gravityAccel = gravityAccel;
         side.surfaceSnap = surfaceSnap;
         side.showParticles = showParticles;
+        side.affectsShips = affectsShips;
+        side.targets = targets;
     }
 
     public List<ItemStack> getDrops() {
