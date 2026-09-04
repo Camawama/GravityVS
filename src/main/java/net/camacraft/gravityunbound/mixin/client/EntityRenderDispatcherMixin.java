@@ -408,10 +408,6 @@ public abstract class EntityRenderDispatcherMixin {
         at = @At("TAIL")
     )
     private static void inject_renderCapsuleDebug(PoseStack matrices, VertexConsumer vertices, Entity entity, float tickDelta, CallbackInfo ci) {
-        // the paper doll shows the plain body box only (see modify_renderHitbox_Box_0)
-        if (net.camacraft.gravityunbound.client.GuiRenderState.renderingGuiEntity) {
-            return;
-        }
         net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
             GravityChangerAPI.getGravityComponentOrNull(entity);
         if (comp == null || !comp.useCapsuleCollision()) {
@@ -422,11 +418,25 @@ public abstract class EntityRenderDispatcherMixin {
         double height = net.camacraft.gravityunbound.util.CapsuleCollider.capsuleHeight(entity, radius);
         double[] offsets = net.camacraft.gravityunbound.util.CapsuleCollider.sphereOffsets(height, radius);
 
-        Quaternionf renderRotation = comp.getRenderRotation(tickDelta);
-        Vec3 up = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), renderRotation);
-        Vec3 right = RotationUtil.vecPlayerToWorld(new Vec3(1, 0, 0), renderRotation);
-        Vec3 forward = RotationUtil.vecPlayerToWorld(new Vec3(0, 0, 1), renderRotation);
-        Quaternionf physicsRotation = comp.getCurrentRotation();
+        Vec3 up;
+        Vec3 right;
+        Vec3 forward;
+        Quaternionf physicsRotation;
+        if (net.camacraft.gravityunbound.client.GuiRenderState.renderingGuiEntity) {
+            // the paper doll is drawn upright in its own frame (no gravity
+            // pose): stack the spheres along the doll's own up
+            up = new Vec3(0, 1, 0);
+            right = new Vec3(1, 0, 0);
+            forward = new Vec3(0, 0, 1);
+            physicsRotation = new Quaternionf();
+        }
+        else {
+            Quaternionf renderRotation = comp.getRenderRotation(tickDelta);
+            up = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), renderRotation);
+            right = RotationUtil.vecPlayerToWorld(new Vec3(1, 0, 0), renderRotation);
+            forward = RotationUtil.vecPlayerToWorld(new Vec3(0, 0, 1), renderRotation);
+            physicsRotation = comp.getCurrentRotation();
+        }
 
         float[][] colors = {
             {0.25f, 1.0f, 0.25f},   // bottom sphere: green

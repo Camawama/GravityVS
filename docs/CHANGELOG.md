@@ -1,5 +1,63 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-09-04 (round 81: round-80 follow-up — the real stutter, the box-to-capsule edge, cling holds, drops, the doll)
+
+- **The snap stutter's real sources, and the render smoothing is gone.**
+  Round 80's render-side easing only slowed the snap; the tick-rate
+  stepping it was meant to hide came from elsewhere. (1) The render
+  pass re-aligned the drawn up toward the exact radial direction of a
+  ship-mounted core, blended in and out by a weight that advanced once
+  per TICK (0.15 per step) — while the tick frame was still chasing a
+  face or the field, each step moved the camera by up to 0.15 of that
+  chase lag, at every tick boundary: the stutter on every landing,
+  lift-off and field entry around a ship core (the user's 11x11x11 core
+  cube is a ship). That re-alignment is removed; the tick target is
+  already re-derived from the live transform and chased at high gain,
+  with a raised turn cap while airborne in a ship field, and the
+  ship-relative reconstruction carries it onto the drawn pose. (2) The
+  ship-attachment engagement weight also stepped per tick; it is now
+  interpolated per frame like every other drawn quantity. (3) Creative
+  flight let the velocity turn with the frame by the whole chase step
+  (up to 15-30 degrees per tick), kinking the flight path by that angle
+  at every tick boundary — the choppy lift-off; the drag is capped at 4
+  degrees per tick and the remainder preserves world velocity, so orbits
+  still close and fast snaps fly straight. (4) The chase's switch from
+  its smooth gain to the decisive 0.5 gain after five still ticks was a
+  visible speed-up at the end of a chase ("animates, then snaps"); it
+  now ramps in over eight ticks.
+- **Walking off the top face of a plated cube in the world no longer
+  breaks collision.** Round 80 rotated the walking momentum around the
+  edge in the identity frame too — correct, but the cardinal only
+  snapped at the start of the NEXT tick, so the tick of the face change
+  still ran vanilla BOX collision: the 0.6-wide box overlapping the top
+  face blocked the velocity now pointing down the side, and the pull
+  toward the side dragged the player back over the top, where the
+  capsule then engaged lying on its side, pinned to the wrong face —
+  stuck on every side face, "floating" off the bottom. A committed face
+  change now snaps the cardinal in the same tick, so the tick's move
+  already runs through the capsule (as it always did on tilted ships,
+  which is why ships never showed it).
+- **Wall-Jump VS: the surface stays snapped through a wall-jump
+  sequence.** New API `GravityChangerAPI.sustainHeldSurface(Entity)`
+  keeps the held planet-walk surface (and its field) alive for another
+  grace window; the fork calls it every tick while clinging or airborne
+  between wall jumps (the sequence ends on the ground). Before, the hold
+  lapsed mid-cling — nothing under the feet — and the frame fell onto the
+  raw radial field: the cling's "down" turned away from the surface and
+  the snap was gone when the player let go.
+- **Drops on ships.** Two fixes. The item is now placed at the very end
+  of `drop` (this mixin runs after Pehkui's), at 0.3 body-scaled below
+  the eyes along the frame's down, whatever another mod moved it to in
+  between — round 80's pre-compensation for Pehkui's world-Y correction
+  put the item a body height off whenever that correction did not run.
+  And a fresh entity's instant frame snap now re-expresses its velocity
+  (projectiles excepted): the spawn velocity had been written through
+  the identity frame and read through the snapped one, which bent a
+  drop's throw by the whole frame rotation — sideways or behind the
+  thrower on a ship's wall face.
+- **The inventory paper doll shows its capsule spheres again**, stacked
+  along the doll's own up.
+
 ## Unreleased (2.0.0-dev) — 2026-09-04 (round 80: twelve-finding pass — snaps, seats, edges, scale, particles, wall jump)
 
 - **Surface snaps no longer look like a dropped frame rate — two causes.**

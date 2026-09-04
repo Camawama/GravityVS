@@ -102,19 +102,7 @@ public abstract class PlayerMixin extends LivingEntity {
             return new ItemEntity(world, x, y, z, stack);
         }
 
-        // vanilla drops 0.3 below the eyes — a body-scaled distance for a
-        // scaled player (Pehkui): unscaled, a 1/16 player's drop spawned
-        // several body heights below its eyes, through the floor of a
-        // matching-scale ship, in a spot no field covered
-        double heightScale = gravityunbound$heightScale();
-        Vec3 vec3d = this.getEyePosition()
-            .subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.3D * heightScale, 0.0D, GravityChangerAPI.getAimRotation(this)));
-        // Pehkui's own drop fix lifts the item by 0.3 * (1 - scale) in WORLD
-        // Y after drop() returns, assuming vanilla's world-down placement;
-        // pre-compensate so its correction lands the item exactly where the
-        // frame-relative placement above put it (identity without Pehkui:
-        // the scale is then 1 and the term is zero)
-        vec3d = vec3d.subtract(0.0D, 0.3D * (1.0D - heightScale), 0.0D);
+        Vec3 vec3d = gravityunbound$dropPosition();
 
         ItemEntity itemEntity = new ItemEntity(world, vec3d.x, vec3d.y, vec3d.z, stack);
         
@@ -137,6 +125,41 @@ public abstract class PlayerMixin extends LivingEntity {
     @Shadow
     @Final
     private static java.util.Map<Pose, EntityDimensions> POSES;
+
+    /**
+     * Where a dropped item spawns: vanilla's 0.3 below the eyes, along the
+     * FRAME's down (the eyes themselves follow the frame), body-scaled for a
+     * scaled player — unscaled, a 1/16 player's drop spawned several body
+     * heights below its eyes, through the floor of a matching-scale ship.
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private Vec3 gravityunbound$dropPosition() {
+        return this.getEyePosition().subtract(RotationUtil.vecPlayerToWorld(
+            0.0D, 0.3D * gravityunbound$heightScale(), 0.0D, GravityChangerAPI.getAimRotation(this)));
+    }
+
+    /**
+     * Pehkui repositions the drop AFTER drop() returns, by a world-Y offset
+     * that assumes vanilla's straight-down placement — wrong by that offset
+     * under a rotated frame. Applied at the very end (this mixin runs after
+     * Pehkui's, priority 1001 over 1000), the frame-relative position wins
+     * whether or not any other mod moved the item in between.
+     */
+    @Inject(
+        method = "Lnet/minecraft/world/entity/player/Player;drop(Lnet/minecraft/world/item/ItemStack;ZZ)Lnet/minecraft/world/entity/item/ItemEntity;",
+        at = @At("RETURN")
+    )
+    private void gravityunbound$placeDrop(
+        ItemStack stack, boolean dropAround, boolean includeThrowerName,
+        CallbackInfoReturnable<ItemEntity> cir
+    ) {
+        ItemEntity item = cir.getReturnValue();
+        if (item == null || GravityChangerAPI.isAimDefault(this)) {
+            return;
+        }
+        Vec3 pos = gravityunbound$dropPosition();
+        item.setPos(pos.x, pos.y, pos.z);
+    }
 
     @org.spongepowered.asm.mixin.Unique
     private double gravityunbound$heightScale() {

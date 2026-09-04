@@ -84,6 +84,16 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // corner and movement input points half-way between the faces — the longer
     // that window, the longer the player is visibly stuck on the edge
     private static final float TRANSITION_TURN_PER_TICK = (float) Math.toRadians(30);
+    // airborne inside a SHIP-mounted field the target is exact (re-derived
+    // from the live transform, no packet noise), so the chase may track it
+    // faster than the noisy-field cap — the render pass then needs no
+    // correction of its own (see getRenderRotation)
+    private static final float SHIP_FIELD_TURN_PER_TICK = (float) Math.toRadians(30);
+    // creative flight lets the velocity turn WITH the frame (that is what
+    // closes orbits around cores) — but only this much per tick; the rest
+    // of a fast snap preserves world velocity, or the flight path kinks by
+    // the whole step at every tick boundary
+    private static final float FLY_DRAG_PER_TICK = (float) Math.toRadians(4);
     // after leaving a field, keep its pull for a few ticks (jumping off a plate
     // must not instantly revert gravity mid-air)
     private static final int FIELD_GRACE_TICKS = 6;
@@ -115,14 +125,16 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private final org.joml.Quaterniond attachRotPrev = new org.joml.Quaterniond();
     private boolean attachRotValid = false;
     // eased 0..1 engagement of the render-time reconstruction (smooth
-    // snap-in when a ship field is entered, smooth release when it is left)
+    // snap-in when a ship field is entered, smooth release when it is left);
+    // the previous tick's value is kept so the render pass can interpolate
+    // the engagement per FRAME — a weight that stepped once per tick moved
+    // the drawn frame in visible jumps at every tick boundary while a ship
+    // field was being entered or left
     private volatile float attachWeight = 0;
+    private volatile float attachWeightPrev = 0;
     // ship the render pass reconstructs against (kept through the fade-out)
     @Nullable
     private org.valkyrienskies.core.api.ships.Ship renderAttachShip = null;
-    // radial (ship core) render alignment: eased in/out so the switch between
-    // "held surface" and "raw radial" never snaps the camera
-    private volatile float radialAlignBlend = 0;
     // after the ground probe stops hitting, keep the surface alignment for a
     // few ticks (jumps and probe flicker must not wobble the frame; the probe
     // re-acquires during a jump's descent, so this only needs to bridge the
@@ -162,27 +174,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
     // remote entities receive their visual target from the server
     private @Nullable Quaternionf syncedVisualTarget = null;
     private final Quaternionf lastSyncedVisualTarget = new Quaternionf();
-
-    // RENDER SMOOTHING. The frame the camera, model and eye position are
-    // actually drawn with (see getRenderRotation). It tracks visualRotation
-    // EXACTLY while the tick frame moves slowly — orbiting a core, riding a
-    // spinning ship (the carry is composed onto it verbatim), field drift —
-    // and eases through the fast COMMITTED snaps of the surface machinery:
-    // a face adoption turns the tick frame 15-30 degrees per tick and is
-    // over in 3-6 ticks, which the eye reads as a jerky, low-frame-rate
-    // whip. Physics, collision and movement keep the tick frame; only what
-    // is drawn lags, for about 0.4 s, with an ease-in/ease-out profile.
-    // The lag composes with the tick frame as a WORLD-space offset, which
-    // is what keeps the twist unwinder's exact yaw compensation invisible
-    // through it (see normalizeTwist). Living entities only: items and
-    // projectiles have no camera and snap deterministically.
-    private final Quaternionf renderBase = new Quaternionf();
-    private final Quaternionf prevRenderBase = new Quaternionf();
-    // fraction of the remaining lag closed per tick, and the floor on the
-    // per-tick turn: anything the tick frame does slower than the floor
-    // passes through unsmoothed, and the tail of a big snap never crawls
-    private static final float RENDER_SMOOTH_GAIN = 0.3f;
-    private static final float RENDER_SMOOTH_MIN_TURN = (float) Math.toRadians(6);
 
     // capsule collision state (players under non-default gravity)
     public boolean capsuleGrounded = false;
@@ -382,7 +373,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
             visualRotation.set(canonical);
             prevVisualRotation.set(canonical);
             visualTarget.set(canonical);
-            snapRenderBase();
             initialized = true;
             this.needsSync = true;
             this.noAnimation = true;
@@ -511,6 +501,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         renderAttachShip = null;
         attachRotValid = false;
         attachWeight = 0;
+        attachWeightPrev = 0;
         pendingShipDelta = null;
         fieldAnchorShip = null;
         fieldAnchorLocalDown = null;
@@ -676,57 +667,22 @@ public class GravityCapabilityImpl implements IGravityCapability {
         if (angleBetween(visualRotation, target) < (float) Math.toRadians(1)) {
             return;
         }
+        Quaternionf oldFrame = new Quaternionf(visualRotation);
         visualRotation.set(target);
         prevVisualRotation.set(target);
         visualTarget.set(target);
-        snapRenderBase();
+        // WORLD velocity survives the snap. The spawn velocity was written
+        // through the identity frame (a fresh capability), so reading the
+        // same local vector through the snapped frame bent a dropped item's
+        // throw by the whole frame rotation — on a ship's wall face a drop
+        // flew sideways or behind the thrower. Projectiles are world-frame
+        // and keep their vector untouched.
+        if (!(entity instanceof net.minecraft.world.entity.projectile.Projectile)) {
+            Vec3 world = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), oldFrame);
+            entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(world, visualRotation));
+        }
         noAnimation = true;
         needsSync = true;
-    }
-
-    /** The drawn frame adopts the tick frame instantly (hard snaps, init). */
-    private void snapRenderBase() {
-        renderBase.set(visualRotation);
-        prevRenderBase.set(visualRotation);
-    }
-
-    /**
-     * Advance the drawn frame toward the tick frame: exact for slow motion,
-     * eased through fast snaps (see the field comment on renderBase).
-     * Called once per tick after the chase has moved the tick frame and
-     * before the twist unwinder (whose local premultiplication is applied
-     * to both frames alike).
-     */
-    private void smoothRenderBase() {
-        if (!(entity instanceof LivingEntity)) {
-            renderBase.set(visualRotation);
-            return;
-        }
-        float lag = angleBetween(renderBase, visualRotation);
-        if (lag < (float) Math.toRadians(0.02)) {
-            renderBase.set(visualRotation);
-            return;
-        }
-        float step = Math.max(lag * RENDER_SMOOTH_GAIN, RENDER_SMOOTH_MIN_TURN);
-        if (step >= lag) {
-            renderBase.set(visualRotation);
-            return;
-        }
-        if (renderBase.dot(visualRotation) < 0.0f) {
-            // q and -q are one rotation; keep the slerp on the short arc
-            renderBase.set(-renderBase.x, -renderBase.y, -renderBase.z, -renderBase.w);
-        }
-        renderBase.slerp(visualRotation, step / lag).normalize();
-    }
-
-    /**
-     * A LOCAL-space re-parametrization of the tick frame ({@code newFrame =
-     * delta * oldFrame}, always paired with an exact yaw compensation) must
-     * reach the drawn frame verbatim so it stays invisible there too.
-     */
-    private void applyLocalDeltaToRenderBase(Quaternionf delta) {
-        renderBase.premul(delta).normalize();
-        prevRenderBase.premul(delta).normalize();
     }
 
     // full world-space rotation the attached ship performed since last tick,
@@ -871,20 +827,15 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
 
         // eased engagement of the render reconstruction: ~7 ticks in, ~7 out
+        // (interpolated per frame by the render pass, see attachWeightPrev)
         float targetWeight = ship != null ? 1.0f : 0.0f;
+        attachWeightPrev = attachWeight;
         attachWeight = Mth.clamp(
             attachWeight + Mth.clamp(targetWeight - attachWeight, -0.15f, 0.15f), 0.0f, 1.0f);
-        if (ship == null && attachWeight <= 0.001f) {
+        if (ship == null && attachWeight <= 0.001f && attachWeightPrev <= 0.001f) {
             renderAttachShip = null;
             attachRotValid = false;
         }
-
-        // radial (ship core) render alignment: applies while no surface is
-        // held, eased in and out so landing / lifting off never snaps
-        boolean radial = fieldAnchorShip != null && fieldAnchorLocalPos != null && lastGroundNormal == null;
-        float radialTarget = radial ? 1.0f : 0.0f;
-        radialAlignBlend = Mth.clamp(
-            radialAlignBlend + Mth.clamp(radialTarget - radialAlignBlend, -0.15f, 0.15f), 0.0f, 1.0f);
     }
 
     /**
@@ -1021,7 +972,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
         visualRotation.set(canonical);
         visualTarget.set(canonical);
         prevVisualRotation.set(canonical);
-        snapRenderBase();
         compensateFrameChange(old, visualRotation);
         updateBoundingBox();
         needsSync = true;
@@ -1453,6 +1403,40 @@ public class GravityCapabilityImpl implements IGravityCapability {
         recentReleasedTicks = 0;
         lastGroundNormal = normal;
         groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
+
+        // PHYSICS FOLLOWS THE FACE THIS TICK. The cardinal normally snaps
+        // at the start of the NEXT tick (updateGravityStatus runs before
+        // the probe), which left a player who had just walked off the top
+        // face of a plated cube — identity frame, vanilla box — in BOX mode
+        // for the tick of the face change: the 0.6-wide box still overlapped
+        // the top face at the edge, blocked the velocity now pointing down
+        // the side, and the pull toward the side face dragged the player
+        // back over the top — where the capsule then engaged lying on its
+        // side, pinned to the wrong face. Snapping the cardinal here puts
+        // this tick's move through the capsule already.
+        if (entity instanceof Player && !useCapsuleCollision()) {
+            snapPhysicsDirection();
+            applyGravityChange();
+        }
+    }
+
+    /**
+     * API: keep the currently held surface held for another grace window
+     * (and its field alive), whatever the probes find. For mechanics that
+     * hold the player against a WALL away from the face they stand on — a
+     * wall cling that pins the player in the air — the ground probe finds
+     * nothing under the feet and the hold would lapse mid-cling, dropping
+     * the frame onto the raw field. Call once per tick while the hold
+     * should persist; a no-op when no surface is held.
+     */
+    public void sustainHeldSurface() {
+        if (lastGroundNormal == null) {
+            return;
+        }
+        groundNormalGraceTicks = Math.max(groundNormalGraceTicks, GROUND_NORMAL_GRACE_TICKS);
+        if (fieldGraceTicks > 0 && lastFieldVector != null) {
+            fieldGraceTicks = Math.max(fieldGraceTicks, FIELD_GRACE_TICKS);
+        }
     }
 
     /**
@@ -1751,7 +1735,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
      */
     private void advanceVisualRotation() {
         prevVisualRotation.set(visualRotation);
-        prevRenderBase.set(renderBase);
 
         // SHIP CARRY: compose the attached ship's FULL tick rotation onto the
         // frame AFTER the prev capture (render interpolation then sweeps the
@@ -1766,9 +1749,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
             visualRotation.mul(conjDelta).normalize();
             visualTarget.mul(conjDelta).normalize();
             lastChaseTarget.mul(conjDelta).normalize();
-            // the drawn frame rides the ship verbatim: a carry is not a
-            // transition, nothing about it is smoothed
-            renderBase.mul(conjDelta).normalize();
             if (syncedVisualTarget != null) {
                 syncedVisualTarget.mul(conjDelta).normalize();
             }
@@ -1809,7 +1789,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
             visualTarget.set(externalVisualOverride);
             visualRotation.set(externalVisualOverride);
             lastChaseTarget.set(externalVisualOverride);
-            renderBase.set(externalVisualOverride);
             externalVisualOverride = null;
             return;
         }
@@ -1836,7 +1815,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
             // "teleports around before settling" desync).
             visualRotation.set(visualTarget);
             lastChaseTarget.set(visualTarget);
-            renderBase.set(visualTarget);
             return;
         }
 
@@ -1891,12 +1869,19 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 Vec3 targetUpNow = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), visualTarget);
                 gluedToSurface = targetUpNow.dot(lastGroundNormal) > 0.95;
             }
+            float smoothGain = Mth.lerp(Mth.clamp(angle / (float) Math.toRadians(3), 0.0f, 1.0f), 0.08f, 0.35f);
+            // a still target is converged on decisively — RAMPED in over a
+            // few ticks rather than switched: the old step from the smooth
+            // gain straight to 0.5 was a visible speed-up ("animates, then
+            // snaps") at the end of every chase that came to rest
+            float stableBlend = Mth.clamp((targetStableTicks - 2) / 8.0f, 0.0f, 1.0f);
             float proportion = gluedToSurface
                 ? 0.9f
-                : targetStableTicks >= 5
-                ? 0.5f
-                : Mth.lerp(Mth.clamp(angle / (float) Math.toRadians(3), 0.0f, 1.0f), 0.08f, 0.35f);
+                : Mth.lerp(stableBlend, smoothGain, 0.5f);
             float maxTurn = VISUAL_TURN_PER_TICK;
+            if (fieldAnchorShip != null && lastGroundNormal == null) {
+                maxTurn = SHIP_FIELD_TURN_PER_TICK;
+            }
             if (surfaceChangeCooldown > 0) {
                 // committed surface change: converge decisively (the player is
                 // pinned against the edge until the frame reaches the new face)
@@ -1924,16 +1909,31 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 ? entity.isControlledByLocalInstance()
                 : !(entity instanceof Player);
             boolean flying = entity instanceof Player player && player.getAbilities().flying;
-            if (controlled && !flying) {
-                Vec3 world = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), frameBefore);
-                entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(world, visualRotation));
+            if (controlled) {
+                // the frame the stored local velocity is READ through before it
+                // is re-expressed in the new frame: the old frame (world
+                // velocity fully preserved), or — for creative flight — the
+                // old frame advanced by the dragged share of this tick's step
+                Quaternionf readFrame = frameBefore;
+                if (flying) {
+                    float stepAngle = angleBetween(frameBefore, visualRotation);
+                    if (stepAngle <= FLY_DRAG_PER_TICK) {
+                        readFrame = null; // the whole step is dragged: nothing to do
+                    }
+                    else {
+                        Quaternionf partial = new Quaternionf(frameBefore);
+                        if (partial.dot(visualRotation) < 0.0f) {
+                            partial.set(-partial.x, -partial.y, -partial.z, -partial.w);
+                        }
+                        readFrame = partial.slerp(visualRotation, FLY_DRAG_PER_TICK / stepAngle).normalize();
+                    }
+                }
+                if (readFrame != null) {
+                    Vec3 world = RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), readFrame);
+                    entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(world, visualRotation));
+                }
             }
         }
-
-        // the drawn frame follows the tick frame: exactly for slow motion,
-        // eased through the fast committed snaps (before the twist
-        // unwinder, which re-parametrizes both frames alike)
-        smoothRenderBase();
 
         normalizeTwist();
 
@@ -1998,15 +1998,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
             visualRotation.set(canonical);
             visualTarget.set(canonical);
             prevVisualRotation.set(canonical);
-            // the same (sub-0.03-degree) local re-parametrization for the
-            // drawn frames: new = delta * old
-            Quaternionf localDelta = new Quaternionf(canonical).mul(new Quaternionf(old).conjugate()).normalize();
-            applyLocalDeltaToRenderBase(localDelta);
-            if (angleBetween(renderBase, visualRotation) < (float) Math.toRadians(0.03)) {
-                // fully converged: land the drawn frame bit-exactly on the
-                // canonical frame too, so the render fast path re-engages
-                snapRenderBase();
-            }
             compensateFrameChange(old, visualRotation);
             return;
         }
@@ -2051,12 +2042,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // yaw compensation cancels identically)
         prevVisualRotation.premul(delta).normalize();
         visualTarget.premul(delta).normalize();
-        // ...and to the drawn frames. Their lag behind the tick frame is a
-        // WORLD-space offset W (drawn = tick * W); a local premultiplication
-        // T lands on the tick side of it (T * tick * W), so the camera —
-        // conj(W) * conj(tick) * conj(T) * yawShift * view — sees T and its
-        // yaw compensation cancel exactly as they do without smoothing.
-        applyLocalDeltaToRenderBase(delta);
         compensateFrameChange(old, visualRotation);
     }
 
@@ -2820,7 +2805,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
             this.visualRotation.set(this.syncedVisualTarget);
             this.prevVisualRotation.set(this.syncedVisualTarget);
             this.visualTarget.set(this.syncedVisualTarget);
-            snapRenderBase();
 
             if (entity != null && !oldFrame.equals(this.visualRotation)
                 && !(entity instanceof net.minecraft.world.entity.projectile.Projectile)) {
@@ -3278,19 +3262,17 @@ public class GravityCapabilityImpl implements IGravityCapability {
      * hot paths: writes into {@code dest} and returns it. Render thread only.
      */
     public Quaternionf getRenderRotation(float partialTick, Quaternionf dest) {
-        // the DRAWN frames (see renderBase): the tick frames eased through
-        // fast snaps, identical to them otherwise
-        if (prevRenderBase.equals(renderBase)) {
-            dest.set(renderBase);
+        if (prevVisualRotation.equals(visualRotation)) {
+            dest.set(visualRotation);
         }
         else {
-            dest.set(prevRenderBase);
-            if (dest.dot(renderBase) < 0.0f) {
+            dest.set(prevVisualRotation);
+            if (dest.dot(visualRotation) < 0.0f) {
                 // q and -q are the same rotation; a slerp across hemispheres
                 // sweeps the long way around
                 dest.set(-dest.x, -dest.y, -dest.z, -dest.w);
             }
-            dest.slerp(renderBase, partialTick).normalize();
+            dest.slerp(visualRotation, partialTick).normalize();
         }
 
         // SHIP ATTACHMENT, render half: SHIP-RELATIVE RECONSTRUCTION.
@@ -3308,12 +3290,15 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // lumpy the network-fed tick poses are. The world interpolation is
         // blended in by the eased engagement weight so entering and leaving
         // a ship's field never snaps.
-        float weight = attachWeight;
+        // the engagement weight is a tick-rate quantity: interpolate it like
+        // everything else the render pass draws, or the reconstruction's
+        // share of the frame jumps at every tick boundary of the ease
+        float weight = Mth.lerp(partialTick, attachWeightPrev, attachWeight);
         if (weight > 0.001f && attachRotValid
             && renderAttachShip instanceof org.valkyrienskies.core.api.ships.ClientShip attachedClientShip) {
-            Quaternionf prevLocal = new Quaternionf(prevRenderBase)
+            Quaternionf prevLocal = new Quaternionf(prevVisualRotation)
                 .mul(new Quaternionf(attachRotPrev)).normalize();
-            Quaternionf curLocal = new Quaternionf(renderBase)
+            Quaternionf curLocal = new Quaternionf(visualRotation)
                 .mul(new Quaternionf(attachRot)).normalize();
             if (prevLocal.dot(curLocal) < 0.0f) {
                 prevLocal.set(-prevLocal.x, -prevLocal.y, -prevLocal.z, -prevLocal.w);
@@ -3333,41 +3318,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
             }
         }
 
-        // RADIAL ANCHOR (gravity core on a ship): a radial field's ship-space
-        // constant is the core's CENTER, and its direction depends on the
-        // entity's position — re-derive the up per frame from the drawn pose
-        // and the interpolated entity position (a direction sampled at tick
-        // rate holds still between ticks and jumps at each boundary: 20 Hz
-        // stepping while circling the core). Only while NO surface is held:
-        // a stood-on face wins (the frame above already follows it), and
-        // dragging the camera toward the raw radial direction there split
-        // the camera from the physics box on small ships. Eased in and out
-        // so landing and lifting off never snap.
-        float radialStrength = Math.min(weight, radialAlignBlend);
-        if (radialStrength > 0.001f && fieldAnchorLocalPos != null
-            && fieldAnchorShip instanceof org.valkyrienskies.core.api.ships.ClientShip coreShip) {
-            org.joml.Vector3d center = new org.joml.Vector3d(
-                fieldAnchorLocalPos.x, fieldAnchorLocalPos.y, fieldAnchorLocalPos.z);
-            coreShip.getRenderTransform().getShipToWorldMatrix().transformPosition(center);
-            Vec3 toCenter = new Vec3(center.x, center.y, center.z)
-                .subtract(entity.getPosition(partialTick));
-            if (toCenter.lengthSqr() < 1.0E-6) {
-                return dest;
-            }
-            // up is opposite the pull: -sign * toward-center
-            Vec3 drawnUp = toCenter.normalize().scale(-fieldAnchorRadialSign);
-            Vec3 frameUp = RotationUtil.vecPlayerToWorld(new Vec3(0, 1, 0), dest);
-            double align = frameUp.dot(drawnUp);
-            if (align < 0.999999 && align > 0.5) {
-                Quaternionf arc = QuaternionUtil.getRotationBetween(frameUp, drawnUp);
-                if (radialStrength < 0.999f) {
-                    arc = new Quaternionf().slerp(arc, radialStrength);
-                }
-                // frame maps world -> player: world rotation S composes as
-                // frame * conj(S)
-                dest.mul(arc.conjugate()).normalize();
-            }
-        }
+        // (No render-time radial re-alignment any more. The tick target of a
+        // ship-mounted core is re-derived from the live transform every tick
+        // and chased at high gain, and the ship-relative reconstruction
+        // above carries it onto the drawn pose; the old per-frame pull of
+        // the drawn up toward the exact radial direction was blended in and
+        // out by a weight that stepped once per TICK — up to 0.15 of the
+        // chase lag per step — which was the tick-rate stutter on every
+        // landing, lift-off and field entry around a ship core.)
         return dest;
     }
 
@@ -3400,9 +3358,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
     public boolean isRenderDefault() {
         return isVisuallyDefault()
             && Math.abs(prevVisualRotation.w()) >= 0.9999999f
-            && Math.abs(renderBase.w()) >= 0.9999999f
-            && Math.abs(prevRenderBase.w()) >= 0.9999999f
-            && attachWeight <= 0.001f;
+            && attachWeight <= 0.001f
+            && attachWeightPrev <= 0.001f;
     }
 
     /**
@@ -3413,8 +3370,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
      * this every frame).
      */
     public boolean isVisuallyMoving() {
-        return !prevVisualRotation.equals(visualRotation)
-            || !prevRenderBase.equals(renderBase);
+        return !prevVisualRotation.equals(visualRotation);
     }
 
     /**
@@ -3526,7 +3482,6 @@ public class GravityCapabilityImpl implements IGravityCapability {
         computeVisualTarget(visualTarget);
         visualRotation.set(visualTarget);
         prevVisualRotation.set(visualTarget);
-        snapRenderBase();
         updateBoundingBox();
     }
 

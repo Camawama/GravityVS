@@ -234,4 +234,20 @@ public abstract class GravityChangerAPI {
         return EntityTags.canChangeGravity(entity);
     }
 
+    /**
+     * Keeps the surface the entity currently stands on (planet-walk snap)
+     * held for another grace window, and its field alive, regardless of
+     * what the ground probes find this tick. For mechanics that hold a
+     * player against a wall in mid-air (wall clinging): without this the
+     * hold lapses during the cling and gravity falls back to the raw
+     * field. Call once per tick while the hold should persist; a no-op when
+     * no surface is held.
+     */
+    public static void sustainHeldSurface(Entity entity) {
+        GravityCapabilityImpl comp = getGravityComponentOrNull(entity);
+        if (comp != null) {
+            comp.sustainHeldSurface();
+        }
+    }
+
 }
