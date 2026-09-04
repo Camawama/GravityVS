@@ -150,8 +150,9 @@ public final class CapsuleCollider {
         // step height scales with the body: 0.6 world blocks is a normal
         // player's step, but MANY body heights for a Pehkui-scaled one —
         // the unscaled assist teleported tiny players around scaled ships
-        double stepHeight = STEP_HEIGHT * Mth.clamp(height / 1.8, 0.05, 1.0);
-        if (wasGrounded && movement.dot(up) < 0.05 * Mth.clamp(height / 1.8, 0.05, 1.0)) {
+        double bodyScale = Mth.clamp(height / 1.8, 0.05, 1.0);
+        double stepHeight = STEP_HEIGHT * bodyScale;
+        if (wasGrounded && movement.dot(up) < 0.05 * bodyScale) {
             Vec3 tangentIntended = rejectFrom(movement, up);
             Vec3 tangentAchieved = rejectFrom(collided, up);
             double intendedLen = tangentIntended.length();
@@ -170,8 +171,12 @@ public final class CapsuleCollider {
                 Vec3 stepMovement = settled.subtract(start);
                 Vec3 stepTangent = rejectFrom(stepMovement, up);
                 // only accept a step that actually LANDS on ground — an assist
-                // that ends airborne is not a step, it is a launch
-                if (stepState.grounded && stepTangent.length() > tangentAchieved.length() + 0.01) {
+                // that ends airborne is not a step, it is a launch.
+                // The gain it must show is body-scaled: a flat 0.01 block was
+                // more than a 1/16-scale player's entire walking step, so no
+                // step ever qualified and tiny players stuck at every slab
+                // and stair riser of a matching-scale ship.
+                if (stepState.grounded && stepTangent.length() > tangentAchieved.length() + 0.01 * bodyScale) {
                     collided = stepMovement;
                     state.grounded = state.grounded || stepState.grounded;
                     if (state.groundShip == null) {
@@ -546,12 +551,20 @@ public final class CapsuleCollider {
     // obstacle gathering
     // ------------------------------------------------------------------
 
+    // a shipyard-space reach box with more cells than this is gathered
+    // sphere-by-sphere instead (see collectBlocksAroundCapsule)
+    private static final long LARGE_REACH_CELLS = 4096;
+    // cap on the per-sphere gather radius in shipyard units (an absurd
+    // body/ship scale ratio degrades to an approximate hull, never a freeze)
+    private static final double MAX_LOCAL_GATHER_RADIUS = 12.0;
+
     private static List<Obstacle> gatherObstacles(
         Level level, Vec3 start, Vec3 movement, Vec3 up, double radius, double height
     ) {
+        double bodyScale = Mth.clamp(height / 1.8, 0.05, 1.0);
         AABB reach = makeEnvelope(start, up, radius * 2, height)
             .minmax(makeEnvelope(start.add(movement), up, radius * 2, height))
-            .inflate(radius + STEP_HEIGHT * Mth.clamp(height / 1.8, 0.05, 1.0) + 0.3);
+            .inflate(radius + STEP_HEIGHT * bodyScale + 0.3);
 
         List<Obstacle> out = new ArrayList<>();
 
@@ -562,10 +575,103 @@ public final class CapsuleCollider {
 
         for (Ship ship : VSGameUtilsKt.getShipsIntersecting(level, reach)) {
             AABB shipBox = transformBoxWorldToShip(ship, reach);
-            collectBlocks(level, shipBox, ship, out);
+            if (cellCount(shipBox) > LARGE_REACH_CELLS) {
+                // A body much larger than the ship's blocks (a full-size
+                // player on a 1/16-scale ship): the reach spans ~50 shipyard
+                // cells per axis. The old answer clamped the box to 16 cells
+                // around its center, which left the head and feet spheres
+                // — 29 shipyard units apart — colliding with nothing at
+                // all: the "collision is all weird, I get stuck" on every
+                // face of a scaled ship's plated cube except the deck (the
+                // deck's identity frame runs VS's own collision instead).
+                // Gather the cells around each sphere instead.
+                collectBlocksAroundCapsule(level, ship, start, movement, up, radius, height, bodyScale, out);
+            }
+            else {
+                collectBlocks(level, shipBox, ship, out);
+            }
         }
 
         return out;
+    }
+
+    private static long cellCount(AABB box) {
+        return (long) (Mth.floor(box.maxX) - Mth.floor(box.minX) + 1)
+            * (Mth.floor(box.maxY) - Mth.floor(box.minY) + 1)
+            * (Mth.floor(box.maxZ) - Mth.floor(box.minZ) + 1);
+    }
+
+    /**
+     * Shipyard cells within reach of each collision sphere — at the start
+     * and end of the movement, and at the step-assist lift of both — with
+     * buried cells (no exposed face) skipped: a sphere can only reach a
+     * buried cell through an exposed one, and on a solid scaled-down hull
+     * the buried interior is most of the reach box.
+     */
+    private static void collectBlocksAroundCapsule(
+        Level level, Ship ship, Vec3 start, Vec3 movement, Vec3 up,
+        double radius, double height, double bodyScale, List<Obstacle> out
+    ) {
+        double shipScale = worldToShipScale(ship);
+        double[] offsets = sphereOffsets(height, radius);
+        Vec3 lift = up.scale(STEP_HEIGHT * bodyScale);
+        Vec3[] bases = {start, start.add(movement), start.add(lift), start.add(lift).add(movement)};
+        double gather = Math.min(radius * shipScale + 1.5, MAX_LOCAL_GATHER_RADIUS);
+        double gatherSq = gather * gather;
+
+        it.unimi.dsi.fastutil.longs.LongOpenHashSet visited = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos neighbor = new BlockPos.MutableBlockPos();
+
+        for (Vec3 base : bases) {
+            for (double offset : offsets) {
+                Vector3d c = new Vector3d(
+                    base.x + up.x * offset, base.y + up.y * offset, base.z + up.z * offset);
+                ship.getTransform().getWorldToShipMatrix().transformPosition(c);
+                int minX = Mth.floor(c.x - gather), maxX = Mth.floor(c.x + gather);
+                int minY = Mth.floor(c.y - gather), maxY = Mth.floor(c.y + gather);
+                int minZ = Mth.floor(c.z - gather), maxZ = Mth.floor(c.z + gather);
+                for (int x = minX; x <= maxX; x++) {
+                    for (int y = minY; y <= maxY; y++) {
+                        for (int z = minZ; z <= maxZ; z++) {
+                            // cell-to-center distance prefilter (nearest point of the cell)
+                            double dx = c.x - Mth.clamp(c.x, x, x + 1.0);
+                            double dy = c.y - Mth.clamp(c.y, y, y + 1.0);
+                            double dz = c.z - Mth.clamp(c.z, z, z + 1.0);
+                            if (dx * dx + dy * dy + dz * dz > gatherSq) {
+                                continue;
+                            }
+                            if (!visited.add(BlockPos.asLong(x, y, z))) {
+                                continue;
+                            }
+                            cursor.set(x, y, z);
+                            BlockState blockState = level.getBlockState(cursor);
+                            if (blockState.isAir()) {
+                                continue;
+                            }
+                            VoxelShape shape = blockState.getCollisionShape(level, cursor);
+                            if (shape.isEmpty()) {
+                                continue;
+                            }
+                            int exposedMask = 0;
+                            for (int i = 0; i < 6; i++) {
+                                neighbor.set(x + FACE_OFFSETS[i][0], y + FACE_OFFSETS[i][1], z + FACE_OFFSETS[i][2]);
+                                BlockState n = level.getBlockState(neighbor);
+                                if (n.isAir() || n.getCollisionShape(level, neighbor).isEmpty()) {
+                                    exposedMask |= 1 << i;
+                                }
+                            }
+                            if (exposedMask == 0) {
+                                continue;
+                            }
+                            for (AABB aabb : shape.toAabbs()) {
+                                out.add(new Obstacle(aabb.move(x, y, z), ship, exposedMask, shipScale));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private static void collectBlocks(Level level, AABB box, @Nullable Ship ship, List<Obstacle> out) {

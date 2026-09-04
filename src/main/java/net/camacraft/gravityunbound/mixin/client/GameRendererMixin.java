@@ -58,8 +58,17 @@ public abstract class GameRendererMixin {
         poseStack.mulPose(comp.getRenderRotation(partialTicks));
 
         if (comp.isVisuallyMoving()) {
-            // make sure frustum culling updates while the view is rotating
-            this.minecraft.levelRenderer.needsUpdate();
+            // The level renderer re-tests chunk visibility against the
+            // frustum only when the camera's own pitch/yaw changed — a
+            // rotating gravity frame turns the view without touching them,
+            // so the frustum result went stale mid-transition. Request the
+            // frustum re-test alone. The earlier fix requested a FULL render
+            // chunk update (needsUpdate) every frame of every rotation: the
+            // asynchronous breadth-first rebuild of the whole render chunk
+            // graph, re-queued frame after frame — the frame-rate collapse
+            // that made every surface snap and every spinning ship look
+            // like it was running at a lower frame rate.
+            ((LevelRendererAccessor) this.minecraft.levelRenderer).gravityunbound$needsFrustumUpdate().set(true);
         }
     }
 }

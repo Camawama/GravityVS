@@ -650,8 +650,12 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 ? entity.isControlledByLocalInstance()
                 : !(entity instanceof Player);
 
-            if (controlsEntity && bestPlateDir != null) {
+            // the zero-g pull for non-living entities decides its own side
+            // (it also runs for client-PREDICTED items, see the helper)
+            if (bestPlateDir != null) {
                 gravityunbound$applyArtificialGravityForce(world, ship, be, bestPlateDir, entity, comp);
+            }
+            if (controlsEntity && bestPlateDir != null) {
                 gravityunbound$applyShipFriction(ship, be, bestPlateDir, entity);
             }
 
@@ -917,25 +921,9 @@ public class GravityPlatingBlockEntity extends BlockEntity
             Level world, @Nullable Ship ship, GravityPlatingBlockEntity be,
             Direction plateDir, Entity entity, GravityCapabilityImpl comp
     ) {
-        String currentDim = world.dimension().location().toString();
-        if (!GravityConfig.artificialGravityDimensions.get().contains(currentDim)) {
-            return;
-        }
         if (entity instanceof LivingEntity) {
             return;
         }
-        // Ad Astra dimensions: the compat layer already makes Ad Astra treat
-        // fielded entities as Earth gravity, so their own gravity path works
-        // again — this extra force would stack on top of it
-        if (net.camacraft.gravityunbound.compat.AdAstraCompat.restoresGravityFor(entity)) {
-            return;
-        }
-        // one application per entity per tick, however many plates claim it —
-        // stacked fields must not multiply the acceleration
-        if (!comp.tryClaimArtificialPull(world.getGameTime())) {
-            return;
-        }
-
         SideData sideDatum = be.sideData[plateDir.ordinal()];
         if (sideDatum == null) {
             return;
@@ -954,17 +942,11 @@ public class GravityPlatingBlockEntity extends BlockEntity
             accel.normalize();
         }
 
-        accel.mul(GravityConfig.artificialGravityAcceleration.get() * comp.getCurrGravityStrength());
-
-        Vec3 currentVel = GravityChangerAPI.getWorldVelocity(entity);
-        // crude terminal velocity so stacked fields cannot accelerate indefinitely
-        Vec3 gravityDir = comp.getCurrGravityDirectionVec();
-        if (currentVel.dot(gravityDir) < 3.0) {
-            GravityChangerAPI.setWorldVelocity(
-                    entity,
-                    currentVel.add(accel.x, accel.y, accel.z)
-            );
-        }
+        // dimension gate, Ad Astra hand-off, once-per-tick claim, terminal
+        // velocity and the client-side prediction rule all live in the
+        // shared helper (cores use the same one with their radial pull)
+        GravityCapabilityImpl.applyZeroGravityFieldForce(
+            world, entity, comp, new Vec3(accel.x, accel.y, accel.z));
     }
 
     /**

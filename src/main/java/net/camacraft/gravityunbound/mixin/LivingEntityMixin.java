@@ -192,6 +192,18 @@ public abstract class LivingEntityMixin extends Entity {
         cir.setReturnValue(RotationUtil.boxPlayerToWorld(box, gravityDirection));
     }
 
+    @Shadow
+    protected abstract void updateWalkAnimation(float distance);
+
+    /**
+     * The walk animation measures the FRAME-horizontal distance moved, not
+     * the world-horizontal one (a player walking up a wall face moves along
+     * world Y). Only the distance is replaced — it is handed to vanilla's
+     * own {@code updateWalkAnimation}, which is where Pehkui scales the
+     * limb distance for scaled entities: feeding the animation state
+     * directly bypassed that hook, so a 1/16-scale player's legs and arms
+     * stopped swinging the moment a field rotated its frame.
+     */
     @Inject(
             method = "calculateEntityAnimation",
             at = @At("HEAD"),
@@ -208,12 +220,7 @@ public abstract class LivingEntityMixin extends Entity {
         double d = playerPosDelta.x;
         double e = flutter ? playerPosDelta.y : 0.0D;
         double f = playerPosDelta.z;
-        float g = (float)Math.sqrt(d * d + e * e + f * f) * 4.0F;
-        if (g > 1.0F) {
-            g = 1.0F;
-        }
-
-        entity.walkAnimation.update(g, 0.4F);
+        this.updateWalkAnimation((float) Math.sqrt(d * d + e * e + f * f));
     }
     
     @WrapOperation(

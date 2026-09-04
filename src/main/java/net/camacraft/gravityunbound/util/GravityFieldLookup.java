@@ -276,6 +276,8 @@ public final class GravityFieldLookup {
         @Nullable Level level;
         long time = Long.MIN_VALUE;
         final java.util.HashMap<Long, Object> results = new java.util.HashMap<>(256);
+        // world-cell -> ship field answer for particles (see particleDownVecAt)
+        final java.util.HashMap<Long, Object> shipResults = new java.util.HashMap<>(64);
     }
 
     private static final ThreadLocal<QueryCache> QUERY_CACHE = ThreadLocal.withInitial(QueryCache::new);
@@ -290,6 +292,90 @@ public final class GravityFieldLookup {
     public static Direction particleDownAt(@Nullable BlockGetter getter, BlockPos pos) {
         Best best = bestFieldAt(getter, pos, GravityConfig.gravityAffectsParticles.get());
         return best != null ? best.down() : null;
+    }
+
+    /**
+     * Whether any field source claims the block {@code pos} for ENTITIES —
+     * the same-grid block query, ungated by the fluid/particle feature
+     * toggles. Used where both sides must agree from the block grid alone
+     * (a seat on a ship: the client never receives the seat entity's field
+     * state, so "is this seat under a field" is answered by the grid).
+     */
+    public static boolean hasEntityFieldAt(@Nullable BlockGetter getter, BlockPos pos) {
+        return bestFieldAt(getter, pos, true) != null;
+    }
+
+    /**
+     * The WORLD-space field down for a particle at a world position, or
+     * null outside every field (or with the feature disabled).
+     *
+     * Valkyrien Skies moves particles spawned on a ship into WORLD
+     * coordinates (its transform_particles mixins), while a ship's field
+     * sources are registered in the ship's own block grid — so a world
+     * position query never found a ship's fields and ship particles fell
+     * straight down through the ship's gravity. The world grid is queried
+     * first; then every ship whose bounds contain the point is asked in
+     * its own grid, and the grid-space cardinal is rotated back to world.
+     * Ship answers cache per world block cell per tick alongside the grid
+     * memo (a dust cloud asks the same cell hundreds of times a tick).
+     */
+    @Nullable
+    public static net.minecraft.world.phys.Vec3 particleDownVecAt(@Nullable BlockGetter getter, double x, double y, double z) {
+        if (!GravityConfig.gravityAffectsParticles.get()) {
+            return null;
+        }
+        Level level = resolveLevel(getter);
+        if (level == null) {
+            return null;
+        }
+        LevelIndex index = SOURCES.get(level);
+        if (index == null || index.byPos.isEmpty()) {
+            return null;
+        }
+
+        BlockPos worldPos = BlockPos.containing(x, y, z);
+        Best world = bestFieldAt(level, worldPos, true);
+        if (world != null) {
+            return net.minecraft.world.phys.Vec3.atLowerCornerOf(world.down().getNormal());
+        }
+
+        QueryCache cache = QUERY_CACHE.get();
+        long time = level.getGameTime();
+        if (cache.level != level || cache.time != time) {
+            cache.level = level;
+            cache.time = time;
+            cache.results.clear();
+            cache.shipResults.clear();
+        }
+        Long key = worldPos.asLong();
+        Object cached = cache.shipResults.get(key);
+        if (cached != null) {
+            return cached == NULL_BEST ? null : (net.minecraft.world.phys.Vec3) cached;
+        }
+
+        net.minecraft.world.phys.Vec3 result = null;
+        net.minecraft.world.phys.AABB probe = new net.minecraft.world.phys.AABB(
+            x - 1.0E-3, y - 1.0E-3, z - 1.0E-3, x + 1.0E-3, y + 1.0E-3, z + 1.0E-3);
+        for (org.valkyrienskies.core.api.ships.Ship ship
+            : org.valkyrienskies.mod.common.VSGameUtilsKt.getShipsIntersecting(level, probe)) {
+            org.joml.Vector3d local = new org.joml.Vector3d(x, y, z);
+            ship.getTransform().getWorldToShipMatrix().transformPosition(local);
+            Best onShip = bestFieldAt(level, BlockPos.containing(local.x, local.y, local.z), true);
+            if (onShip == null) {
+                continue;
+            }
+            org.joml.Vector3d dir = new org.joml.Vector3d(
+                onShip.down().getStepX(), onShip.down().getStepY(), onShip.down().getStepZ());
+            ship.getTransform().getShipToWorldMatrix().transformDirection(dir);
+            if (dir.lengthSquared() < 1.0E-12) {
+                continue;
+            }
+            dir.normalize();
+            result = new net.minecraft.world.phys.Vec3(dir.x, dir.y, dir.z);
+            break;
+        }
+        cache.shipResults.put(key, result == null ? NULL_BEST : result);
+        return result;
     }
 
     @Nullable
@@ -317,6 +403,7 @@ public final class GravityFieldLookup {
             cache.level = level;
             cache.time = time;
             cache.results.clear();
+            cache.shipResults.clear();
         }
         Long key = pos.asLong();
         Object cached = cache.results.get(key);

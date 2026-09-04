@@ -11,16 +11,18 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.particle.Particle;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
+import net.minecraft.world.phys.Vec3;
 
 /**
  * Particles fall along the gravity field they are in. Vanilla's base tick
  * accelerates straight down by {@code 0.04 * gravity} before moving; right
  * after that store the acceleration is re-aimed along the field's down at
- * the particle's position (its own grid, so particles living on a ship
- * follow the ship's fields). Particle classes that replace the base tick
- * with their own physics (drips, splashes, smoke) keep vanilla behavior.
+ * the particle's position. Particle positions are WORLD coordinates —
+ * Valkyrien Skies moves ship-spawned particles into world space — so the
+ * lookup answers for the world grid and for any ship whose grid holds a
+ * field at that point (its cardinal down rotated by the ship's pose).
+ * Particle classes that replace the base tick with their own physics
+ * (drips, splashes, smoke) keep vanilla behavior.
  */
 @Mixin(Particle.class)
 public abstract class ParticleMixin {
@@ -56,15 +58,15 @@ public abstract class ParticleMixin {
         if (this.gravity == 0.0F) {
             return;
         }
-        Direction down = GravityFieldLookup.particleDownAt(this.level, BlockPos.containing(this.x, this.y, this.z));
-        if (down == null || down == Direction.DOWN) {
+        Vec3 down = GravityFieldLookup.particleDownVecAt(this.level, this.x, this.y, this.z);
+        if (down == null || (down.x == 0.0 && down.z == 0.0 && down.y < 0.0)) {
             return;
         }
         double g = 0.04 * this.gravity;
         // undo vanilla's world-down acceleration, apply it along the field
         this.yd += g;
-        this.xd += g * down.getStepX();
-        this.yd += g * down.getStepY();
-        this.zd += g * down.getStepZ();
+        this.xd += g * down.x;
+        this.yd += g * down.y;
+        this.zd += g * down.z;
     }
 }

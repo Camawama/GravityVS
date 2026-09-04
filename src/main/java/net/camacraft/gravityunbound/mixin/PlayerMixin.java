@@ -102,9 +102,20 @@ public abstract class PlayerMixin extends LivingEntity {
             return new ItemEntity(world, x, y, z, stack);
         }
 
+        // vanilla drops 0.3 below the eyes — a body-scaled distance for a
+        // scaled player (Pehkui): unscaled, a 1/16 player's drop spawned
+        // several body heights below its eyes, through the floor of a
+        // matching-scale ship, in a spot no field covered
+        double heightScale = gravityunbound$heightScale();
         Vec3 vec3d = this.getEyePosition()
-            .subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.3D, 0.0D, GravityChangerAPI.getAimRotation(this)));
-        
+            .subtract(RotationUtil.vecPlayerToWorld(0.0D, 0.3D * heightScale, 0.0D, GravityChangerAPI.getAimRotation(this)));
+        // Pehkui's own drop fix lifts the item by 0.3 * (1 - scale) in WORLD
+        // Y after drop() returns, assuming vanilla's world-down placement;
+        // pre-compensate so its correction lands the item exactly where the
+        // frame-relative placement above put it (identity without Pehkui:
+        // the scale is then 1 and the term is zero)
+        vec3d = vec3d.subtract(0.0D, 0.3D * (1.0D - heightScale), 0.0D);
+
         ItemEntity itemEntity = new ItemEntity(world, vec3d.x, vec3d.y, vec3d.z, stack);
         
 //        // change the gravity of the thrown item
@@ -118,6 +129,26 @@ public abstract class PlayerMixin extends LivingEntity {
         return itemEntity;
     }
     
+    /**
+     * The player's height scale (1 for a vanilla-sized player): the current
+     * pose's dimensions against the unscaled pose dimensions — which is
+     * exactly what Pehkui scales.
+     */
+    @Shadow
+    @Final
+    private static java.util.Map<Pose, EntityDimensions> POSES;
+
+    @org.spongepowered.asm.mixin.Unique
+    private double gravityunbound$heightScale() {
+        Pose pose = this.getPose();
+        float unscaled = POSES.getOrDefault(pose, Player.STANDING_DIMENSIONS).height;
+        float scaled = this.getDimensions(pose).height;
+        if (unscaled <= 1.0E-4F || scaled <= 1.0E-4F) {
+            return 1.0D;
+        }
+        return net.minecraft.util.Mth.clamp(scaled / unscaled, 0.001D, 1000.0D);
+    }
+
     @WrapOperation(
         method = "Lnet/minecraft/world/entity/player/Player;drop(Lnet/minecraft/world/item/ItemStack;ZZ)Lnet/minecraft/world/entity/item/ItemEntity;",
         at = @At(

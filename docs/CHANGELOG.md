@@ -1,6 +1,111 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
-## Unreleased (2.0.0-dev) — 2026-09-02 (round 79: Ad Astra compatibility)
+## Unreleased (2.0.0-dev) — 2026-09-04 (round 80: twelve-finding pass — snaps, seats, edges, scale, particles, wall jump)
+
+- **Surface snaps no longer look like a dropped frame rate — two causes.**
+  (1) The level renderer only re-tests chunk visibility against the
+  frustum when the camera's own pitch/yaw change, which a rotating
+  gravity frame never touches; the old workaround requested a FULL
+  render-chunk graph rebuild (`needsUpdate`) on every frame of every
+  rotation — the asynchronous breadth-first walk of every loaded chunk,
+  re-queued frame after frame — and that was the frame-rate collapse
+  during every snap and on every spinning ship. It now raises only the
+  frustum re-test flag (a new LevelRenderer accessor), the same thing
+  vanilla does when the view turns. (2) The committed face adoption
+  turns the tick frame 15-30 degrees per tick and is over in 3-6 ticks,
+  which reads as a jerky whip. The drawn frame (camera, model, eye,
+  crosshair) now follows the tick frame through a render-only smoothing:
+  exact for anything slower than 6 degrees per tick (orbits, field
+  drift) and for ship carries (composed verbatim), eased (30% of the lag
+  per tick, ~0.4 s) through the fast snaps. Physics, collision and
+  movement keep the tick frame. The lag composes as a world-space offset,
+  so the twist unwinder's yaw compensation stays invisible through it;
+  every hard-snap site (init, spectator, sync, fresh spawn, watchdog,
+  rail override) lands the drawn frame with the tick frame.
+- **Seats on ships under a field: down is the seat's down.** A rider
+  inherited its VS mounting entity's gravity — the raw radial pull under a
+  core (server) or the seat's nearest cardinal (client, where a seat's
+  field target is never synced) — so looking straight down from a chair
+  did not look at the chair. While mounted to a ship whose field covers
+  the seat cell (decided from the block grid on both sides), the rider's
+  gravity is the ship's own down, ship-anchored so the view turns with
+  the ship exactly like a standing rider's. Passengers skip the surface
+  probe, the pull deficit and the transition pull; seats on ships without
+  a field keep vanilla behavior. Plain vehicles (horses, boats) now also
+  hand their field state to the rider instead of leaving a stale one.
+- **No more standing-still oscillation at a cube edge.** The single
+  ground ray at the feet misses when the feet sit a hair past a face's
+  edge while the collider still rests the capsule on that face; the hold
+  lapsed, the diagonal field re-acquired the next face, its contact
+  disagreed, the first face was re-adopted — forever. Physical contact
+  with the held face now confirms the hold (after the convex wrap probe,
+  so walking off an edge still wraps).
+- **Walking off the UP face of a plated cube keeps its momentum.** The
+  momentum rotation across a face change bailed out in the identity
+  frame (vanilla box mode), which is exactly the frame the top face
+  stands in: the walking velocity stayed pointing out over the edge —
+  "up" in the new frame — so the player lifted off the corner and fell
+  back onto it instead of carrying on down the side. The rotation runs
+  in every frame now (it is exact for the identity frame).
+- **Stair risers and walls are no longer adopted as floors under gravity
+  cores.** A radial pull has a tangential component everywhere on a
+  planet face (45 degrees at the rim), so the relative half-gates of the
+  concave-wall and convex-wrap probes read a riser — or a wall built on
+  the face — as endorsed once the player stood far enough from the face
+  center. Core effects now carry a RADIAL flag (world cores included);
+  under a radial field a candidate face must be endorsed at least as well
+  as the face being stood on (90% for the wrap), which on a convex planet
+  only happens past its edge — risers and walls stay walls.
+- **Dropped items fall at once on a level ship in zero-g, and on ships'
+  cores at all.** The zero-g pull for non-living entities ran only on the
+  controlling side; a client-predicted item floated weightless until the
+  server's next position packet (twenty ticks at a vanilla frame, one
+  tick under a rotated one — which is why oblique ships looked
+  immediate). The pull (now a shared capability helper, projectiles
+  handled world-frame) runs for every non-living entity on the client
+  too, and gravity cores apply it alongside plating.
+- **Particles follow ship fields.** VS moves ship-spawned particles into
+  world coordinates while a ship's sources register in its own grid, so
+  the world-position lookup never found them. The particle query now
+  asks every ship whose bounds hold the point in that ship's grid and
+  rotates the grid cardinal back to world (cached per world cell per
+  tick).
+- **F3+B frames the inventory paper doll.** The hitbox transform and the
+  capsule debug spheres stood down in GUI rendering like the model pose
+  already did; the doll now shows its plain body box and local look line.
+- **Scaled players (Pehkui, VS Genesis) — four fixes.** The step assist's
+  acceptance threshold (a flat 0.01 block — more than a 1/16 player's
+  whole step) is body-scaled: tiny players climb slabs and stairs again.
+  The walk animation hands its frame-horizontal distance to vanilla's
+  own `updateWalkAnimation` — where Pehkui scales the limb distance —
+  instead of feeding the animation state directly, so scaled players'
+  limbs swing under fields. Drops spawn a body-scaled distance below the
+  eyes, pre-compensated for Pehkui's own world-Y drop correction. The
+  convex-wrap probe is body-scaled like every other probe (unscaled it
+  started two ship-blocks below a tiny player's feet).
+- **A full-size player collides with a scaled-down ship's faces.** The
+  obstacle gatherer clamped an oversized shipyard reach box to 16 cells
+  around its center, leaving the head and feet spheres (29 shipyard units
+  apart on a 1/16 ship) touching nothing — stuck on every face but the
+  deck (whose identity frame runs VS's own collision). Large reaches now
+  gather the cells around each sphere at the start, end and step-lift
+  positions, skipping buried cells.
+- **Ladders in zero-g.** The pull deficit excluded climbables; vanilla
+  applies gravity on ladders too (the climbable clamp only caps descent),
+  so in the Great Unknown a player on a ladder hung weightless and could
+  never climb down. Included now.
+- **Wall-Jump VS fork: gravity-aware wall jumping.** Under a rotated
+  frame the world-axis wall probes found the very floor the player stood
+  beside — the cling-to-air. A reflective Gravity Unbound compat layer
+  (no link dependency) supplies the frame; wall probes are short rays in
+  the frame's tangent plane (VS raycasts ships natively, so ship walls
+  register for the moving-ship anchor), the ground test looks down the
+  frame, the cling pins the tangential position to a 3D anchor, ship
+  velocities are brought into the frame, particles and jump heights use
+  it. Vanilla gravity runs the original code paths untouched. Forge and
+  Fabric.
+
+
 
 - **Gravity fields now work in Ad Astra dimensions.** Verified on
   ad_astra-forge-1.20.1-1.15.20: Ad Astra hooks `LivingEntity.travel` at

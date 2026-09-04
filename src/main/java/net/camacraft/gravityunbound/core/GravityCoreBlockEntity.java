@@ -293,11 +293,19 @@ public class GravityCoreBlockEntity extends BlockEntity
                 gridCenter.x - this.range, gridCenter.y - this.range, gridCenter.z - this.range,
                 gridCenter.x + this.range, gridCenter.y + this.range, gridCenter.z + this.range
             );
+            // radial: the surface machinery must not read this field's
+            // tangential component as endorsing stair risers and walls (a
+            // cardinalized grounded mob's direction is a grid constant)
             comp.applyGravityDirectionEffect(
                 direction, CORE_ROTATION_PARAMS, CORE_BASE_PRIORITY - distance, false, strengthScale,
                 surfaceSnap, anchorShip, shipLocalDir, shipLocalPos, attracting ? 1.0 : -1.0,
-                gridRegion
+                gridRegion, !cardinalized
             );
+
+            // zero-g dimensions: items, carts and TNT need an explicit pull
+            // (the living-entity deficit does not cover them); plating
+            // applies the same force along its face direction
+            GravityCapabilityImpl.applyZeroGravityFieldForce(world, entity, comp, direction);
         }
     }
 

@@ -383,6 +383,14 @@ public abstract class EntityRenderDispatcherMixin {
         if (GravityChangerAPI.isGravityDefault(entity)) {
             return box;
         }
+        if (net.camacraft.gravityunbound.client.GuiRenderState.renderingGuiEntity) {
+            // the inventory paper doll is drawn upright and unrotated (the
+            // gravity poses stand down in GUIs), but its stored world box is
+            // the rotated envelope: draw the plain body box around the
+            // doll's origin instead, so F3+B frames the doll, not the box
+            // the world sees
+            return entity.getDimensions(entity.getPose()).makeBoundingBox(0.0D, 0.0D, 0.0D);
+        }
 
         return RotationUtil.boxWorldToPlayer(box, GravityChangerAPI.getGravityRotation(entity));
     }
@@ -400,6 +408,10 @@ public abstract class EntityRenderDispatcherMixin {
         at = @At("TAIL")
     )
     private static void inject_renderCapsuleDebug(PoseStack matrices, VertexConsumer vertices, Entity entity, float tickDelta, CallbackInfo ci) {
+        // the paper doll shows the plain body box only (see modify_renderHitbox_Box_0)
+        if (net.camacraft.gravityunbound.client.GuiRenderState.renderingGuiEntity) {
+            return;
+        }
         net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
             GravityChangerAPI.getGravityComponentOrNull(entity);
         if (comp == null || !comp.useCapsuleCollision()) {
@@ -480,6 +492,10 @@ public abstract class EntityRenderDispatcherMixin {
         Vec3 viewVector = instance.getViewVector(partialTicks);
         if (GravityChangerAPI.isGravityDefault(instance)) {
             return viewVector;
+        }
+        if (net.camacraft.gravityunbound.client.GuiRenderState.renderingGuiEntity) {
+            // the doll's look line in the doll's own (unrotated) frame
+            return RotationUtil.vecWorldToPlayer(viewVector, GravityChangerAPI.getAimRotation(instance));
         }
 
         return RotationUtil.vecWorldToPlayer(viewVector, GravityChangerAPI.getGravityRotation(instance));

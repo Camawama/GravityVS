@@ -163,6 +163,27 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private @Nullable Quaternionf syncedVisualTarget = null;
     private final Quaternionf lastSyncedVisualTarget = new Quaternionf();
 
+    // RENDER SMOOTHING. The frame the camera, model and eye position are
+    // actually drawn with (see getRenderRotation). It tracks visualRotation
+    // EXACTLY while the tick frame moves slowly — orbiting a core, riding a
+    // spinning ship (the carry is composed onto it verbatim), field drift —
+    // and eases through the fast COMMITTED snaps of the surface machinery:
+    // a face adoption turns the tick frame 15-30 degrees per tick and is
+    // over in 3-6 ticks, which the eye reads as a jerky, low-frame-rate
+    // whip. Physics, collision and movement keep the tick frame; only what
+    // is drawn lags, for about 0.4 s, with an ease-in/ease-out profile.
+    // The lag composes with the tick frame as a WORLD-space offset, which
+    // is what keeps the twist unwinder's exact yaw compensation invisible
+    // through it (see normalizeTwist). Living entities only: items and
+    // projectiles have no camera and snap deterministically.
+    private final Quaternionf renderBase = new Quaternionf();
+    private final Quaternionf prevRenderBase = new Quaternionf();
+    // fraction of the remaining lag closed per tick, and the floor on the
+    // per-tick turn: anything the tick frame does slower than the floor
+    // passes through unsmoothed, and the tail of a big snap never crawls
+    private static final float RENDER_SMOOTH_GAIN = 0.3f;
+    private static final float RENDER_SMOOTH_MIN_TURN = (float) Math.toRadians(6);
+
     // capsule collision state (players under non-default gravity)
     public boolean capsuleGrounded = false;
     public @Nullable org.valkyrienskies.core.api.ships.Ship capsuleGroundShip = null;
@@ -361,6 +382,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             visualRotation.set(canonical);
             prevVisualRotation.set(canonical);
             visualTarget.set(canonical);
+            snapRenderBase();
             initialized = true;
             this.needsSync = true;
             this.noAnimation = true;
@@ -544,9 +566,19 @@ public class GravityCapabilityImpl implements IGravityCapability {
             dbgDeficitState = "nofield";
             return;
         }
+        // passengers are placed by their vehicle every tick (rideTick zeroes
+        // their velocity); nothing to pull
+        if (entity.isPassenger()) {
+            dbgDeficitState = "passenger";
+            return;
+        }
+        // Climbables are deliberately NOT excluded: vanilla travel applies
+        // gravity on a ladder too (the climbable clamp merely caps the
+        // descent at 0.15/tick), so in a zero-g dimension a field must keep
+        // pulling — without it a player on a ladder in the Great Unknown
+        // hung weightless and could never climb DOWN.
         if (living.isFallFlying()
             || entity.isInWater() || entity.isInLava()
-            || living.onClimbable()
             || living.hasEffect(net.minecraft.world.effect.MobEffects.SLOW_FALLING)) {
             dbgDeficitState = "excluded";
             return;
@@ -647,8 +679,54 @@ public class GravityCapabilityImpl implements IGravityCapability {
         visualRotation.set(target);
         prevVisualRotation.set(target);
         visualTarget.set(target);
+        snapRenderBase();
         noAnimation = true;
         needsSync = true;
+    }
+
+    /** The drawn frame adopts the tick frame instantly (hard snaps, init). */
+    private void snapRenderBase() {
+        renderBase.set(visualRotation);
+        prevRenderBase.set(visualRotation);
+    }
+
+    /**
+     * Advance the drawn frame toward the tick frame: exact for slow motion,
+     * eased through fast snaps (see the field comment on renderBase).
+     * Called once per tick after the chase has moved the tick frame and
+     * before the twist unwinder (whose local premultiplication is applied
+     * to both frames alike).
+     */
+    private void smoothRenderBase() {
+        if (!(entity instanceof LivingEntity)) {
+            renderBase.set(visualRotation);
+            return;
+        }
+        float lag = angleBetween(renderBase, visualRotation);
+        if (lag < (float) Math.toRadians(0.02)) {
+            renderBase.set(visualRotation);
+            return;
+        }
+        float step = Math.max(lag * RENDER_SMOOTH_GAIN, RENDER_SMOOTH_MIN_TURN);
+        if (step >= lag) {
+            renderBase.set(visualRotation);
+            return;
+        }
+        if (renderBase.dot(visualRotation) < 0.0f) {
+            // q and -q are one rotation; keep the slerp on the short arc
+            renderBase.set(-renderBase.x, -renderBase.y, -renderBase.z, -renderBase.w);
+        }
+        renderBase.slerp(visualRotation, step / lag).normalize();
+    }
+
+    /**
+     * A LOCAL-space re-parametrization of the tick frame ({@code newFrame =
+     * delta * oldFrame}, always paired with an exact yaw compensation) must
+     * reach the drawn frame verbatim so it stays invisible there too.
+     */
+    private void applyLocalDeltaToRenderBase(Quaternionf delta) {
+        renderBase.premul(delta).normalize();
+        prevRenderBase.premul(delta).normalize();
     }
 
     // full world-space rotation the attached ship performed since last tick,
@@ -748,7 +826,12 @@ public class GravityCapabilityImpl implements IGravityCapability {
         if (ship == null && lastGroundNormal != null) {
             ship = capsuleGrounded && capsuleGroundShip != null ? capsuleGroundShip : lastGroundShip;
         }
-        if (entity.isPassenger()
+        // Passengers attach only through their mount: a seat under a ship
+        // field anchors the rider's frame to the ship (see the vehicle
+        // branch of updateGravityStatus), so the view turns with the ship
+        // exactly like a standing rider's; VS positions the body itself.
+        boolean passenger = entity.isPassenger();
+        if ((passenger && fieldAnchorShip == null)
             || entity instanceof net.minecraft.world.entity.projectile.Projectile
             || shouldAcceptServerSync()) {
             ship = null;
@@ -765,7 +848,10 @@ public class GravityCapabilityImpl implements IGravityCapability {
         if (ship != null) {
             renderAttachShip = ship;
 
-            boolean airborne = useCapsuleCollision() ? !capsuleGrounded : !entity.onGround();
+            // (mounted riders are carried by VS's own mount positioning —
+            // never re-register them with the standing-entity dragger)
+            boolean airborne = !passenger
+                && (useCapsuleCollision() ? !capsuleGrounded : !entity.onGround());
             if (airborne) {
                 org.valkyrienskies.mod.common.util.EntityDraggingInformation dragInfo =
                     ((org.valkyrienskies.mod.common.util.IEntityDraggingInformationProvider) entity)
@@ -935,6 +1021,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         visualRotation.set(canonical);
         visualTarget.set(canonical);
         prevVisualRotation.set(canonical);
+        snapRenderBase();
         compensateFrameChange(old, visualRotation);
         updateBoundingBox();
         needsSync = true;
@@ -960,6 +1047,21 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private void updateSurfaceProbe() {
         if (entity instanceof net.minecraft.world.entity.projectile.Projectile
             || shouldAcceptServerSync()) {
+            return;
+        }
+
+        // a passenger does not stand on anything: its frame follows the
+        // vehicle (or the ship it is mounted to) directly
+        if (entity.isPassenger()) {
+            capsuleGrounded = false;
+            capsuleGroundNormal = null;
+            capsuleGroundShip = null;
+            lastGroundNormal = null;
+            groundNormalGraceTicks = 0;
+            surfaceChangeCooldown = 0;
+            recentReleasedNormal = null;
+            recentReleasedTicks = 0;
+            contactDisagreeTicks = 0;
             return;
         }
 
@@ -1153,9 +1255,23 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 // plates inside the blend window), tilting fieldUp mostly
                 // floor-ward — 0.35 rejected legitimate wall adoptions there.
                 // Unplated walls still contribute nothing and never pass.
+                //
+                // RADIAL fields (gravity cores) are different: the pull has
+                // a tangential component EVERYWHERE on a planet face (up to
+                // 45 degrees at the face's rim), so the relative half-gate
+                // still adopted stair risers, and even a wall built on the
+                // face, whenever the player stood far enough from the face
+                // center. Under a radial field a face is a floor only when
+                // the field prefers it OVER the face being stood on — which
+                // on a convex planet never happens on the face itself, only
+                // past its edge (the convex wrap's territory): risers and
+                // walls stay walls, as on any planet.
+                double wallGate = fieldRadial
+                    ? heldNormal.dot(fieldUp)
+                    : 0.5 * heldNormal.dot(fieldUp);
                 if (wall != null
                     && wall.dot(fieldUp) > 0.2
-                    && wall.dot(fieldUp) > 0.5 * heldNormal.dot(fieldUp)
+                    && wall.dot(fieldUp) > wallGate
                     && wall.dot(heldNormal) < 0.7
                     && wall.dot(probeDir) < -0.5
                 ) {
@@ -1200,16 +1316,46 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // convex edges — safe now that `moved` has the ship carry subtracted
         // (the old higher gate was partly guarding against that contamination)
         if (held && tangentSpeed > 0.01) {
-            Vec3 wrap = probeSurfaceNormal(feet.subtract(heldNormal.scale(0.15)), tangentDir.scale(-1), 0.75);
+            // (body-scaled like the other probes: unscaled, a 1/16 player's
+            // wrap ray started two ship-blocks below its feet and looked
+            // twelve blocks back — every ledge and hole rim fired it)
+            Vec3 wrap = probeSurfaceNormal(
+                feet.subtract(heldNormal.scale(0.15 * probeScale)), tangentDir.scale(-1), 0.75 * probeScale);
+            // radial fields: the next face must be endorsed about as well as
+            // the current one — true just past a convex edge (where the wrap
+            // belongs), never for a stair riser walked off mid-face
+            double wrapGate = fieldRadial
+                ? 0.9 * heldNormal.dot(fieldUp)
+                : 0.5 * heldNormal.dot(fieldUp);
             if (wrap != null
                 && wrap.dot(fieldUp) > 0.35
-                && wrap.dot(fieldUp) > 0.5 * heldNormal.dot(fieldUp)
+                && wrap.dot(fieldUp) > wrapGate
                 && wrap.dot(heldNormal) < 0.7
                 && wrap.dot(tangentDir) > 0.1
             ) {
                 adoptGroundNormal(wrap);
                 return;
             }
+        }
+
+        // CONTACT CONFIRMS THE HELD FACE. The ground probe is a single ray
+        // at the feet: standing at the very edge of a face with the feet a
+        // hair past it, the ray misses while the collider still rests the
+        // capsule on that face. Letting the hold lapse there handed the
+        // frame to the raw field, which (diagonal at an edge) re-acquired
+        // the NEXT face, whose contact then disagreed, which re-adopted
+        // the first face — a standing-still oscillation between the two
+        // faces of a cube edge until the player walked away. Physics
+        // saying "you stand on it" is the definitive answer: keep it.
+        // (After the wrap probe, so walking off the edge still wraps.)
+        boolean contactConfirms = held && (useCapsuleCollision()
+            ? capsuleGrounded && capsuleGroundNormal != null
+                && capsuleGroundNormal.dot(heldNormal) > 0.8
+            : entity.onGround() && heldNormal.y > 0.8);
+        if (contactConfirms) {
+            groundNormalGraceTicks = GROUND_NORMAL_GRACE_TICKS;
+            contactDisagreeTicks = 0;
+            return;
         }
 
         // during a transition the held face is kept alive even when the probe
@@ -1324,9 +1470,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
      * such flips only happen through fields, not surface walking.
      */
     private void rotateVelocityAcrossSurfaceChange(Vec3 oldNormal, Vec3 newNormal) {
-        if (!useCapsuleCollision()) {
-            return;
-        }
+        // Deliberately NOT gated on capsule mode: the change that takes a
+        // player OFF the top face of a plated cube starts in the identity
+        // frame (vanilla box, local == world velocity), and skipping the
+        // rotation there kept the walking momentum pointing straight out
+        // over the edge — "up" in the new frame — so the player lifted off
+        // the corner and fell back onto it instead of carrying on down the
+        // side: the stutter and the dead stop that only the UP face had.
+        // The frame transform below is exact for the identity frame too.
         boolean controlled = entity.level().isClientSide()
             ? entity.isControlledByLocalInstance()
             : !(entity instanceof Player);
@@ -1475,7 +1626,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
         if (entity instanceof Player player && player.getAbilities().flying) {
             return;
         }
-        if (living.isFallFlying() || living.isNoGravity() || entity.isInWater() || entity.isInLava()) {
+        if (living.isFallFlying() || living.isNoGravity() || entity.isInWater() || entity.isInLava()
+            || entity.isPassenger()) {
             return;
         }
 
@@ -1599,6 +1751,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
      */
     private void advanceVisualRotation() {
         prevVisualRotation.set(visualRotation);
+        prevRenderBase.set(renderBase);
 
         // SHIP CARRY: compose the attached ship's FULL tick rotation onto the
         // frame AFTER the prev capture (render interpolation then sweeps the
@@ -1613,6 +1766,9 @@ public class GravityCapabilityImpl implements IGravityCapability {
             visualRotation.mul(conjDelta).normalize();
             visualTarget.mul(conjDelta).normalize();
             lastChaseTarget.mul(conjDelta).normalize();
+            // the drawn frame rides the ship verbatim: a carry is not a
+            // transition, nothing about it is smoothed
+            renderBase.mul(conjDelta).normalize();
             if (syncedVisualTarget != null) {
                 syncedVisualTarget.mul(conjDelta).normalize();
             }
@@ -1653,6 +1809,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             visualTarget.set(externalVisualOverride);
             visualRotation.set(externalVisualOverride);
             lastChaseTarget.set(externalVisualOverride);
+            renderBase.set(externalVisualOverride);
             externalVisualOverride = null;
             return;
         }
@@ -1679,6 +1836,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             // "teleports around before settling" desync).
             visualRotation.set(visualTarget);
             lastChaseTarget.set(visualTarget);
+            renderBase.set(visualTarget);
             return;
         }
 
@@ -1772,6 +1930,11 @@ public class GravityCapabilityImpl implements IGravityCapability {
             }
         }
 
+        // the drawn frame follows the tick frame: exactly for slow motion,
+        // eased through the fast committed snaps (before the twist
+        // unwinder, which re-parametrizes both frames alike)
+        smoothRenderBase();
+
         normalizeTwist();
 
         // Rotating the frame rotates the CAPSULE in place — a rotation is not
@@ -1835,6 +1998,15 @@ public class GravityCapabilityImpl implements IGravityCapability {
             visualRotation.set(canonical);
             visualTarget.set(canonical);
             prevVisualRotation.set(canonical);
+            // the same (sub-0.03-degree) local re-parametrization for the
+            // drawn frames: new = delta * old
+            Quaternionf localDelta = new Quaternionf(canonical).mul(new Quaternionf(old).conjugate()).normalize();
+            applyLocalDeltaToRenderBase(localDelta);
+            if (angleBetween(renderBase, visualRotation) < (float) Math.toRadians(0.03)) {
+                // fully converged: land the drawn frame bit-exactly on the
+                // canonical frame too, so the render fast path re-engages
+                snapRenderBase();
+            }
             compensateFrameChange(old, visualRotation);
             return;
         }
@@ -1879,6 +2051,12 @@ public class GravityCapabilityImpl implements IGravityCapability {
         // yaw compensation cancels identically)
         prevVisualRotation.premul(delta).normalize();
         visualTarget.premul(delta).normalize();
+        // ...and to the drawn frames. Their lag behind the tick frame is a
+        // WORLD-space offset W (drawn = tick * W); a local premultiplication
+        // T lands on the tick side of it (T * tick * W), so the camera —
+        // conj(W) * conj(tick) * conj(T) * yawShift * view — sees T and its
+        // yaw compensation cancel exactly as they do without smoothing.
+        applyLocalDeltaToRenderBase(delta);
         compensateFrameChange(old, visualRotation);
     }
 
@@ -2004,9 +2182,22 @@ public class GravityCapabilityImpl implements IGravityCapability {
         if (vehicle != null) {
             GravityCapabilityImpl vehicleComp = GravityChangerAPI.getGravityComponentOrNull(vehicle);
             if (vehicleComp != null) {
+                if (updateMountedOnShipGravity(vehicle, vehicleComp)) {
+                    return;
+                }
                 currGravityDirection = vehicleComp.currGravityDirection;
                 currGravityStrength = vehicleComp.currGravityStrength;
                 targetGravityVector = vehicleComp.targetGravityVector;
+                // the vehicle owns the field state; nothing ship-anchored
+                // survives from before mounting
+                fieldGraceTicks = vehicleComp.fieldGraceTicks;
+                lastFieldVector = vehicleComp.lastFieldVector;
+                fieldAnchorShip = null;
+                fieldAnchorLocalDown = null;
+                fieldAnchorLocalPos = null;
+                fieldRegion = null;
+                fieldRegionShip = null;
+                fieldRadial = false;
                 return;
             }
         }
@@ -2165,6 +2356,69 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private int secondaryOnlySustainTicks = 0;
 
     /**
+     * SEATED ON A SHIP UNDER A FIELD: the rider's down is the SEAT's down.
+     *
+     * A passenger normally inherits its vehicle's gravity. A Valkyrien
+     * Skies seat (the mounting entity a helm or a seat block spawns) is a
+     * plain entity: its own frame follows the raw field at its position —
+     * under a gravity core that is the RADIAL pull, which points at the
+     * core, not through the seat — and on the client its field target is
+     * not even synced, so the rider's down was the seat's nearest cardinal
+     * there and the radial direction on the server. Looking straight down
+     * from a chair did not look at the chair.
+     *
+     * While mounted to a ship whose field covers the seat, the rider's
+     * gravity is the ship's own down (shipyard -Y: seats stand upright in
+     * their ship's grid), re-derived from the live transform every tick,
+     * anchored to the ship so the frame turns with it exactly like a
+     * standing rider's. Seats on ships without a field keep vanilla
+     * (world-down) behavior, exactly as standing on such a ship does.
+     * Decided identically on both sides from the block grid, so client
+     * and server never disagree about a seated player's gravity.
+     */
+    private boolean updateMountedOnShipGravity(Entity vehicle, GravityCapabilityImpl vehicleComp) {
+        org.valkyrienskies.core.api.ships.Ship ship =
+            org.valkyrienskies.mod.common.VSGameUtilsKt.getShipMountedTo(entity);
+        if (ship == null) {
+            return false;
+        }
+        org.joml.Vector3d seat = new org.joml.Vector3d(vehicle.getX(), vehicle.getY(), vehicle.getZ());
+        ship.getTransform().getWorldToShipMatrix().transformPosition(seat);
+        boolean fielded = vehicleComp.isGravityOverridden()
+            || net.camacraft.gravityunbound.util.GravityFieldLookup.hasEntityFieldAt(
+                entity.level(), net.minecraft.core.BlockPos.containing(seat.x, seat.y, seat.z));
+        if (!fielded) {
+            return false;
+        }
+
+        org.joml.Vector3d worldDown = new org.joml.Quaterniond(
+            ship.getTransform().getShipToWorldRotation()).transform(new org.joml.Vector3d(0.0, -1.0, 0.0));
+        Vec3 down = new Vec3(worldDown.x, worldDown.y, worldDown.z).normalize();
+
+        targetGravityVector = down;
+        targetGravityStrength = vehicleComp.currGravityStrength > 1.0E-4
+            ? vehicleComp.currGravityStrength
+            : baseGravityStrength * GravityConfig.gravityStrengthMultiplier.get();
+        currentRotationParameters = RotationParameters.getDefault();
+        surfaceAlignAllowed = false;
+        fieldAnchorShip = ship;
+        fieldAnchorLocalDown = new Vec3(0.0, -1.0, 0.0);
+        fieldAnchorLocalPos = null;
+        fieldRegion = null;
+        fieldRegionShip = ship;
+        fieldRadial = false;
+        fieldGraceTicks = FIELD_GRACE_TICKS;
+        lastFieldVector = down;
+        tempEffects.clear();
+        delayApplyDirEffects.clear();
+        delayApplyStrengthEffect = 1.0;
+
+        snapPhysicsDirection();
+        currGravityStrength = targetGravityStrength;
+        return true;
+    }
+
+    /**
      * BOUNDED SUSTAIN. The held-surface field sustain above bridges effect
      * DROPOUTS (the server-side player position lags the ship pose by
      * packets on fast-rotating ships and can map outside the swept field
@@ -2249,6 +2503,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 fieldAnchorLocalPos = null;
                 fieldRegion = null;
                 fieldRegionShip = null;
+                fieldRadial = false;
             }
             return;
         }
@@ -2257,6 +2512,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         fieldAnchorLocalPos = null;
         fieldRegion = null;
         fieldRegionShip = null;
+        fieldRadial = false;
 
         double maxPriority = -Double.MAX_VALUE;
         for (GravityDirEffect effect : tempEffects) {
@@ -2292,6 +2548,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
                     fieldAnchorRadialSign = effect.radialSign();
                     fieldRegion = effect.gridRegion();
                     fieldRegionShip = effect.sourceShip();
+                    fieldRadial = effect.radial();
                     if (effect.rotationParameters != null) {
                         bestParams = effect.rotationParameters;
                     }
@@ -2370,6 +2627,11 @@ public class GravityCapabilityImpl implements IGravityCapability {
     private AABB fieldRegion = null;
     @Nullable
     private org.valkyrienskies.core.api.ships.Ship fieldRegionShip = null;
+    // whether the dominant field is RADIAL (a gravity core, on a ship or in
+    // the world): its pull carries a tangential component everywhere on a
+    // planet face, which the surface-adoption gates must not read as an
+    // endorsement of stair risers and walls (see updateSurfaceProbe)
+    private boolean fieldRadial = false;
 
     /**
      * Physics may only sit on a cardinal direction. Snap to the target vector's
@@ -2558,6 +2820,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
             this.visualRotation.set(this.syncedVisualTarget);
             this.prevVisualRotation.set(this.syncedVisualTarget);
             this.visualTarget.set(this.syncedVisualTarget);
+            snapRenderBase();
 
             if (entity != null && !oldFrame.equals(this.visualRotation)
                 && !(entity instanceof net.minecraft.world.entity.projectile.Projectile)) {
@@ -2725,10 +2988,39 @@ public class GravityCapabilityImpl implements IGravityCapability {
         double radialSign,
         @Nullable AABB gridRegion
     ) {
+        applyGravityDirectionEffect(
+            direction, rotationParameters, priority, secondary, strengthScale,
+            allowSurfaceAlign, sourceShip, shipLocalDown, shipLocalSourcePos, radialSign,
+            gridRegion, shipLocalSourcePos != null);
+    }
+
+    /**
+     * Full variant with an explicit RADIAL flag: a source whose pull points
+     * toward (or away from) a center rather than along a grid constant. A
+     * radial pull has a tangential component everywhere on a planet's
+     * faces, and the surface machinery reads such a field's endorsement of
+     * candidate faces more strictly (see updateSurfaceProbe). World-space
+     * cores pass {@code true} here; ship-mounted ones are radial by virtue
+     * of their {@code shipLocalSourcePos}.
+     */
+    public void applyGravityDirectionEffect(
+        @NotNull Vec3 direction,
+        @Nullable RotationParameters rotationParameters,
+        double priority,
+        boolean secondary,
+        double strengthScale,
+        boolean allowSurfaceAlign,
+        @Nullable org.valkyrienskies.core.api.ships.Ship sourceShip,
+        @Nullable Vec3 shipLocalDown,
+        @Nullable Vec3 shipLocalSourcePos,
+        double radialSign,
+        @Nullable AABB gridRegion,
+        boolean radial
+    ) {
         GravityDirEffect effect = new GravityDirEffect(
             direction, rotationParameters, priority, secondary, strengthScale,
             allowSurfaceAlign, sourceShip, shipLocalDown, shipLocalSourcePos, radialSign,
-            gridRegion
+            gridRegion, radial
         );
         if (isFiringUpdateEvent) {
             tempEffects.add(effect);
@@ -2986,17 +3278,19 @@ public class GravityCapabilityImpl implements IGravityCapability {
      * hot paths: writes into {@code dest} and returns it. Render thread only.
      */
     public Quaternionf getRenderRotation(float partialTick, Quaternionf dest) {
-        if (prevVisualRotation.equals(visualRotation)) {
-            dest.set(visualRotation);
+        // the DRAWN frames (see renderBase): the tick frames eased through
+        // fast snaps, identical to them otherwise
+        if (prevRenderBase.equals(renderBase)) {
+            dest.set(renderBase);
         }
         else {
-            dest.set(prevVisualRotation);
-            if (dest.dot(visualRotation) < 0.0f) {
+            dest.set(prevRenderBase);
+            if (dest.dot(renderBase) < 0.0f) {
                 // q and -q are the same rotation; a slerp across hemispheres
                 // sweeps the long way around
                 dest.set(-dest.x, -dest.y, -dest.z, -dest.w);
             }
-            dest.slerp(visualRotation, partialTick).normalize();
+            dest.slerp(renderBase, partialTick).normalize();
         }
 
         // SHIP ATTACHMENT, render half: SHIP-RELATIVE RECONSTRUCTION.
@@ -3017,9 +3311,9 @@ public class GravityCapabilityImpl implements IGravityCapability {
         float weight = attachWeight;
         if (weight > 0.001f && attachRotValid
             && renderAttachShip instanceof org.valkyrienskies.core.api.ships.ClientShip attachedClientShip) {
-            Quaternionf prevLocal = new Quaternionf(prevVisualRotation)
+            Quaternionf prevLocal = new Quaternionf(prevRenderBase)
                 .mul(new Quaternionf(attachRotPrev)).normalize();
-            Quaternionf curLocal = new Quaternionf(visualRotation)
+            Quaternionf curLocal = new Quaternionf(renderBase)
                 .mul(new Quaternionf(attachRot)).normalize();
             if (prevLocal.dot(curLocal) < 0.0f) {
                 prevLocal.set(-prevLocal.x, -prevLocal.y, -prevLocal.z, -prevLocal.w);
@@ -3106,18 +3400,21 @@ public class GravityCapabilityImpl implements IGravityCapability {
     public boolean isRenderDefault() {
         return isVisuallyDefault()
             && Math.abs(prevVisualRotation.w()) >= 0.9999999f
+            && Math.abs(renderBase.w()) >= 0.9999999f
+            && Math.abs(prevRenderBase.w()) >= 0.9999999f
             && attachWeight <= 0.001f;
     }
 
     /**
-     * True while the visual frame is rotating (this tick differs from last).
+     * True while the drawn frame is rotating (this tick differs from last).
      * On a rotating ship the carry changes the frame every tick, so this
      * covers riding without an extra clause; a stationary plated ship must
-     * NOT count as moving (the level renderer's full chunk update hangs off
+     * NOT count as moving (the level renderer's frustum re-test hangs off
      * this every frame).
      */
     public boolean isVisuallyMoving() {
-        return !prevVisualRotation.equals(visualRotation);
+        return !prevVisualRotation.equals(visualRotation)
+            || !prevRenderBase.equals(renderBase);
     }
 
     /**
@@ -3229,6 +3526,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         computeVisualTarget(visualTarget);
         visualRotation.set(visualTarget);
         prevVisualRotation.set(visualTarget);
+        snapRenderBase();
         updateBoundingBox();
     }
 
@@ -3243,7 +3541,82 @@ public class GravityCapabilityImpl implements IGravityCapability {
         @Nullable Vec3 shipLocalDown,
         @Nullable Vec3 shipLocalSourcePos,
         double radialSign,
-        @Nullable AABB gridRegion
+        @Nullable AABB gridRegion,
+        boolean radial
     ) {
+    }
+
+    // ------------------------------------------------------------------
+    // zero-gravity pull for NON-LIVING entities (items, carts, TNT)
+    // ------------------------------------------------------------------
+
+    /**
+     * In configured zero-g dimensions a field also accelerates NON-LIVING
+     * entities (items, minecarts, TNT): their hardcoded gravity paths are
+     * the ones a zero-g dimension suppresses, and the living-entity deficit
+     * ({@link #applyFieldPullDeficit}) deliberately does not cover them.
+     * One force per entity per tick however many sources claim it (the
+     * capability's claim), scale-invariant, along the WORLD direction the
+     * caller resolved (a plate's face direction, a core's radial pull).
+     *
+     * Applied on the CONTROLLING side — and, on the client, to every
+     * non-living entity in the field, controlled or not. Non-living
+     * remotes are client-PREDICTED physics objects: the client integrates
+     * their velocity itself between the server's position packets, and
+     * without the pull that prediction floated weightless until the next
+     * packet — a dropped item on a level ship in zero-g hung in the air
+     * for a second (vanilla's 20-tick item sync cadence) before jumping to
+     * where the server had it. A pull the client applies identically keeps
+     * the prediction on the server's path, exactly as the client already
+     * computes such entities' frames from its own field sources.
+     */
+    public static void applyZeroGravityFieldForce(
+        net.minecraft.world.level.Level world, Entity entity,
+        GravityCapabilityImpl comp, Vec3 worldDown
+    ) {
+        if (entity instanceof LivingEntity) {
+            return;
+        }
+        boolean applies = world.isClientSide()
+            ? true   // client-predicted physics for every non-living entity
+            : !(entity instanceof Player);
+        if (!applies) {
+            return;
+        }
+        String currentDim = world.dimension().location().toString();
+        if (!GravityConfig.artificialGravityDimensions.get().contains(currentDim)) {
+            return;
+        }
+        // Ad Astra dimensions: the compat layer already makes Ad Astra treat
+        // fielded entities as Earth gravity, so their own gravity path works
+        // again — this extra force would stack on top of it
+        if (net.camacraft.gravityunbound.compat.AdAstraCompat.restoresGravityFor(entity)) {
+            return;
+        }
+        if (!comp.tryClaimArtificialPull(world.getGameTime())) {
+            return;
+        }
+        if (worldDown.lengthSqr() < 1.0E-8) {
+            return;
+        }
+        Vec3 accel = worldDown.normalize()
+            .scale(GravityConfig.artificialGravityAcceleration.get() * comp.getCurrGravityStrength());
+
+        // projectiles are WORLD-frame (raw position integration, world-space
+        // velocity): the pull adds to their velocity directly — never
+        // through the frame transform, which would bend it by the frame
+        if (entity instanceof net.minecraft.world.entity.projectile.Projectile) {
+            Vec3 velocity = entity.getDeltaMovement();
+            if (velocity.dot(worldDown) < 3.0) {
+                entity.setDeltaMovement(velocity.add(accel));
+            }
+            return;
+        }
+
+        Vec3 currentVel = GravityChangerAPI.getWorldVelocity(entity);
+        // crude terminal velocity so stacked fields cannot accelerate indefinitely
+        if (currentVel.dot(comp.getCurrGravityDirectionVec()) < 3.0) {
+            GravityChangerAPI.setWorldVelocity(entity, currentVel.add(accel));
+        }
     }
 }

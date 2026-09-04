@@ -75,6 +75,7 @@
     "client.GameRendererMixin",
     "client.InventoryScreenMixin",
     "client.ItemPickupParticleMixin",
+    "client.LevelRendererAccessor",
     "client.LiquidBlockRendererMixin",
     "client.LocalPlayerEntityMixin",
     "client.ParticleMixin",
