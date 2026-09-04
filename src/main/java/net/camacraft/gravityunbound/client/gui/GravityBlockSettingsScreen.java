@@ -43,10 +43,10 @@ import net.minecraft.world.level.block.entity.BlockEntity;
  *
  * Layout: widgets are grouped into labeled SECTIONS (small gray header +
  * separator line) — "Field" (direction/force, size, falloff), "Gravity"
- * (acceleration + presets, surface snap), "Ship &amp; Visuals" / "Visuals",
- * "Affects" (which categories the field acts on: players, mobs, objects,
- * particles, fluids — green = on, red = off) — with the action row at the
- * bottom. "Copy to Connected Plates" (plating
+ * (acceleration + presets, surface snap), "Visuals", "Affects" (everything
+ * the field acts on: players, mobs, objects, particles, fluids and — for
+ * plating and cores — ships; green = on, red = off) — with the action row
+ * at the bottom. "Copy to Connected Plates" (plating
  * only) applies the on-screen values to the whole connected plate group
  * IMMEDIATELY without closing, and briefly shows "Copied!".
  */
@@ -81,6 +81,7 @@ public class GravityBlockSettingsScreen extends Screen {
     private boolean affectsShips = true;
     private boolean showParticles = false;
     private int targets = FieldTargets.ALL;
+    private boolean replacesGravity = true;
     private Direction localDown = Direction.DOWN;
     private double initialAccel = GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
     private String accelText;
@@ -139,6 +140,7 @@ public class GravityBlockSettingsScreen extends Screen {
                         showParticles = side.showParticles;
                         affectsShips = side.affectsShips;
                         targets = side.targets;
+                        replacesGravity = side.replacesGravity;
                         initialAccel = side.gravityAccel;
                     }
                 }
@@ -152,6 +154,7 @@ public class GravityBlockSettingsScreen extends Screen {
                     affectsShips = be.isAffectsShips();
                     showParticles = be.isShowParticles();
                     targets = be.getTargets();
+                    replacesGravity = be.isReplacesGravity();
                     initialAccel = be.getGravityAccel();
                 }
             }
@@ -262,46 +265,51 @@ public class GravityBlockSettingsScreen extends Screen {
         y += ROW_HEIGHT;
 
         if (type != TargetType.NORMALIZER) {
+            // Surface Snapping | World Gravity (for held ships) share one row
             addRenderableWidget(CycleButton.onOffBuilder(surfaceSnap)
-                .create(x, y, WIDGET_WIDTH, WIDGET_HEIGHT,
+                .create(x, y, HALF_WIDTH, WIDGET_HEIGHT,
                     Component.translatable("gravity_changer.gui.surface_snap"),
                     (button, value) -> surfaceSnap = value));
+            addRenderableWidget(CycleButton.<Boolean>builder(
+                    value -> Component.translatable(value
+                        ? "gravity_changer.gui.world_gravity.replace"
+                        : "gravity_changer.gui.world_gravity.blend"))
+                .withValues(Boolean.TRUE, Boolean.FALSE)
+                .withInitialValue(replacesGravity)
+                .withTooltip(value -> Tooltip.create(Component.translatable(value
+                    ? "gravity_changer.gui.world_gravity.replace.tooltip"
+                    : "gravity_changer.gui.world_gravity.blend.tooltip")))
+                .create(x + HALF_WIDTH + 4, y, HALF_WIDTH, WIDGET_HEIGHT,
+                    Component.translatable("gravity_changer.gui.world_gravity"),
+                    (button, value) -> replacesGravity = value));
             y += ROW_HEIGHT;
         }
 
-        // ---- Ship & Visuals / Visuals section ----
-        y = sectionHeader(type != TargetType.NORMALIZER
-            ? "gravity_changer.gui.section.ship_visuals"
-            : "gravity_changer.gui.section.visuals", y);
-
-        if (type != TargetType.NORMALIZER) {
-            // Affects Ships | Field Visualization share one row
-            addRenderableWidget(CycleButton.onOffBuilder(affectsShips)
-                .create(x, y, HALF_WIDTH, WIDGET_HEIGHT,
-                    Component.translatable("gravity_changer.gui.affects_ships"),
-                    (button, value) -> affectsShips = value));
-            addRenderableWidget(CycleButton.onOffBuilder(showParticles)
-                .create(x + HALF_WIDTH + 4, y, HALF_WIDTH, WIDGET_HEIGHT,
-                    Component.translatable("gravity_changer.gui.field_visual"),
-                    (button, value) -> showParticles = value));
-        }
-        else {
-            addRenderableWidget(CycleButton.onOffBuilder(showParticles)
-                .create(x, y, WIDGET_WIDTH, WIDGET_HEIGHT,
-                    Component.translatable("gravity_changer.gui.field_visual"),
-                    (button, value) -> showParticles = value));
-        }
+        // ---- Visuals section ----
+        y = sectionHeader("gravity_changer.gui.section.visuals", y);
+        addRenderableWidget(CycleButton.onOffBuilder(showParticles)
+            .create(x, y, WIDGET_WIDTH, WIDGET_HEIGHT,
+                Component.translatable("gravity_changer.gui.field_visual"),
+                (button, value) -> showParticles = value));
         y += ROW_HEIGHT;
 
-        // ---- Affects section: per-category toggles (green on / red off) ----
+        // ---- Affects section: everything the field acts on, one place
+        // (green on / red off) — ships included for plating and cores ----
         y = sectionHeader("gravity_changer.gui.section.targets", y);
         int thirdWidth = (WIDGET_WIDTH - 2 * 4) / 3;
         addRenderableWidget(targetToggle(x, y, thirdWidth, FieldTargets.PLAYERS, "players"));
         addRenderableWidget(targetToggle(x + thirdWidth + 4, y, thirdWidth, FieldTargets.MOBS, "mobs"));
         addRenderableWidget(targetToggle(x + 2 * (thirdWidth + 4), y, thirdWidth, FieldTargets.OBJECTS, "objects"));
         y += ROW_HEIGHT;
-        addRenderableWidget(targetToggle(x, y, HALF_WIDTH, FieldTargets.PARTICLES, "particles"));
-        addRenderableWidget(targetToggle(x + HALF_WIDTH + 4, y, HALF_WIDTH, FieldTargets.FLUIDS, "fluids"));
+        if (type != TargetType.NORMALIZER) {
+            addRenderableWidget(targetToggle(x, y, thirdWidth, FieldTargets.PARTICLES, "particles"));
+            addRenderableWidget(targetToggle(x + thirdWidth + 4, y, thirdWidth, FieldTargets.FLUIDS, "fluids"));
+            addRenderableWidget(shipsToggle(x + 2 * (thirdWidth + 4), y, thirdWidth));
+        }
+        else {
+            addRenderableWidget(targetToggle(x, y, HALF_WIDTH, FieldTargets.PARTICLES, "particles"));
+            addRenderableWidget(targetToggle(x + HALF_WIDTH + 4, y, HALF_WIDTH, FieldTargets.FLUIDS, "fluids"));
+        }
         y += ROW_HEIGHT;
 
         // ---- action row ----
@@ -348,6 +356,26 @@ public class GravityBlockSettingsScreen extends Screen {
             .withStyle(on ? ChatFormatting.GREEN : ChatFormatting.RED);
     }
 
+    /**
+     * The ships toggle lives in the Affects section with the same look as
+     * the category toggles, but drives its own flag: ships are a per-block
+     * (plating: per-side) setting rather than a target-mask bit.
+     */
+    private Button shipsToggle(int x, int y, int width) {
+        Button button = Button.builder(shipsLabel(), b -> {
+                affectsShips = !affectsShips;
+                b.setMessage(shipsLabel());
+            })
+            .bounds(x, y, width, WIDGET_HEIGHT).build();
+        button.setTooltip(Tooltip.create(Component.translatable("gravity_changer.gui.target.ships.tooltip")));
+        return button;
+    }
+
+    private Component shipsLabel() {
+        return Component.translatable("gravity_changer.gui.target.ships")
+            .withStyle(affectsShips ? ChatFormatting.GREEN : ChatFormatting.RED);
+    }
+
     private Component connectedLabel() {
         return connectedFeedbackTicks > 0
             ? Component.translatable("gravity_changer.gui.apply_connected.applied")
@@ -380,6 +408,7 @@ public class GravityBlockSettingsScreen extends Screen {
                 tag.putBoolean("showParticles", showParticles);
                 tag.putBoolean("affectsShips", affectsShips);
                 tag.putInt("targets", targets);
+                tag.putBoolean("replacesGravity", replacesGravity);
                 tag.putBoolean("applyToConnected", applyToConnected);
             }
             case CORE -> {
@@ -391,6 +420,7 @@ public class GravityBlockSettingsScreen extends Screen {
                 tag.putBoolean("showParticles", showParticles);
                 tag.putBoolean("affectsShips", affectsShips);
                 tag.putInt("targets", targets);
+                tag.putBoolean("replacesGravity", replacesGravity);
             }
             case NORMALIZER -> {
                 tag.putString("localDown", localDown.getName());

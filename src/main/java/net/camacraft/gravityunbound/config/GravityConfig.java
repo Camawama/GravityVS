@@ -38,6 +38,7 @@ public class GravityConfig
 	public static ForgeConfigSpec.BooleanValue gravityPlatingAffectsShips;
 	public static ForgeConfigSpec.BooleanValue shipFieldsAffectWorldFluids;
 	public static ForgeConfigSpec.DoubleValue gravityCoreShipForceMultiplier;
+	public static ForgeConfigSpec.DoubleValue shipFieldDamping;
 
 	// gravity normalizer
 	public static ForgeConfigSpec.IntValue normalizerDefaultRange;
@@ -96,6 +97,12 @@ public class GravityConfig
         GravityConfig.gravityPlatingAffectsShips = config.comment("whether gravity plating fields pull/push Valkyrien Skies ships (per-plate toggle in the settings GUI)").define("gravityPlatingAffectsShips", true);
         GravityConfig.shipFieldsAffectWorldFluids = config.comment("whether fields mounted on Valkyrien Skies ships also bend the WORLD's liquids they fly over (a ship's field pulling water out of a lake)").define("shipFieldsAffectWorldFluids", true);
         GravityConfig.gravityCoreShipForceMultiplier = config.comment("multiplier for the force gravity cores apply to ships (1.0 = 1g)").defineInRange("gravityCoreShipForceMultiplier", 1.0, 0.0, 10.0);
+        GravityConfig.shipFieldDamping = config.comment(
+            "damping of a held ship's velocity and spin RELATIVE to the ship (or world) carrying the field, per second",
+            "(0 = none). Fields are conservative and the contact solver injects energy: without damping a cluster of",
+            "captured ships keeps jittering until it spins its attractor up; with it captures settle into resting contact.",
+            "Applied equal and opposite to both ships, so momentum is still conserved.")
+            .defineInRange("shipFieldDamping", 0.5, 0.0, 10.0);
         config.pop();
 
         config.push("Gravity Normalizer");

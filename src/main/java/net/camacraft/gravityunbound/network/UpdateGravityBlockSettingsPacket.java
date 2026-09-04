@@ -82,6 +82,12 @@ public class UpdateGravityBlockSettingsPacket
 				: net.camacraft.gravityunbound.util.FieldTargets.ALL;
 		}
 
+		/** Whether the field replaces world gravity for held ships; older clients: yes. */
+		private static boolean readReplacesGravity(CompoundTag tag)
+		{
+			return !tag.contains("replacesGravity") || tag.getBoolean("replacesGravity");
+		}
+
 		public static boolean onMessage(UpdateGravityBlockSettingsPacket message, Supplier<NetworkEvent.Context> ctx)
 		{
 			ctx.get().enqueueWork(() ->
@@ -135,6 +141,7 @@ public class UpdateGravityBlockSettingsPacket
 									tag.getBoolean("showParticles"),
 									!tag.contains("affectsShips") || tag.getBoolean("affectsShips"),
 									readTargets(tag),
+									readReplacesGravity(tag),
 									tag.getBoolean("applyToConnected")
 								);
 								// wake fluids so they re-settle under the new field state;
@@ -158,7 +165,8 @@ public class UpdateGravityBlockSettingsPacket
 								tag.getBoolean("surfaceSnap"),
 								tag.getBoolean("showParticles"),
 								!tag.contains("affectsShips") || tag.getBoolean("affectsShips"),
-								readTargets(tag)
+								readTargets(tag),
+								readReplacesGravity(tag)
 							);
 							net.camacraft.gravityunbound.util.GravityFieldLookup.resettleFluidsAround(
 								level, pos, Math.max(oldRange, be.sourceMaxRange()));

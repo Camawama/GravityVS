@@ -158,5 +158,12 @@
   "gravity_changer.gui.target.particles": "Particles",
   "gravity_changer.gui.target.particles.tooltip": "Whether the field bends particles (smoke, drips, leaves...)",
   "gravity_changer.gui.target.fluids": "Fluids",
-  "gravity_changer.gui.target.fluids.tooltip": "Whether the field pulls water and lava along its down"
+  "gravity_changer.gui.target.fluids.tooltip": "Whether the field pulls water and lava along its down",
+  "gravity_changer.gui.world_gravity": "World Gravity",
+  "gravity_changer.gui.world_gravity.replace": "Replaced",
+  "gravity_changer.gui.world_gravity.replace.tooltip": "Ships held by this field ignore the dimension's gravity — the field is their gravity",
+  "gravity_changer.gui.world_gravity.blend": "Blended",
+  "gravity_changer.gui.world_gravity.blend.tooltip": "Ships held by this field keep the dimension's gravity and the field adds to it (use this for ships whose gravity another mod controls)",
+  "gravity_changer.gui.target.ships": "Ships",
+  "gravity_changer.gui.target.ships.tooltip": "Whether the field pulls other Valkyrien Skies ships whose center of mass enters it"
 }

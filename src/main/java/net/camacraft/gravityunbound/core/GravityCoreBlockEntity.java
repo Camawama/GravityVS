@@ -58,6 +58,10 @@ public class GravityCoreBlockEntity extends BlockEntity
     // what the field acts on (players / mobs / objects / particles /
     // fluids), see util.FieldTargets
     private int targets = net.camacraft.gravityunbound.util.FieldTargets.ALL;
+    // whether a ship this core holds has the dimension's gravity REPLACED
+    // by the field (true) or keeps it, the field adding on top (false —
+    // also the setting for ships whose gravity another mod controls)
+    private boolean replacesGravity = true;
     // the world-space box this ship-mounted core's field covered at its
     // last world-fluid wake-up (see GravityPlatingBlockEntity)
     private @Nullable AABB lastShipWakeBox = null;
@@ -99,6 +103,7 @@ public class GravityCoreBlockEntity extends BlockEntity
         targets = tag.contains("targets")
             ? net.camacraft.gravityunbound.util.FieldTargets.sanitize(tag.getInt("targets"))
             : net.camacraft.gravityunbound.util.FieldTargets.ALL;
+        replacesGravity = !tag.contains("replacesGravity") || tag.getBoolean("replacesGravity");
     }
 
     @Override
@@ -112,6 +117,7 @@ public class GravityCoreBlockEntity extends BlockEntity
         tag.putBoolean("surfaceSnap", surfaceSnap);
         tag.putBoolean("affectsShips", affectsShips);
         tag.putInt("targets", targets);
+        tag.putBoolean("replacesGravity", replacesGravity);
     }
 
     @Nullable
@@ -412,34 +418,27 @@ public class GravityCoreBlockEntity extends BlockEntity
                 continue;
             }
 
+            // cheap membership prefilter on the game thread; the physics
+            // thread re-tests against the LIVE transforms every physics tick
             Vector3d shipPos = new Vector3d(serverShip.getTransform().getPositionInWorld());
-            Vector3d toCenter = new Vector3d(center.x, center.y, center.z).sub(shipPos);
-            double worldDistance = toCenter.length();
-            // range is already world-scaled; falloff runs in the core's own
-            // grid units (see applyToEntities)
-            if (worldDistance > range || worldDistance < 1.0 * shipScale) {
+            if (new Vector3d(center.x, center.y, center.z).sub(shipPos).length() > range) {
                 continue;
-            }
-            double distance = worldDistance / shipScale;
-
-            double mass = serverShip.getInertiaData().getMass();
-            // ~1 g in m/s^2, scaled by the core's own acceleration setting
-            double acceleration = 10.0 * GravityConfig.gravityCoreShipForceMultiplier.get()
-                * (gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL);
-            if (gradualFalloff) {
-                // ships obey the same inverse-square falloff as entities
-                acceleration *= Math.min(1.0, 16.0 / (distance * distance));
-            }
-            Vector3d force = toCenter.normalize(new Vector3d()).mul(mass * acceleration);
-            if (!attracting) {
-                force.negate();
             }
 
             GravityCoreForceInducer inducer = GravityCoreForceInducer.getOrCreate(serverShip);
             if (inducer == null) {
                 return; // inducer unavailable (registration refused): leave ships alone
             }
-            inducer.queueForce(force);
+            // ~1 g in m/s^2, scaled by the core's own acceleration setting;
+            // the force itself (reduced mass, live direction, reaction on the
+            // carrying ship, damping) is evaluated on the physics thread
+            double acceleration = 10.0 * GravityConfig.gravityCoreShipForceMultiplier.get()
+                * (gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL);
+            Vec3 gridCenter = Vec3.atCenterOf(worldPosition);
+            inducer.offer(GravityCoreForceInducer.FieldSource.radial(
+                ownShip != null ? ownShip.getId() : GravityCoreForceInducer.WORLD,
+                new Vector3d(gridCenter.x, gridCenter.y, gridCenter.z),
+                range, shipScale, acceleration, attracting, gradualFalloff, replacesGravity));
         }
     }
 
@@ -560,6 +559,10 @@ public class GravityCoreBlockEntity extends BlockEntity
         return targets;
     }
 
+    public boolean isReplacesGravity() {
+        return replacesGravity;
+    }
+
     /**
      * Server-side entry point for the settings GUI (arrives via
      * {@code network.UpdateGravityBlockSettingsPacket}). Every value is
@@ -571,13 +574,13 @@ public class GravityCoreBlockEntity extends BlockEntity
         boolean affectsShips
     ) {
         applySettingsFromGui(newRange, attracting, gradualFalloff, gravityAccel, surfaceSnap, showParticles,
-            affectsShips, this.targets);
+            affectsShips, this.targets, this.replacesGravity);
     }
 
     public void applySettingsFromGui(
         int newRange, boolean attracting, boolean gradualFalloff,
         double gravityAccel, boolean surfaceSnap, boolean showParticles,
-        boolean affectsShips, int targets
+        boolean affectsShips, int targets, boolean replacesGravity
     ) {
         Level world = getLevel();
         if (world == null || world.isClientSide()) {
@@ -591,6 +594,7 @@ public class GravityCoreBlockEntity extends BlockEntity
         this.showParticles = showParticles;
         this.affectsShips = affectsShips;
         this.targets = net.camacraft.gravityunbound.util.FieldTargets.sanitize(targets);
+        this.replacesGravity = replacesGravity;
         sync();
     }
 }

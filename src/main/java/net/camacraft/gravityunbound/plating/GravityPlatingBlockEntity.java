@@ -84,6 +84,10 @@ public class GravityPlatingBlockEntity extends BlockEntity
         // ships whose center enters it (a landing pad's field catching a
         // shuttle); ANDed with the global gravityPlatingAffectsShips config
         public boolean affectsShips = true;
+        // whether a ship this side holds has the dimension's gravity
+        // REPLACED by the field (true) or keeps it, the field adding on top
+        // (false — also for ships whose gravity another mod controls)
+        public boolean replacesGravity = true;
 
         public @Nullable AABB effectBoxCache = null;
 
@@ -123,6 +127,7 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 ? net.camacraft.gravityunbound.util.FieldTargets.sanitize(tag.getInt("targets"))
                 : net.camacraft.gravityunbound.util.FieldTargets.ALL;
             data.affectsShips = !tag.contains("affectsShips") || tag.getBoolean("affectsShips");
+            data.replacesGravity = !tag.contains("replacesGravity") || tag.getBoolean("replacesGravity");
             return data;
         }
 
@@ -136,6 +141,7 @@ public class GravityPlatingBlockEntity extends BlockEntity
             tag.putBoolean("surfaceSnap", surfaceSnap);
             tag.putInt("targets", targets);
             tag.putBoolean("affectsShips", affectsShips);
+            tag.putBoolean("replacesGravity", replacesGravity);
             return tag;
         }
 
@@ -802,35 +808,31 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 if (sideDatum == null || !sideDatum.affectsShips) {
                     continue;
                 }
-                if (!sideDatum.getEffectBox(blockPos, plateDir, world).contains(testingPos)) {
+                AABB effectBox = sideDatum.getEffectBox(blockPos, plateDir, world);
+                if (!effectBox.contains(testingPos)) {
                     continue;
                 }
-                Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
-                Vector3d dir = new Vector3d(localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ());
-                if (ownShip != null) {
-                    ownShip.getTransform().getShipToWorldMatrix().transformDirection(dir);
-                }
-                if (dir.lengthSquared() < 1.0E-12) {
-                    continue;
-                }
-                dir.normalize();
-
-                double acceleration = 10.0 * GravityConfig.gravityCoreShipForceMultiplier.get()
-                    * (sideDatum.gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL);
-                if (sideDatum.gradualFalloff) {
-                    Vec3 plateDirVec = Vec3.atLowerCornerOf(plateDir.getNormal());
-                    Vec3 effectCenter = Vec3.atCenterOf(blockPos).add(plateDirVec.scale(0.5));
-                    double distanceToPlane = -testingPos.subtract(effectCenter).dot(plateDirVec);
-                    acceleration *= Mth.clamp(1.0 - Math.max(0.0, distanceToPlane) / sideDatum.getEffectRange(), 0.0, 1.0);
-                }
-                double mass = loaded.getInertiaData().getMass();
-                Vector3d force = dir.mul(mass * acceleration);
                 net.camacraft.gravityunbound.core.GravityCoreForceInducer inducer =
                     net.camacraft.gravityunbound.core.GravityCoreForceInducer.getOrCreate(loaded);
                 if (inducer == null) {
                     return; // inducer unavailable (registration refused): leave ships alone
                 }
-                inducer.queueForceOnce(force, gameTime);
+                // describe the field in THIS plate's grid; the physics thread
+                // evaluates it against live transforms (reduced mass, reaction
+                // on the carrying ship, damping) every physics tick
+                Direction localEffectDir = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
+                Vec3 plateNormal = Vec3.atLowerCornerOf(plateDir.getNormal());
+                Vec3 effectCenter = Vec3.atCenterOf(blockPos).add(plateNormal.scale(0.5));
+                double acceleration = 10.0 * GravityConfig.gravityCoreShipForceMultiplier.get()
+                    * (sideDatum.gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL);
+                inducer.offer(net.camacraft.gravityunbound.core.GravityCoreForceInducer.FieldSource.planar(
+                    ownShip != null ? ownShip.getId() : net.camacraft.gravityunbound.core.GravityCoreForceInducer.WORLD,
+                    new org.joml.primitives.AABBd(effectBox.minX, effectBox.minY, effectBox.minZ,
+                        effectBox.maxX, effectBox.maxY, effectBox.maxZ),
+                    new Vector3d(localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ()),
+                    new Vector3d(effectCenter.x, effectCenter.y, effectCenter.z),
+                    new Vector3d(plateNormal.x, plateNormal.y, plateNormal.z),
+                    sideDatum.getEffectRange(), acceleration, sideDatum.gradualFalloff, sideDatum.replacesGravity));
                 break;
             }
         }
@@ -1348,13 +1350,14 @@ public class GravityPlatingBlockEntity extends BlockEntity
         applySettingsFromGui(side, newLevel, isAttracting, gradualFalloff, gravityAccel, surfaceSnap, showParticles,
             own != null ? own.affectsShips : true,
             own != null ? own.targets : net.camacraft.gravityunbound.util.FieldTargets.ALL,
+            own != null ? own.replacesGravity : true,
             applyToConnected);
     }
 
     public void applySettingsFromGui(
         Direction side, int newLevel, boolean isAttracting, boolean gradualFalloff,
         double gravityAccel, boolean surfaceSnap, boolean showParticles,
-        boolean affectsShips, int targets, boolean applyToConnected
+        boolean affectsShips, int targets, boolean replacesGravity, boolean applyToConnected
     ) {
         Level world = getLevel();
         if (world == null || world.isClientSide()) {
@@ -1373,7 +1376,7 @@ public class GravityPlatingBlockEntity extends BlockEntity
 
         if (!applyToConnected) {
             writeSideSettings(own, clampedLevel, isAttracting, gradualFalloff, clampedAccel, surfaceSnap, showParticles,
-                affectsShips, clampedTargets);
+                affectsShips, clampedTargets, replacesGravity);
             invalidateBoxCaches();
             sync();
             return;
@@ -1425,7 +1428,7 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 continue;
             }
             writeSideSettings(memberSide, clampedLevel, isAttracting, gradualFalloff, clampedAccel, surfaceSnap, showParticles,
-                affectsShips, clampedTargets);
+                affectsShips, clampedTargets, replacesGravity);
             member.invalidateBoxCaches();
             member.sync();
         }
@@ -1434,7 +1437,7 @@ public class GravityPlatingBlockEntity extends BlockEntity
     private static void writeSideSettings(
         SideData side, int level, boolean isAttracting, boolean gradualFalloff,
         double gravityAccel, boolean surfaceSnap, boolean showParticles,
-        boolean affectsShips, int targets
+        boolean affectsShips, int targets, boolean replacesGravity
     ) {
         side.level = level;
         side.isAttracting = isAttracting;
@@ -1444,6 +1447,7 @@ public class GravityPlatingBlockEntity extends BlockEntity
         side.showParticles = showParticles;
         side.affectsShips = affectsShips;
         side.targets = targets;
+        side.replacesGravity = replacesGravity;
     }
 
     public List<ItemStack> getDrops() {

@@ -60,6 +60,64 @@
   leave ships alone (one warning in the log) instead of crashing the
   server. None of this had ever run in-game: the core's "Affects Ships"
   bug above had skipped every ship before it reached the inducer.
+- **A field REPLACES gravity for a ship, as it does for an entity.** A
+  pulled ship was still falling world-down on top of the field's pull —
+  VS applies the dimension's gravity to every ship regardless. While a
+  field holds a ship, the inducer now cancels that gravity on the physics
+  thread the way VS's own antigravity test block does (mass × the
+  dimension's gravity magnitude from the physics-side atmosphere table,
+  straight up — zero in a zero-g dimension, so nothing is over-corrected
+  there). Ships that only receive a reaction force keep their gravity.
+- **Ship-mounted fields obey Newton's third law.** The ship carrying a
+  core or plate now receives the opposite of every pull it exerts on
+  another ship. Before, a pulled ship pressing into its attractor's hull
+  simply shoved the attractor away (the contact force had no
+  counterpart) and the pair drifted forever; two core ships attracting
+  each other clung together and kept sliding. With the reaction the
+  pair's total momentum stays put and they settle against each other.
+  World-mounted fields have nothing to react on — the world is the
+  immovable mass.
+- **A one-block ship settles on a one-block core ship.** The core's
+  ship pull had an inner dead zone of one block, and a ship resting ON a
+  single-block core ship has its center exactly one block away — every
+  contact jitter switched the pull off and on, and the ship wandered
+  until it picked up enough speed to orbit. The dead zone is gone (a
+  micrometre epsilon guards the direction).
+- **Ship fields are now a proper two-body model, evaluated on the
+  physics thread.** A ring of captured blocks around a core ship kept
+  jittering until it spun the core up and flung them off. Three causes,
+  three changes:
+  - *Closing acceleration, not target-mass force.* The force is the
+    field's acceleration times the pair's REDUCED mass, applied equal
+    and opposite. A planet-sized source barely moves and the held ship
+    falls at full strength; equal masses take half each; a one-block
+    core ship pulling a freighter simply falls onto the freighter. No
+    body ever accelerates faster than the field, momentum is conserved,
+    so a field can never push its own ship around by pulling something
+    into its hull — no reactionless thrust. World-mounted fields react
+    on nothing: the world is the immovable mass.
+  - *Damping.* Fields are conservative and a rigid-body contact solver
+    injects energy under constant pressure; nothing ever removed it.
+    A held pair now gets damping of its RELATIVE velocity and RELATIVE
+    spin (config `shipFieldDamping`, per second, default 0.5), equal and
+    opposite on both, scaled by reduced mass / reduced inertia, so
+    captures settle into resting contact and momentum stays conserved.
+  - *Live evaluation.* The game thread now only DESCRIBES the fields
+    holding a ship (carrying ship, grid geometry, strength, falloff);
+    the physics thread evaluates them every physics tick from live
+    transforms and velocities. A force computed 50 ms earlier and held
+    constant was itself an energy source (a lagged central force is a
+    negative damper).
+- **"World Gravity: Replaced / Blended" per field block.** Replaced (the
+  default) cancels the dimension's gravity for held ships — the field is
+  their gravity, as it is for entities. Blended keeps it and adds the
+  field on top: for fields meant as an extra pull, and for ships whose
+  gravity another mod (VMod's per-ship gravity, for one) already
+  controls, which would otherwise be cancelled twice.
+- **Settings screen: one "Affects" section.** The ships toggle moved out
+  of its own "Ship &amp; Visuals" row into the Affects section beside
+  Players / Mobs / Objects / Particles / Fluids, with the same green/red
+  style; Visuals holds the field visualization alone.
 - **Releasing the walk key on a ship no longer glides and snaps back.**
   The idle anchor (which pins a standing player to the deck of a moving
   ship) was captured the instant the walk key came up, while the player
