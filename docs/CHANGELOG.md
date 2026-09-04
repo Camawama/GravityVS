@@ -1,5 +1,61 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-09-04 (round 82: the world-cube rejection, particles in the field's frame, scaled limbs, the doll's scale)
+
+- **Plated cubes in the WORLD work again — the server was rejecting the
+  client.** Not collision at all: the server replays every client move
+  through its OWN gravity frame, which trails the client's by a packet.
+  On the tick a face changes, or while a player approaches a plated face
+  from outside its field, the server still holds a vanilla upright box,
+  and vanilla's `isPlayerCollidingWithAnythingNew` found that box inside
+  the very blocks the client's rotated capsule stands on — teleporting
+  the player back every tick: stuck at every edge of a world cube, held
+  two blocks off its underside (the last accepted position). The same
+  cube as a ship never showed it because ship blocks live in the shipyard,
+  where the world collision query does not look (Valkyrien Skies only
+  skips the "moved wrongly" checks, not this one). The client's report is
+  now authoritative whenever the server's own gravity state shows any
+  influence OR the reported position lies within reach of any field
+  source (world grid, or the grid of a ship whose bounds — inflated by
+  the level's largest source reach — hold the point); the "moved wrongly"
+  gate and the server-side suffocation test are lifted under the same
+  rule. Ship riders were always accepted by the same principle.
+- **A float dead zone kept capsule mode latched after leaving a field.**
+  The field logs showed the watchdog firing at `w=-0.9999998`: single
+  precision resolves |w| in ~6e-8 steps near 1, the 0.9999999 identity
+  test admitted only the top two representable values, and a frame that
+  settled one step out (0.07 degrees) was neither "default" nor inside
+  the twist unwinder's 0.03-degree exact-anchoring window. Both thresholds
+  are now ~0.1 and 0.15 degrees, so any frame that close is anchored
+  bit-exactly the next tick.
+- **Particles live in the field's frame.** Re-aiming the base class's
+  gravity store only caught particles that ran the base tick: leaves,
+  drips and smoke replace it, mods add their own pull on top (Ad Astra's
+  large smoke fell world-down AND field-down at once), and nothing
+  touched a smoke column's rise. A particle inside a field now keeps its
+  velocity in a frame whose -Y is the field's down; the one place that
+  turns velocity into displacement (`Particle.move`) converts through the
+  frame, collides in world space and brings the result back for the
+  on-ground / blocked-axis bookkeeping. Every particle class's own
+  physics — vanilla gravity, a leaf's sway, a column's rise, a mod's extra
+  pull — happens along the field's axes without knowing about it. Spawn
+  velocities are rotated into the frame as the particle is added and
+  re-expressed whenever the frame at its position changes (leaving the
+  field, a rotating ship), so the world velocity never jumps. Ship fields
+  are found for particles anywhere in the field, not only inside the
+  hull's bounds (the ship search is inflated by the level's largest
+  source reach — a range-16 plate reaches far outside the hull).
+- **Scaled players' limbs swing on every face.** Pehkui scales the limb
+  distance with a ModifyArg INSIDE `calculateEntityAnimation`, the method
+  this mod replaces to measure the distance in the gravity frame — so the
+  scaling never ran on a rotated face. The replacement now applies
+  Pehkui's own scaling through a reflective compat layer (nothing loads
+  without Pehkui).
+- **The paper doll's hitbox and capsule spheres match the doll at any
+  scale.** The doll is drawn at its type's natural size (VS Genesis draws
+  its mini-scale players full size in GUIs) while the entity's dimensions
+  are scaled; GUI-mode hitbox geometry is brought back to the doll's size.
+
 ## Unreleased (2.0.0-dev) — 2026-09-04 (round 81: round-80 follow-up — the real stutter, the box-to-capsule edge, cling holds, drops, the doll)
 
 - **The snap stutter's real sources, and the render smoothing is gone.**

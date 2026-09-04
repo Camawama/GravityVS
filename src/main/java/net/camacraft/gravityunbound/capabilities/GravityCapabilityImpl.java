@@ -1993,7 +1993,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
         // final exact anchoring: everything within a hair of canonical converges
         // bit-exactly so cardinal behavior matches the original mod
-        if (angleBetween(visualRotation, canonical) < (float) Math.toRadians(0.03)) {
+        if (angleBetween(visualRotation, canonical) < EXACT_ANCHOR_ANGLE) {
             Quaternionf old = new Quaternionf(visualRotation);
             visualRotation.set(canonical);
             visualTarget.set(canonical);
@@ -3345,9 +3345,46 @@ public class GravityCapabilityImpl implements IGravityCapability {
     public boolean isVisuallyDefault() {
         // |w|: q and -q are the same rotation, and long premul/mul chains can
         // legitimately converge onto the NEGATIVE identity — which would keep
-        // capsule mode latched on forever in the plain world
+        // capsule mode latched on forever in the plain world.
+        // Threshold: about 0.1 degrees. Single-precision quaternions resolve
+        // |w| in steps of ~6e-8 near 1: the old 0.9999999 admitted only the
+        // top two representable values, and a frame that settled one float
+        // step further out (|w| = 0.9999998, 0.07 degrees — seen in the
+        // field logs) was neither "default" nor close enough for the twist
+        // unwinder's exact anchoring, so capsule mode latched on in the
+        // plain world until the watchdog forced it out two seconds later.
+        // Anything within the anchoring window (see normalizeTwist) is
+        // snapped bit-exactly onto the canonical frame the next tick.
         return currGravityDirection == Direction.DOWN
-            && Math.abs(visualRotation.w()) >= 0.9999999f;
+            && Math.abs(visualRotation.w()) >= IDENTITY_W;
+    }
+
+    // |w| of a frame within ~0.1 degrees of identity
+    private static final float IDENTITY_W = 0.9999996f;
+    // frames this close to their canonical frame anchor onto it exactly
+    // (must cover the whole non-default band above, or a frame can settle
+    // between the two thresholds and never leave capsule mode)
+    private static final float EXACT_ANCHOR_ANGLE = (float) Math.toRadians(0.15);
+
+    /**
+     * True while the SERVER cannot judge this player's movement: the client
+     * computes its own gravity, and every frame-dependent check the server
+     * would run (box-vs-block collision at the reported position, "moved
+     * wrongly") is one packet BEHIND the client's frame — the tick a face
+     * changes, or the moment a player approaches a plated face from outside
+     * its field, the server still holds a vanilla upright box and finds it
+     * inside the very blocks the client's rotated capsule stands on. Any
+     * gravity influence at all, on either side, makes the client's report
+     * authoritative (Valkyrien Skies' own ship riders are accepted by the
+     * same principle, which is why ships never showed the rejection).
+     */
+    public boolean isMovementClientAuthoritative() {
+        return useCapsuleCollision()
+            || fieldGraceTicks > 0
+            || lastGroundNormal != null
+            || surfaceChangeCooldown > 0
+            || recentReleasedTicks > 0
+            || !baseGravityDirection.equals(DOWN);
     }
 
     /**
@@ -3357,7 +3394,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
      */
     public boolean isRenderDefault() {
         return isVisuallyDefault()
-            && Math.abs(prevVisualRotation.w()) >= 0.9999999f
+            && Math.abs(prevVisualRotation.w()) >= IDENTITY_W
             && attachWeight <= 0.001f
             && attachWeightPrev <= 0.001f;
     }

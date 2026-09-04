@@ -388,8 +388,12 @@ public abstract class EntityRenderDispatcherMixin {
             // gravity poses stand down in GUIs), but its stored world box is
             // the rotated envelope: draw the plain body box around the
             // doll's origin instead, so F3+B frames the doll, not the box
-            // the world sees
-            return entity.getDimensions(entity.getPose()).makeBoundingBox(0.0D, 0.0D, 0.0D);
+            // the world sees. At the doll's own model scale (see
+            // gravityunbound$dollScale): a Pehkui-scaled player's box is
+            // sixteen times smaller than the doll it is drawn on.
+            double s = gravityunbound$dollScale(entity);
+            AABB body = entity.getDimensions(entity.getPose()).makeBoundingBox(0.0D, 0.0D, 0.0D);
+            return new AABB(body.minX * s, body.minY * s, body.minZ * s, body.maxX * s, body.maxY * s, body.maxZ * s);
         }
 
         return RotationUtil.boxWorldToPlayer(box, GravityChangerAPI.getGravityRotation(entity));
@@ -416,7 +420,6 @@ public abstract class EntityRenderDispatcherMixin {
 
         double radius = net.camacraft.gravityunbound.util.CapsuleCollider.capsuleRadius(entity);
         double height = net.camacraft.gravityunbound.util.CapsuleCollider.capsuleHeight(entity, radius);
-        double[] offsets = net.camacraft.gravityunbound.util.CapsuleCollider.sphereOffsets(height, radius);
 
         Vec3 up;
         Vec3 right;
@@ -424,7 +427,11 @@ public abstract class EntityRenderDispatcherMixin {
         Quaternionf physicsRotation;
         if (net.camacraft.gravityunbound.client.GuiRenderState.renderingGuiEntity) {
             // the paper doll is drawn upright in its own frame (no gravity
-            // pose): stack the spheres along the doll's own up
+            // pose): stack the spheres along the doll's own up, at the
+            // doll's model scale
+            double s = gravityunbound$dollScale(entity);
+            radius *= s;
+            height *= s;
             up = new Vec3(0, 1, 0);
             right = new Vec3(1, 0, 0);
             forward = new Vec3(0, 0, 1);
@@ -437,6 +444,7 @@ public abstract class EntityRenderDispatcherMixin {
             forward = RotationUtil.vecPlayerToWorld(new Vec3(0, 0, 1), renderRotation);
             physicsRotation = comp.getCurrentRotation();
         }
+        double[] offsets = net.camacraft.gravityunbound.util.CapsuleCollider.sphereOffsets(height, radius);
 
         float[][] colors = {
             {0.25f, 1.0f, 0.25f},   // bottom sphere: green
@@ -451,6 +459,23 @@ public abstract class EntityRenderDispatcherMixin {
             gravityunbound$drawCircle(matrices, vertices, physicsRotation, center, right, up, radius, color);
             gravityunbound$drawCircle(matrices, vertices, physicsRotation, center, forward, up, radius, color);
         }
+    }
+
+    /**
+     * The paper doll is drawn at its type's natural size whatever the
+     * entity's Pehkui scale (VS Genesis draws its mini-scale players full
+     * size in GUIs), while the entity's dimensions ARE scaled: the factor
+     * that brings scaled body geometry back to the doll's size (1 for an
+     * unscaled entity).
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private static double gravityunbound$dollScale(Entity entity) {
+        float natural = entity.getType().getDimensions().height;
+        float actual = entity.getDimensions(net.minecraft.world.entity.Pose.STANDING).height;
+        if (natural <= 1.0E-4F || actual <= 1.0E-4F) {
+            return 1.0D;
+        }
+        return Mth.clamp(natural / actual, 0.001D, 1000.0D);
     }
 
     /**

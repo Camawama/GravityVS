@@ -198,11 +198,11 @@ public abstract class LivingEntityMixin extends Entity {
     /**
      * The walk animation measures the FRAME-horizontal distance moved, not
      * the world-horizontal one (a player walking up a wall face moves along
-     * world Y). Only the distance is replaced — it is handed to vanilla's
-     * own {@code updateWalkAnimation}, which is where Pehkui scales the
-     * limb distance for scaled entities: feeding the animation state
-     * directly bypassed that hook, so a 1/16-scale player's legs and arms
-     * stopped swinging the moment a field rotated its frame.
+     * world Y). The distance is handed to vanilla's own
+     * {@code updateWalkAnimation} — after Pehkui's limb-distance scaling,
+     * which Pehkui applies with a ModifyArg INSIDE the method replaced here
+     * and which therefore never ran on a rotated face: a 1/16-scale
+     * player's limbs froze on every face of a scaled ship but its deck.
      */
     @Inject(
             method = "calculateEntityAnimation",
@@ -220,7 +220,9 @@ public abstract class LivingEntityMixin extends Entity {
         double d = playerPosDelta.x;
         double e = flutter ? playerPosDelta.y : 0.0D;
         double f = playerPosDelta.z;
-        this.updateWalkAnimation((float) Math.sqrt(d * d + e * e + f * f));
+        float distance = (float) Math.sqrt(d * d + e * e + f * f);
+        this.updateWalkAnimation(
+            net.camacraft.gravityunbound.compat.PehkuiCompat.modifyLimbDistance(distance, entity));
     }
     
     @WrapOperation(

@@ -261,11 +261,49 @@ public abstract class ServerGamePacketListenerImplMixin {
         net.minecraft.world.level.LevelReader level, AABB box, double x, double y, double z,
         org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Boolean> cir
     ) {
-        net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
-            GravityChangerAPI.getGravityComponentOrNull(this.player);
-        if (comp != null && comp.useCapsuleCollision()) {
+        if (gravityunbound$clientAuthoritative(new Vec3(x, y, z))) {
             cir.setReturnValue(false);
         }
+    }
+
+    /**
+     * Whether the client's movement report must be accepted as-is: the
+     * server's own gravity state shows any influence, OR the REPORTED
+     * position lies within reach of a field source. The second half is the
+     * essential one: the server's frame is one packet behind the client's,
+     * and a player approaching a plated face from outside its field (or
+     * walking around a cube edge) has a rotated client frame the server has
+     * not seen yet — the server then tested a vanilla upright box at the
+     * reported position, found it inside the very blocks the client's
+     * capsule stands on, and teleported the player back every tick: stuck at
+     * every edge of a plated cube in the world, held off its underside two
+     * blocks below. Ships never showed it because their blocks live in the
+     * shipyard, where the world collision query does not look.
+     */
+    @org.spongepowered.asm.mixin.Unique
+    private boolean gravityunbound$clientAuthoritative(Vec3 reportedPos) {
+        net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
+            GravityChangerAPI.getGravityComponentOrNull(this.player);
+        if (comp != null && comp.isMovementClientAuthoritative()) {
+            return true;
+        }
+        return net.camacraft.gravityunbound.util.GravityFieldLookup.isWithinAnySourceRange(
+            this.player.level(), reportedPos);
+    }
+
+    /**
+     * The "moved wrongly" distance gate (0.0625 = a quarter block squared):
+     * lifted while the client's report is authoritative, so the replay
+     * mismatch a lagging server frame produces neither rejects (the
+     * acceptance below already handles that) nor spams the log.
+     */
+    @org.spongepowered.asm.mixin.injection.ModifyConstant(
+        method = "handleMovePlayer",
+        constant = @org.spongepowered.asm.mixin.injection.Constant(doubleValue = 0.0625D),
+        require = 0
+    )
+    private double gravityunbound$movedWronglyGate(double original) {
+        return gravityunbound$clientAuthoritative(this.player.position()) ? Double.MAX_VALUE : original;
     }
 
     /**
@@ -297,9 +335,7 @@ public abstract class ServerGamePacketListenerImplMixin {
         net.minecraft.server.level.ServerLevel level, net.minecraft.world.entity.Entity entity, AABB box,
         Operation<Boolean> original
     ) {
-        net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
-            GravityChangerAPI.getGravityComponentOrNull(this.player);
-        if (comp != null && comp.useCapsuleCollision()) {
+        if (gravityunbound$clientAuthoritative(this.player.position())) {
             return false;
         }
         return original.call(level, entity, box);

@@ -306,21 +306,94 @@ public final class GravityFieldLookup {
     }
 
     /**
-     * The WORLD-space field down for a particle at a world position, or
-     * null outside every field (or with the feature disabled).
+     * Whether the world position lies within the Chebyshev reach of ANY
+     * registered field source — in the world grid, or in the grid of a ship
+     * whose bounds (inflated by the level's largest source reach) hold the
+     * point. The server's movement acceptance uses it for the position a
+     * CLIENT reports: a player approaching a plated face from outside its
+     * field has a client frame the server has not caught up with yet, and
+     * the server's own gravity state cannot know that.
+     */
+    public static boolean isWithinAnySourceRange(@Nullable BlockGetter getter, net.minecraft.world.phys.Vec3 worldPos) {
+        Level level = resolveLevel(getter);
+        if (level == null) {
+            return false;
+        }
+        LevelIndex index = SOURCES.get(level);
+        if (index == null || index.byPos.isEmpty()) {
+            return false;
+        }
+        if (anySourceInRange(level, index, BlockPos.containing(worldPos.x, worldPos.y, worldPos.z))) {
+            return true;
+        }
+        double reach = index.maxRange.get() + 1.0;
+        net.minecraft.world.phys.AABB probe = new net.minecraft.world.phys.AABB(
+            worldPos.x - reach, worldPos.y - reach, worldPos.z - reach,
+            worldPos.x + reach, worldPos.y + reach, worldPos.z + reach);
+        for (org.valkyrienskies.core.api.ships.Ship ship
+            : org.valkyrienskies.mod.common.VSGameUtilsKt.getShipsIntersecting(level, probe)) {
+            org.joml.Vector3d local = new org.joml.Vector3d(worldPos.x, worldPos.y, worldPos.z);
+            ship.getTransform().getWorldToShipMatrix().transformPosition(local);
+            if (anySourceInRange(level, index, BlockPos.containing(local.x, local.y, local.z))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean anySourceInRange(Level level, LevelIndex index, BlockPos pos) {
+        long now = level.getGameTime();
+        int ring = (index.maxRange.get() + 15) >> 4;
+        int chunkX = pos.getX() >> 4;
+        int chunkZ = pos.getZ() >> 4;
+        for (int dx = -ring; dx <= ring; dx++) {
+            for (int dz = -ring; dz <= ring; dz++) {
+                ConcurrentHashMap<BlockPos, Entry> bucket =
+                    index.byChunk.get(LevelIndex.chunkKey(chunkX + dx, chunkZ + dz));
+                if (bucket == null) {
+                    continue;
+                }
+                for (Map.Entry<BlockPos, Entry> mapEntry : bucket.entrySet()) {
+                    Entry entry = mapEntry.getValue();
+                    if (now - entry.registeredAt() > EXPIRY_TICKS || now < entry.registeredAt()) {
+                        continue;
+                    }
+                    BlockPos sourcePos = entry.source().sourcePos();
+                    int distance = Math.max(
+                        Math.abs(pos.getX() - sourcePos.getX()),
+                        Math.max(Math.abs(pos.getY() - sourcePos.getY()), Math.abs(pos.getZ() - sourcePos.getZ()))
+                    );
+                    if (distance <= entry.source().sourceMaxRange()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The gravity FRAME for a particle at a world position — the rotation
+     * mapping world directions into a frame whose -Y is the field's down —
+     * or null outside every field (or with the feature disabled). Particles
+     * inside a field keep their velocity in this frame (see the client
+     * ParticleMixin), so every particle class's own physics — vanilla's
+     * gravity, a leaf's sway, a smoke column's rise, a mod's extra pull —
+     * happens along the field's axes without knowing about it.
      *
      * Valkyrien Skies moves particles spawned on a ship into WORLD
      * coordinates (its transform_particles mixins), while a ship's field
      * sources are registered in the ship's own block grid — so a world
-     * position query never found a ship's fields and ship particles fell
-     * straight down through the ship's gravity. The world grid is queried
-     * first; then every ship whose bounds contain the point is asked in
-     * its own grid, and the grid-space cardinal is rotated back to world.
-     * Ship answers cache per world block cell per tick alongside the grid
-     * memo (a dust cloud asks the same cell hundreds of times a tick).
+     * position query never found a ship's fields. The world grid is queried
+     * first; then every ship whose bounds, inflated by the level's largest
+     * source reach (a plate at range 16 projects its field far outside the
+     * hull), hold the point is asked in its own grid, and the frame is the
+     * grid cardinal's canonical frame composed with the ship's rotation.
+     * World answers are the shared canonical frames (exact axis math); ship
+     * answers cache per world block cell per tick.
      */
     @Nullable
-    public static net.minecraft.world.phys.Vec3 particleDownVecAt(@Nullable BlockGetter getter, double x, double y, double z) {
+    public static org.joml.Quaternionf particleFrameAt(@Nullable BlockGetter getter, double x, double y, double z) {
         if (!GravityConfig.gravityAffectsParticles.get()) {
             return null;
         }
@@ -336,7 +409,7 @@ public final class GravityFieldLookup {
         BlockPos worldPos = BlockPos.containing(x, y, z);
         Best world = bestFieldAt(level, worldPos, true);
         if (world != null) {
-            return net.minecraft.world.phys.Vec3.atLowerCornerOf(world.down().getNormal());
+            return net.camacraft.gravityunbound.util.RotationUtil.getWorldRotationQuaternion(world.down());
         }
 
         QueryCache cache = QUERY_CACHE.get();
@@ -350,12 +423,13 @@ public final class GravityFieldLookup {
         Long key = worldPos.asLong();
         Object cached = cache.shipResults.get(key);
         if (cached != null) {
-            return cached == NULL_BEST ? null : (net.minecraft.world.phys.Vec3) cached;
+            return cached == NULL_BEST ? null : (org.joml.Quaternionf) cached;
         }
 
-        net.minecraft.world.phys.Vec3 result = null;
+        org.joml.Quaternionf result = null;
+        double reach = index.maxRange.get() + 1.0;
         net.minecraft.world.phys.AABB probe = new net.minecraft.world.phys.AABB(
-            x - 1.0E-3, y - 1.0E-3, z - 1.0E-3, x + 1.0E-3, y + 1.0E-3, z + 1.0E-3);
+            x - reach, y - reach, z - reach, x + reach, y + reach, z + reach);
         for (org.valkyrienskies.core.api.ships.Ship ship
             : org.valkyrienskies.mod.common.VSGameUtilsKt.getShipsIntersecting(level, probe)) {
             org.joml.Vector3d local = new org.joml.Vector3d(x, y, z);
@@ -364,14 +438,15 @@ public final class GravityFieldLookup {
             if (onShip == null) {
                 continue;
             }
-            org.joml.Vector3d dir = new org.joml.Vector3d(
-                onShip.down().getStepX(), onShip.down().getStepY(), onShip.down().getStepZ());
-            ship.getTransform().getShipToWorldMatrix().transformDirection(dir);
-            if (dir.lengthSquared() < 1.0E-12) {
-                continue;
-            }
-            dir.normalize();
-            result = new net.minecraft.world.phys.Vec3(dir.x, dir.y, dir.z);
+            // frame = canonical(gridDown) o shipRotation^-1: maps the world
+            // direction the grid cardinal is drawn along onto local -Y
+            org.joml.Quaterniondc shipRot = ship.getTransform().getShipToWorldRotation();
+            org.joml.Quaternionf frame = new org.joml.Quaternionf(
+                net.camacraft.gravityunbound.util.RotationUtil.getWorldRotationQuaternion(onShip.down()));
+            frame.mul(new org.joml.Quaternionf(
+                (float) shipRot.x(), (float) shipRot.y(), (float) shipRot.z(), (float) shipRot.w()).conjugate())
+                .normalize();
+            result = frame;
             break;
         }
         cache.shipResults.put(key, result == null ? NULL_BEST : result);

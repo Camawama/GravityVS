@@ -933,7 +933,20 @@ public abstract class EntityMixin {
     @Inject(method = "isInWall", at = @At("HEAD"), cancellable = true)
     private void inject_isInWall_capsule(CallbackInfoReturnable<Boolean> cir) {
         GravityCapabilityImpl comp = GravityChangerAPI.getGravityComponentOrNull((Entity) (Object) this);
-        if (comp != null && comp.useCapsuleCollision()) {
+        if (comp == null) {
+            return;
+        }
+        if (comp.useCapsuleCollision()) {
+            cir.setReturnValue(false);
+            return;
+        }
+        // SERVER-side players under any gravity influence: the server's
+        // frame trails the client's by a packet, and an accepted position on
+        // a plated face tested against a not-yet-rotated vanilla box read as
+        // "inside a wall" — suffocation for standing where the client's
+        // capsule legitimately stands. The client keeps vanilla's own answer.
+        if (!this.level.isClientSide() && (Object) this instanceof Player
+            && comp.isMovementClientAuthoritative()) {
             cir.setReturnValue(false);
         }
     }
