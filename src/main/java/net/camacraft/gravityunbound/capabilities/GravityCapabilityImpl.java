@@ -2213,6 +2213,16 @@ public class GravityCapabilityImpl implements IGravityCapability {
         return attachShip != null;
     }
 
+    /**
+     * True while Gravity Unbound OWNS this entity's gravity: a field (or its
+     * grace window) is active, or the base gravity is not plain down. Used
+     * by compatibility layers (Ad Astra) to keep other mods' planet gravity
+     * from overriding a field's pull.
+     */
+    public boolean isGravityOverridden() {
+        return fieldGraceTicks > 0 || !baseGravityDirection.equals(DOWN);
+    }
+
     /** The ship the dominant field is mounted on, or null. */
     @Nullable
     public org.valkyrienskies.core.api.ships.Ship getFieldAnchorShip() {

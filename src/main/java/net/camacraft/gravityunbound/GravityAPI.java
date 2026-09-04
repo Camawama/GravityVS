@@ -50,5 +50,9 @@ public class GravityAPI
 		// keep RotationParameters' defaults in sync with the config
 		bus.addListener((ModConfigEvent.Loading e) -> RotationParameters.updateDefault());
 		bus.addListener((ModConfigEvent.Reloading e) -> RotationParameters.updateDefault());
+
+		// soft compatibility layers (each is a no-op when its mod is absent)
+		bus.addListener((net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent e) ->
+			e.enqueueWork(net.camacraft.gravityunbound.compat.AdAstraCompat::initIfLoaded));
 	}
 }

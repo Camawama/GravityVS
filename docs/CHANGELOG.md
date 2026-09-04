@@ -1,5 +1,39 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-09-02 (round 79: Ad Astra compatibility)
+
+- **Gravity fields now work in Ad Astra dimensions.** Verified on
+  ad_astra-forge-1.20.1-1.15.20: Ad Astra hooks `LivingEntity.travel` at
+  its head and, at zero gravity (every orbit dimension), REPLACES vanilla
+  travel with its own floating physics; at partial gravity (Moon, Mars) it
+  pre-adds a velocity correction so vanilla's 0.08 nets out to the planet's
+  pull. Gravity Unbound's field pull rides Forge's entity-gravity attribute
+  inside vanilla travel, which never ran in orbit — and the zero-g deficit
+  pull only engages for no-gravity entities, which is how VS Genesis does
+  space and which Ad Astra never sets. So the camera turned and nothing
+  pulled.
+- **The layer.** Ad Astra fires events at every decision point, and its
+  API reports gravity as a fraction of Earth. A soft compatibility layer
+  (reflective; no build dependency; nothing loads without Ad Astra)
+  registers three listeners: while an entity is under a Gravity Unbound
+  field (or a non-default base gravity) it answers Ad Astra's
+  entity-gravity event with Earth gravity — items, arrows, boats, fishing
+  hooks and mobs then get no planet correction — and vetoes both travel
+  tick events, so vanilla travel runs and the field's own attribute pull
+  acts along the gravity frame on both client and server (client-side
+  players read planet gravity from their synced data, so the travel veto
+  is the only hook that reaches them). Outside fields, Ad Astra's planets
+  and its own Gravity Normalizer behave exactly as before; inside one of
+  its normalizer zones a field simply wins, as it does over any ambient
+  gravity. The plating's extra zero-g force for non-living entities stands
+  down in Ad Astra dimensions, where the restored planet gravity already
+  supplies it (VS Genesis's no-gravity space still gets it).
+- Not the right tool: the per-dimension gravity override in the API sets a
+  DIRECTION for a dimension's ambient gravity; the conflict here was about
+  strength and about whose travel code runs.
+
+
+
 ## Unreleased (2.0.0-dev) — 2026-09-02 (round 78: cling lets go, the crosshair, the crawl flicker, the body, particles)
 
 - **Surface Cling no longer pulls in zero-g and lets go on a jump.** The

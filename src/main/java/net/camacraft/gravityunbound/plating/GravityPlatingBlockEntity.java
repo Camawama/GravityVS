@@ -924,6 +924,12 @@ public class GravityPlatingBlockEntity extends BlockEntity
         if (entity instanceof LivingEntity) {
             return;
         }
+        // Ad Astra dimensions: the compat layer already makes Ad Astra treat
+        // fielded entities as Earth gravity, so their own gravity path works
+        // again — this extra force would stack on top of it
+        if (net.camacraft.gravityunbound.compat.AdAstraCompat.restoresGravityFor(entity)) {
+            return;
+        }
         // one application per entity per tick, however many plates claim it —
         // stacked fields must not multiply the acceleration
         if (!comp.tryClaimArtificialPull(world.getGameTime())) {
