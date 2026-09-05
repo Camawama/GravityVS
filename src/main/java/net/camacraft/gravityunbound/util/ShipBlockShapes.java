@@ -53,9 +53,19 @@ public final class ShipBlockShapes {
     }
 
     private static void registerPlating(RegisterBlockStateEvent event) {
+        if (!net.camacraft.gravityunbound.config.GravityConfig.shipsCollideWithPlatingPanels.get()) {
+            LOGGER.info("Gravity Unbound: plating panel collision for ships is disabled by config; VS keeps its default shape");
+            return;
+        }
         Block plating = GravityBlocks.GRAVITY_PLATING.get();
         VSGameConfig.Server defaults = VSGameConfig.SERVER;
+        // ONE shape object per distinct panel combination (the water/lava
+        // variants of a state share its panels): the physics core interns
+        // block types, and handing it thousands of distinct-but-equal
+        // shapes is exactly the kind of thing a native library resents
+        java.util.Map<String, SolidState> byPanels = new java.util.HashMap<>();
         int registered = 0;
+        int failed = 0;
         for (BlockState state : plating.getStateDefinition().getPossibleStates()) {
             // the outline shape is the union of the state's panels (a full
             // cube for the transient no-side state). VS boxes are INCLUSIVE
@@ -74,29 +84,92 @@ public final class ShipBlockShapes {
             if (boxes.isEmpty()) {
                 continue;
             }
+            String key = boxes.toString();
+            SolidState solid = byPanels.get(key);
+            if (solid == null && !byPanels.containsKey(key)) {
+                solid = buildPanelState(event, defaults, boxes);
+                byPanels.put(key, solid);
+            }
+            if (solid == null) {
+                failed++;
+                continue;
+            }
             try {
+                event.register(state, solid);
+                registered++;
+            }
+            catch (RuntimeException e) {
+                failed++;
+                LOGGER.warn("Gravity Unbound could not register a plating collision shape for {}: {}", state, e.toString());
+            }
+        }
+        LOGGER.info("Gravity Unbound registered {} plating collision shapes with Valkyrien Skies ({} distinct panel layouts, {} left on VS defaults)",
+            registered, byPanels.size(), failed);
+    }
+
+    /**
+     * ONLY Valkyrien Skies' own shape generator builds the shape (boxes plus
+     * the collision spheres it derives, the same way it handles carpets,
+     * slabs and stairs) — nothing hand-rolled goes to the native physics.
+     * Should it refuse a panel this thin, the panel is thickened one voxel
+     * at a time INTO the cell (a ship then rests a voxel or two further off
+     * the wall, which is invisible) until it accepts; a layout it never
+     * accepts keeps VS's default shape, logged once.
+     */
+    @org.jetbrains.annotations.Nullable
+    private static SolidState buildPanelState(RegisterBlockStateEvent event, VSGameConfig.Server defaults, List<AABBi> panels) {
+        for (int grow = 0; grow <= 3; grow++) {
+            List<org.joml.primitives.AABBic> boxes = new java.util.ArrayList<>(panels.size());
+            for (AABBi panel : panels) {
+                boxes.add(thickened(panel, grow));
+            }
+            try {
+                org.valkyrienskies.core.api.physics.blockstates.BoxesBlockShape shape =
+                    org.valkyrienskies.mod.common.VSGameUtilsKt.getVsCore().getSolidShapeUtils().generateShapeFromBoxes(boxes);
+                if (shape == null) {
+                    continue;
+                }
                 SolidState solid = event.buildSolidState(builder -> {
-                    builder.boxesShape(shape -> {
-                        for (AABBi box : boxes) {
-                            shape.addPositiveBox(box);
-                        }
-                        return kotlin.Unit.INSTANCE;
-                    });
+                    builder.shape(shape);
                     builder.friction(defaults.getDefaultBlockFriction());
                     builder.elasticity(defaults.getDefaultBlockElasticity());
                     builder.hardness(defaults.getDefaultBlockHardness());
                     return kotlin.Unit.INSTANCE;
                 });
-                event.register(state, solid);
-                registered++;
+                if (grow > 0) {
+                    LOGGER.info("Gravity Unbound: plating panels {} registered thickened by {} voxel(s) for VS's shape generator", panels, grow);
+                }
+                return solid;
             }
             catch (RuntimeException e) {
-                // a rejected box must never take the server down: that state
-                // simply keeps VS's own default shape
-                LOGGER.warn("Gravity Unbound could not register a plating collision shape for {}: {}", state, e.toString());
+                if (grow == 3) {
+                    LOGGER.warn("Gravity Unbound could not build a VS collision shape for plating panels {}: {}", panels, e.toString());
+                }
             }
         }
-        LOGGER.debug("Gravity Unbound registered {} plating collision shapes with Valkyrien Skies", registered);
+        return null;
+    }
+
+    /**
+     * A panel grown {@code grow} voxels along its thin axis, away from the
+     * face it sits on (a floor panel grows upward, a wall panel inward).
+     */
+    private static AABBi thickened(AABBi panel, int grow) {
+        if (grow == 0) {
+            return new AABBi(panel);
+        }
+        int sx = panel.maxX - panel.minX, sy = panel.maxY - panel.minY, sz = panel.maxZ - panel.minZ;
+        AABBi out = new AABBi(panel);
+        if (sy <= sx && sy <= sz) {
+            if (panel.minY == 0) out.maxY = Math.min(15, out.maxY + grow); else out.minY = Math.max(0, out.minY - grow);
+        }
+        else if (sx <= sz) {
+            if (panel.minX == 0) out.maxX = Math.min(15, out.maxX + grow); else out.minX = Math.max(0, out.minX - grow);
+        }
+        else {
+            if (panel.minZ == 0) out.maxZ = Math.min(15, out.maxZ + grow); else out.minZ = Math.max(0, out.minZ - grow);
+        }
+        return out;
     }
 
     /** Index of the first voxel a box edge at {@code blocks} covers (0..15). */

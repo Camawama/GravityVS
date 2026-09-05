@@ -145,6 +145,27 @@
   plate, never inside the cell. (Entities still walk through the panels,
   by design.) Plating, cores and normalizers also get proper masses in
   VS's block-info datapack.
+- **Scaled ships in Genesis space feel fields at their own scale, and
+  nothing else.** A 1/16-scale ship under a floor plate in the Great
+  Unknown floated, and beside a wall plate was flung across the room.
+  Two causes. Genesis zeroes its space dimensions' ship gravity directly
+  on VS's physics world, bypassing the per-dimension parameter table the
+  gravity cancel was reading, so "Replaced" added a full g upward that VS
+  never applied (exactly cancelling a floor plate's pull, and turning a
+  wall plate's into a diagonal launch). The cancel now consults every
+  writer of ship gravity in the supported stack, most specific first:
+  VMod's per-ship vector, Genesis's mini-scale rule, VS's parameter table
+  (or default), plus VLib's per-dimension correction. And a field's
+  acceleration is authored for full-size ships: a scaled ship now feels
+  it multiplied by its own scale, so a 1/16 ship falls one of its own
+  blocks in the time a full-size ship falls one block instead of being
+  hurled by what a full-size ship feels as 1 g.
+- **Plating panels now actually register with VS.** The first attempt was
+  rejected for every state: VS insists a boxes shape carries collision
+  points (the spheres ship-to-ship collision uses) alongside its boxes.
+  The panels now go through VS's own shape utility, which derives the
+  points exactly as it does for stairs and slabs, with a sphere lattice
+  of our own as the fallback for shapes it cannot seed.
 - **Settings screen: one "Affects" section.** The ships toggle moved out
   of its own "Ship &amp; Visuals" row into the Affects section beside
   Players / Mobs / Objects / Particles / Fluids, with the same green/red

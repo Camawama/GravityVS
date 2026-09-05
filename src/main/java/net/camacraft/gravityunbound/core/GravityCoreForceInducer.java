@@ -309,6 +309,7 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
             return;
         }
         Vector3dc selfPos = self.getTransform().getPositionInWorld();
+        double selfScale = shipScale(self);
 
         boolean held = false;
         boolean replacesGravity = false;
@@ -326,7 +327,7 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
                     continue;
                 }
             }
-            Vector3d force = evaluate(field, selfPos, selfMass, source);
+            Vector3d force = evaluate(field, selfPos, selfMass, selfScale, source);
             if (force == null) {
                 continue;
             }
@@ -376,7 +377,9 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
      * is outside the field.
      */
     @Nullable
-    private static Vector3d evaluate(FieldSource field, Vector3dc selfPos, double selfMass, @Nullable PhysShip source) {
+    private static Vector3d evaluate(
+        FieldSource field, Vector3dc selfPos, double selfMass, double selfScale, @Nullable PhysShip source
+    ) {
         ShipTransform sourceTransform = source != null ? source.getTransform() : null;
         double reducedMass = selfMass;
         if (source != null) {
@@ -387,7 +390,12 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
             reducedMass = selfMass * sourceMass / (selfMass + sourceMass);
         }
 
-        double accel = field.accel();
+        // A field's acceleration is authored for full-size ships. A SCALED
+        // ship (Genesis space runs ships at 1/16) feels it at its own scale
+        // — a 1/16 ship falls one of its own blocks in the time a full-size
+        // ship falls one block — otherwise a mini ship is flung across the
+        // room by what a full-size ship feels as 1 g.
+        double accel = field.accel() * selfScale;
         Vector3d direction;
         if (field.radial()) {
             Vector3d center = new Vector3d(field.center());
@@ -487,6 +495,21 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
                     partner.applyInvariantTorque(torque.negate(new Vector3d()));
                 }
             }
+        }
+    }
+
+    /** The ship's uniform world scale (1 for ordinary ships), from its live transform. */
+    private static double shipScale(PhysShip ship) {
+        try {
+            Vector3dc scaling = ship.getTransform().getShipToWorldScaling();
+            double scale = Math.cbrt(Math.abs(scaling.x() * scaling.y() * scaling.z()));
+            if (!Double.isFinite(scale) || scale < 1.0E-3) {
+                return 1.0;
+            }
+            return Math.min(scale, 1.0E3);
+        }
+        catch (RuntimeException e) {
+            return 1.0;
         }
     }
 

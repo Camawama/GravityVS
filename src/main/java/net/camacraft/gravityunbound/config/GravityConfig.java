@@ -39,6 +39,7 @@ public class GravityConfig
 	public static ForgeConfigSpec.BooleanValue shipFieldsAffectWorldFluids;
 	public static ForgeConfigSpec.DoubleValue gravityCoreShipForceMultiplier;
 	public static ForgeConfigSpec.DoubleValue shipFieldDamping;
+	public static ForgeConfigSpec.BooleanValue shipsCollideWithPlatingPanels;
 
 	// gravity normalizer
 	public static ForgeConfigSpec.IntValue normalizerDefaultRange;
@@ -103,6 +104,10 @@ public class GravityConfig
             "captured ships keeps jittering until it spins its attractor up; with it captures settle into resting contact.",
             "Applied equal and opposite to both ships, so momentum is still conserved.")
             .defineInRange("shipFieldDamping", 0.5, 0.0, 10.0);
+        GravityConfig.shipsCollideWithPlatingPanels = config.comment(
+            "whether Valkyrien Skies ships collide with gravity plating as its thin panels (registered with VS's physics at",
+            "world load). Set false to fall back to VS's own default shape for plating if a world refuses to load.")
+            .define("shipsCollideWithPlatingPanels", true);
         config.pop();
 
         config.push("Gravity Normalizer");
