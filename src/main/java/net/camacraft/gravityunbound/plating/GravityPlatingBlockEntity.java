@@ -829,7 +829,14 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 if (sideDatum == null || !sideDatum.affectsShips) {
                     continue;
                 }
-                AABB effectBox = sideDatum.getEffectBox(blockPos, plateDir, world);
+                // SHIPS ARE HELD BY THE PRIMARY COLUMN ONLY — the plate's own
+                // cell extended outward by its range, the region the field
+                // visualization shows. Entities also see a hidden one-block
+                // "bleed" around it that only blends gravity at cube edges;
+                // pulling ships from the bleed grabbed a ship a full block
+                // beside the visible field and dragged it past the plate
+                // before the pilot could line up a landing.
+                AABB effectBox = sideDatum.getPrimaryBox(blockPos, plateDir, world);
                 if (!effectBox.contains(testingPos)) {
                     continue;
                 }

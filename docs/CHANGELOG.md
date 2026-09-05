@@ -160,6 +160,13 @@
   it multiplied by its own scale, so a 1/16 ship falls one of its own
   blocks in the time a full-size ship falls one block instead of being
   hurled by what a full-size ship feels as 1 g.
+- **Plating holds ships only inside its visible field.** A plate's entity
+  field carries a hidden one-block "bleed" around the visible column that
+  only blends gravity at cube edges; the ship pull was using that expanded
+  box for membership, so a ship a full block beside the visible field was
+  already being dragged, and a small ship shot past the plate before its
+  pilot could line up a landing. Ships are now held by the primary column
+  alone — exactly the region the field visualization shows.
 - **Plating panels now actually register with VS.** The first attempt was
   rejected for every state: VS insists a boxes shape carries collision
   points (the spheres ship-to-ship collision uses) alongside its boxes.
