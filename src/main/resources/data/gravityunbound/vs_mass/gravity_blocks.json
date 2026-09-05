@@ -1,0 +1,17 @@
+[
+  {
+    "block": "gravityunbound:plating",
+    "mass": 25.0,
+    "friction": 0.5
+  },
+  {
+    "block": "gravityunbound:gravity_core",
+    "mass": 2500.0,
+    "friction": 0.5
+  },
+  {
+    "block": "gravityunbound:gravity_normalizer",
+    "mass": 2500.0,
+    "friction": 0.5
+  }
+]

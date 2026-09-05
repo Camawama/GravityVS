@@ -128,6 +128,23 @@
   dimension's vector as VS registered it, or VMod's custom vector when
   the player set one (read through a reflective compat layer; nothing
   loads without VMod).
+- **Ships no longer bounce on gravity plating.** Valkyrien Skies builds
+  a ship-collision shape for every block state at startup: solid blocks
+  from their outline, non-solid ones from their COLLISION shape. Plating
+  has no collision shape at all (it is a field emitter you walk through),
+  and VS's shape generator answers an empty shape with nothing — the
+  state builder then fell back to a shape VS never meant for real blocks,
+  so a ship set on plating rested on something that was neither a cube
+  nor nothing and rocked about. Declaring the cell non-colliding (VS's
+  datapack flag) was no better: a ship pulled into the cell by the plate's
+  own field started into the wall behind it and VS pushed it back out,
+  over and over, tumbling as it went. Partial shapes are the path VS
+  itself uses for stairs and slabs in terrain, so plating now registers
+  its actual 1/16-thick PANELS as its ship-collision boxes through VS's
+  block-state event: a ship rests ON a floor plate and AGAINST a wall
+  plate, never inside the cell. (Entities still walk through the panels,
+  by design.) Plating, cores and normalizers also get proper masses in
+  VS's block-info datapack.
 - **Settings screen: one "Affects" section.** The ships toggle moved out
   of its own "Ship &amp; Visuals" row into the Affects section beside
   Players / Mobs / Objects / Particles / Fluids, with the same green/red

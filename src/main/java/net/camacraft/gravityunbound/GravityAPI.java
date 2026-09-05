@@ -58,6 +58,8 @@ public class GravityAPI
 				net.camacraft.gravityunbound.compat.AdAstraCompat.initIfLoaded();
 				// ship force inducer: attachment registration + attach-on-load
 				net.camacraft.gravityunbound.core.GravityCoreForceInducer.registerWithValkyrienSkies();
+				// plating collides with ships as its panels, not as a cube or nothing
+				net.camacraft.gravityunbound.util.ShipBlockShapes.register();
 			}));
 	}
 }
