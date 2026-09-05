@@ -62,6 +62,13 @@ public class GravityNormalizerBlockEntity extends BlockEntity
     // what the zone acts on (players / mobs / objects / particles / fluids),
     // see util.FieldTargets
     private int targets = net.camacraft.gravityunbound.util.FieldTargets.ALL;
+    // whether the zone REPLACES the dimension's gravity (true) or adds to
+    // it (false) for everything it acts on
+    private boolean replacesGravity = true;
+    // the dimension's ambient entity gravity expressed in this block's grid
+    // (blocks/tick^2), refreshed every tick for the blended fluid/particle
+    // direction (see util.WorldGravity)
+    private Vec3 ambientInGrid = Vec3.ZERO;
 
     // client BEs stay inert until authoritative data arrives (same rollback
     // protection as plating/core — see GravityPlatingBlockEntity)
@@ -100,6 +107,7 @@ public class GravityNormalizerBlockEntity extends BlockEntity
         targets = tag.contains("targets")
             ? net.camacraft.gravityunbound.util.FieldTargets.sanitize(tag.getInt("targets"))
             : net.camacraft.gravityunbound.util.FieldTargets.ALL;
+        replacesGravity = !tag.contains("replacesGravity") || tag.getBoolean("replacesGravity");
     }
 
     @Override
@@ -110,6 +118,7 @@ public class GravityNormalizerBlockEntity extends BlockEntity
         tag.putBoolean("showParticles", showParticles);
         tag.putDouble("gravityAccel", gravityAccel);
         tag.putInt("targets", targets);
+        tag.putBoolean("replacesGravity", replacesGravity);
     }
 
     @Nullable
@@ -187,6 +196,19 @@ public class GravityNormalizerBlockEntity extends BlockEntity
             d.normalize();
             worldDown = new Vec3(d.x, d.y, d.z);
         }
+        // BLENDED with the dimension's gravity: entities take the summed
+        // vector; fluids/particles its dominant grid axis (see downAt)
+        double strengthScale = be.gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL;
+        be.ambientInGrid = Vec3.ZERO;
+        if (!be.replacesGravity) {
+            Vec3 ambient = net.camacraft.gravityunbound.util.WorldGravity.ambient(world);
+            be.ambientInGrid = net.camacraft.gravityunbound.util.WorldGravity.toGrid(ambient, ship);
+            net.camacraft.gravityunbound.util.WorldGravity.Blend blend =
+                net.camacraft.gravityunbound.util.WorldGravity.blend(worldDown, strengthScale, ambient);
+            worldDown = blend.direction();
+            strengthScale = blend.strengthScale();
+        }
+        Vec3 gridDown = net.camacraft.gravityunbound.util.WorldGravity.toGrid(worldDown, ship);
 
         if (world.isClientSide()) {
             if (be.showParticles) {
@@ -248,8 +270,8 @@ public class GravityNormalizerBlockEntity extends BlockEntity
 
             comp.applyGravityDirectionEffect(
                 worldDown, NORMALIZER_ROTATION_PARAMS, NORMALIZER_PRIORITY, false,
-                be.gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL, true,
-                ship, ship != null ? Vec3.atLowerCornerOf(be.localDown.getNormal()) : null,
+                strengthScale, true,
+                ship, ship != null ? gridDown : null,
                 zone
             );
         }
@@ -293,7 +315,11 @@ public class GravityNormalizerBlockEntity extends BlockEntity
             return null;
         }
         AABB zone = fluidZoneCache;
-        return zone != null && zone.contains(Vec3.atCenterOf(pos)) ? localDown : null;
+        if (zone == null || !zone.contains(Vec3.atCenterOf(pos))) {
+            return null;
+        }
+        return replacesGravity ? localDown
+            : net.camacraft.gravityunbound.util.WorldGravity.blendCardinal(localDown, gravityAccel, ambientInGrid);
     }
 
     @Override
@@ -336,6 +362,10 @@ public class GravityNormalizerBlockEntity extends BlockEntity
         return targets;
     }
 
+    public boolean isReplacesGravity() {
+        return replacesGravity;
+    }
+
     /**
      * Server-side entry point for the settings GUI (arrives via
      * {@code network.UpdateGravityBlockSettingsPacket}). Every value is
@@ -344,11 +374,12 @@ public class GravityNormalizerBlockEntity extends BlockEntity
     public void applySettingsFromGui(
         Direction newLocalDown, int newRange, double gravityAccel, boolean showParticles
     ) {
-        applySettingsFromGui(newLocalDown, newRange, gravityAccel, showParticles, this.targets);
+        applySettingsFromGui(newLocalDown, newRange, gravityAccel, showParticles, this.targets, this.replacesGravity);
     }
 
     public void applySettingsFromGui(
-        Direction newLocalDown, int newRange, double gravityAccel, boolean showParticles, int targets
+        Direction newLocalDown, int newRange, double gravityAccel, boolean showParticles, int targets,
+        boolean replacesGravity
     ) {
         Level world = getLevel();
         if (world == null || world.isClientSide()) {
@@ -359,6 +390,7 @@ public class GravityNormalizerBlockEntity extends BlockEntity
         this.gravityAccel = Mth.clamp(gravityAccel, 0.0, 1.0);
         this.showParticles = showParticles;
         this.targets = net.camacraft.gravityunbound.util.FieldTargets.sanitize(targets);
+        this.replacesGravity = replacesGravity;
         sync();
     }
 }

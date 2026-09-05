@@ -164,6 +164,7 @@ public class GravityBlockSettingsScreen extends Screen {
                     rangeValue = be.getRange();
                     showParticles = be.isShowParticles();
                     targets = be.getTargets();
+                    replacesGravity = be.isReplacesGravity();
                     initialAccel = be.getGravityAccel();
                 }
             }
@@ -179,7 +180,7 @@ public class GravityBlockSettingsScreen extends Screen {
         int rows = switch (type) {
             case PLATING -> 9;   // force|falloff, slider | accel, presets, snap | ships|visuals | targets x2 | actions
             case CORE -> 9;
-            case NORMALIZER -> 8;
+            case NORMALIZER -> 9;  // ... | accel, presets, world gravity | visuals | targets x2 | actions
         };
         int sections = 4;
         int total = rows * ROW_HEIGHT + sections * SECTION_GAP;
@@ -264,26 +265,32 @@ public class GravityBlockSettingsScreen extends Screen {
         }
         y += ROW_HEIGHT;
 
+        // World Gravity (replace / blend) — beside Surface Snapping for
+        // plating and cores, alone on its row for the normalizer
+        CycleButton.Builder<Boolean> worldGravity = CycleButton.<Boolean>builder(
+                value -> Component.translatable(value
+                    ? "gravity_changer.gui.world_gravity.replace"
+                    : "gravity_changer.gui.world_gravity.blend"))
+            .withValues(Boolean.TRUE, Boolean.FALSE)
+            .withInitialValue(replacesGravity)
+            .withTooltip(value -> Tooltip.create(Component.translatable(value
+                ? "gravity_changer.gui.world_gravity.replace.tooltip"
+                : "gravity_changer.gui.world_gravity.blend.tooltip")));
         if (type != TargetType.NORMALIZER) {
-            // Surface Snapping | World Gravity (for held ships) share one row
             addRenderableWidget(CycleButton.onOffBuilder(surfaceSnap)
                 .create(x, y, HALF_WIDTH, WIDGET_HEIGHT,
                     Component.translatable("gravity_changer.gui.surface_snap"),
                     (button, value) -> surfaceSnap = value));
-            addRenderableWidget(CycleButton.<Boolean>builder(
-                    value -> Component.translatable(value
-                        ? "gravity_changer.gui.world_gravity.replace"
-                        : "gravity_changer.gui.world_gravity.blend"))
-                .withValues(Boolean.TRUE, Boolean.FALSE)
-                .withInitialValue(replacesGravity)
-                .withTooltip(value -> Tooltip.create(Component.translatable(value
-                    ? "gravity_changer.gui.world_gravity.replace.tooltip"
-                    : "gravity_changer.gui.world_gravity.blend.tooltip")))
-                .create(x + HALF_WIDTH + 4, y, HALF_WIDTH, WIDGET_HEIGHT,
-                    Component.translatable("gravity_changer.gui.world_gravity"),
-                    (button, value) -> replacesGravity = value));
-            y += ROW_HEIGHT;
+            addRenderableWidget(worldGravity.create(x + HALF_WIDTH + 4, y, HALF_WIDTH, WIDGET_HEIGHT,
+                Component.translatable("gravity_changer.gui.world_gravity"),
+                (button, value) -> replacesGravity = value));
         }
+        else {
+            addRenderableWidget(worldGravity.create(x, y, WIDGET_WIDTH, WIDGET_HEIGHT,
+                Component.translatable("gravity_changer.gui.world_gravity"),
+                (button, value) -> replacesGravity = value));
+        }
+        y += ROW_HEIGHT;
 
         // ---- Visuals section ----
         y = sectionHeader("gravity_changer.gui.section.visuals", y);
@@ -428,6 +435,7 @@ public class GravityBlockSettingsScreen extends Screen {
                 tag.putDouble("gravityAccel", accel);
                 tag.putBoolean("showParticles", showParticles);
                 tag.putInt("targets", targets);
+                tag.putBoolean("replacesGravity", replacesGravity);
             }
         }
         GravityNetwork.sendToServer(new UpdateGravityBlockSettingsPacket(pos, type, tag));

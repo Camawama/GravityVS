@@ -108,12 +108,26 @@
     transforms and velocities. A force computed 50 ms earlier and held
     constant was itself an energy source (a lagged central force is a
     negative damper).
-- **"World Gravity: Replaced / Blended" per field block.** Replaced (the
-  default) cancels the dimension's gravity for held ships — the field is
-  their gravity, as it is for entities. Blended keeps it and adds the
-  field on top: for fields meant as an extra pull, and for ships whose
-  gravity another mod (VMod's per-ship gravity, for one) already
-  controls, which would otherwise be cancelled twice.
+- **"World Gravity: Replaced / Blended" on every field block, for
+  everything a field acts on.** Replaced (the default) makes the field
+  the gravity where it reaches — for entities, particles, fluids AND
+  ships. Blended adds the field to the dimension's gravity instead: a
+  sideways plate in the overworld tilts gravity diagonally, a ceiling
+  plate at 1 g cancels it into a weightless zone, a core adds its pull to
+  the planet's. Entities take the summed vector's direction and strength
+  (the mod's continuous frames handle any angle; falloff shapes only the
+  field's part, the ambient part never fades); fluids and particles take
+  its dominant axis; ships get no gravity cancel. Cores, plating sides
+  and normalizers each carry the setting.
+- **Two zero-gravity core ships floated to the ceiling.** VMod's per-ship
+  gravity is a physics listener that applies its own counter-force, so a
+  "Replaced" field cancelling the DIMENSION's gravity on a ship VMod had
+  already zeroed left a net 1 g upward (their attract/repulse pulls
+  cancelled exactly, which is why they hung together while rising). A
+  field now cancels the gravity actually ACTING on the ship: the
+  dimension's vector as VS registered it, or VMod's custom vector when
+  the player set one (read through a reflective compat layer; nothing
+  loads without VMod).
 - **Settings screen: one "Affects" section.** The ships toggle moved out
   of its own "Ship &amp; Visuals" row into the Affects section beside
   Players / Mobs / Objects / Particles / Fluids, with the same green/red

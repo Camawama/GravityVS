@@ -515,6 +515,10 @@ public class GravityPlatingBlockEntity extends BlockEntity
         if (ship != null) {
             searchBox = gravityunbound$shipToWorldBox(ship, roughBox);
         }
+        // ambient gravity for BLENDED sides (entities blend in world space,
+        // fluids/particles in this grid — see downAt)
+        Vec3 ambientWorld = net.camacraft.gravityunbound.util.WorldGravity.ambient(world);
+        be.ambientInGrid = net.camacraft.gravityunbound.util.WorldGravity.toGrid(ambientWorld, ship);
 
         if (world.isClientSide()) {
             be.submitFieldVisuals(world, blockPos, ship);
@@ -642,16 +646,29 @@ public class GravityPlatingBlockEntity extends BlockEntity
                     double surfaceDistance = Math.max(0.0, distanceToPlate - adjustment);
                     strengthScale *= Mth.clamp(1.0 - surfaceDistance / sideDatum.getEffectRange(), 0.0, 1.0);
                 }
+                // BLENDED with the dimension's gravity: the summed vector
+                // (the field's part already shaped by falloff; the ambient
+                // part never fades); the ship anchor follows the blend
+                Vec3 appliedDir = worldEffectDir;
+                Vec3 anchorDir = ship != null ? Vec3.atLowerCornerOf(localEffectDir.getNormal()) : null;
+                if (!sideDatum.replacesGravity) {
+                    net.camacraft.gravityunbound.util.WorldGravity.Blend blend =
+                        net.camacraft.gravityunbound.util.WorldGravity.blend(worldEffectDir, strengthScale, ambientWorld);
+                    appliedDir = blend.direction();
+                    strengthScale = blend.strengthScale();
+                    if (ship != null) {
+                        anchorDir = net.camacraft.gravityunbound.util.WorldGravity.toGrid(appliedDir, ship);
+                    }
+                }
                 // the PRIMARY column (footprint + outward range, what the
                 // visual shows) is the region reported for the held-surface
                 // sustain: standing on a face the plate endorsed keeps the
                 // field alive through effect dropouts only while still
                 // inside it — walking off the plating releases
                 comp.applyGravityDirectionEffect(
-                        worldEffectDir, PLATING_ROTATION_PARAMS, priority, secondary, strengthScale,
+                        appliedDir, PLATING_ROTATION_PARAMS, priority, secondary, strengthScale,
                         sideDatum.surfaceSnap,
-                        ship, ship != null
-                            ? Vec3.atLowerCornerOf(localEffectDir.getNormal()) : null,
+                        ship, anchorDir,
                         sideDatum.getPrimaryBox(blockPos, plateDir, world)
                 );
                 applies = true;
@@ -724,6 +741,10 @@ public class GravityPlatingBlockEntity extends BlockEntity
         }
     }
 
+    // the dimension's ambient entity gravity in this block's grid
+    // (blocks/tick^2), refreshed every tick for blended sides' fluid and
+    // particle direction (see util.WorldGravity)
+    private Vec3 ambientInGrid = Vec3.ZERO;
     // the world-space box this ship-mounted plate's field covered at its
     // last fluid wake-up (see wakeWorldFluidsUnderShip)
     private @Nullable AABB lastShipWakeBox = null;
@@ -832,7 +853,8 @@ public class GravityPlatingBlockEntity extends BlockEntity
                     new Vector3d(localEffectDir.getStepX(), localEffectDir.getStepY(), localEffectDir.getStepZ()),
                     new Vector3d(effectCenter.x, effectCenter.y, effectCenter.z),
                     new Vector3d(plateNormal.x, plateNormal.y, plateNormal.z),
-                    sideDatum.getEffectRange(), acceleration, sideDatum.gradualFalloff, sideDatum.replacesGravity));
+                    sideDatum.getEffectRange(), acceleration, sideDatum.gradualFalloff, sideDatum.replacesGravity),
+                    net.camacraft.gravityunbound.util.ShipGravity.actingOn(serverLevel, loaded));
                 break;
             }
         }
@@ -1088,12 +1110,18 @@ public class GravityPlatingBlockEntity extends BlockEntity
             // scale — the ACCELERATION must not shrink or grow with it
             accel.normalize();
         }
+        Vec3 direction = new Vec3(accel.x, accel.y, accel.z);
+        if (!sideDatum.replacesGravity) {
+            // BLENDED: pull along the summed vector's direction
+            direction = net.camacraft.gravityunbound.util.WorldGravity.blend(
+                direction, sideDatum.gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL,
+                net.camacraft.gravityunbound.util.WorldGravity.ambient(world)).direction();
+        }
 
         // dimension gate, Ad Astra hand-off, once-per-tick claim, terminal
         // velocity and the client-side prediction rule all live in the
         // shared helper (cores use the same one with their radial pull)
-        GravityCapabilityImpl.applyZeroGravityFieldForce(
-            world, entity, comp, new Vec3(accel.x, accel.y, accel.z));
+        GravityCapabilityImpl.applyZeroGravityFieldForce(world, entity, comp, direction);
     }
 
     /**
@@ -1254,7 +1282,10 @@ public class GravityPlatingBlockEntity extends BlockEntity
                 continue;
             }
             if (sideDatum.getPrimaryBox(worldPosition, plateDir, getLevel()).contains(center)) {
-                return sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
+                Direction fieldDown = sideDatum.isAttracting ? plateDir : plateDir.getOpposite();
+                return sideDatum.replacesGravity ? fieldDown
+                    : net.camacraft.gravityunbound.util.WorldGravity.blendCardinal(
+                        fieldDown, sideDatum.gravityAccel, ambientInGrid);
             }
         }
         return null;

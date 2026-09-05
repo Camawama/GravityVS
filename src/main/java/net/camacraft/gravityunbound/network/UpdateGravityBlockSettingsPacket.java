@@ -185,7 +185,8 @@ public class UpdateGravityBlockSettingsPacket
 									tag.getInt("range"),
 									tag.getDouble("gravityAccel"),
 									tag.getBoolean("showParticles"),
-									readTargets(tag)
+									readTargets(tag),
+									readReplacesGravity(tag)
 								);
 								net.camacraft.gravityunbound.util.GravityFieldLookup.resettleFluidsAround(
 									level, pos, Math.max(oldRange, be.sourceMaxRange()));

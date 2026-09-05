@@ -56,11 +56,12 @@ import net.minecraftforge.server.ServerLifecycleHooks;
  * handed over with a game-tick-stamped list that is only promoted once its
  * tick has passed, so the physics thread never sees a half-built list.
  *
- * GRAVITY. A field replaces the dimension's gravity for a ship it holds
- * (the way an entity in a field ignores world gravity), cancelled per
- * physics tick exactly as VS's own antigravity test block does — unless
- * the field is set to BLEND with world gravity, for fields meant to add
- * to it or for ships whose gravity another mod already controls.
+ * GRAVITY. A field replaces the gravity acting on a ship it holds (the
+ * way an entity in a field ignores world gravity): the game thread
+ * determines that gravity ({@code util.ShipGravity}: the dimension's
+ * vector as VS registered it, or a per-ship override such as VMod's) and
+ * the physics thread cancels exactly that — unless the field is set to
+ * BLEND with world gravity, for fields meant to add to it.
  *
  * PHYSICS CALLBACK. The core API that Valkyrien Skies 2.4.11 bundles (core
  * 1.1.0+cf208d8b56 — see build.gradle) dispatches attachments through
@@ -126,10 +127,17 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
     private List<FieldSource> building = null;
     @JsonIgnore
     private int buildingTick = 0;
+    // the gravity (m/s^2, world axes) acting on this ship as the game
+    // thread determined it — dimension gravity, or another mod's per-ship
+    // override — which a REPLACING field cancels
+    @JsonIgnore
+    private Vector3d buildingGravity = null;
 
     // last COMPLETE game-tick list, not yet latched by the physics thread (guarded by `this`)
     @JsonIgnore
     private List<FieldSource> completed = null;
+    @JsonIgnore
+    private Vector3d completedGravity = null;
     @JsonIgnore
     private boolean completedFresh = false;
 
@@ -137,6 +145,8 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
     // the last known list keeps applying until the game thread stops refreshing it
     @JsonIgnore
     private List<FieldSource> active = null;
+    @JsonIgnore
+    private Vector3d activeGravity = null;
     @JsonIgnore
     private int physTicksSinceUpdate = 0;
 
@@ -213,13 +223,14 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
      * counts per tick, or a deck would multiply its gravity by its plate
      * count. Every radial source (core) counts — each core is one source.
      */
-    public synchronized void offer(FieldSource source) {
+    public synchronized void offer(FieldSource source, Vector3dc gravityActingOnShip) {
         promoteIfTickPassed();
         int tick = currentGameTick();
         if (building == null || buildingTick != tick) {
             building = new ArrayList<>(4);
             buildingTick = tick;
         }
+        buildingGravity = new Vector3d(gravityActingOnShip);
         if (!source.radial()) {
             for (FieldSource existing : building) {
                 if (!existing.radial() && existing.sourceShipId() == source.sourceShipId()) {
@@ -238,8 +249,10 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
     private void promoteIfTickPassed() {
         if (building != null && buildingTick != currentGameTick()) {
             completed = building;
+            completedGravity = buildingGravity;
             completedFresh = true;
             building = null;
+            buildingGravity = null;
         }
     }
 
@@ -270,18 +283,22 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
 
     private void applyForces(PhysShip self, @Nullable PhysLevel physLevel) {
         List<FieldSource> sources;
+        Vector3d gravityActing;
         synchronized (this) {
             promoteIfTickPassed();
             if (completedFresh) {
                 active = completed;
+                activeGravity = completedGravity;
                 completedFresh = false;
                 physTicksSinceUpdate = 0;
             }
             else if (++physTicksSinceUpdate > EXPIRY_PHYS_TICKS) {
                 // the game thread stopped refreshing (source removed / out of range)
                 active = null;
+                activeGravity = null;
             }
             sources = active;
+            gravityActing = activeGravity;
         }
         if (sources == null || sources.isEmpty()) {
             return;
@@ -341,8 +358,14 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
             }
         }
 
-        if (replacesGravity && physLevel != null) {
-            cancelDimensionGravity(self, selfMass, physLevel);
+        if (replacesGravity && gravityActing != null && gravityActing.isFinite()
+            && gravityActing.lengthSquared() > 1.0E-12) {
+            // A FIELD REPLACES GRAVITY: cancel exactly the gravity the game
+            // thread saw acting on this ship (the dimension's vector as VS
+            // registered it, or another mod's per-ship override such as
+            // VMod's — cancelling the dimension's gravity on a ship VMod
+            // had already zeroed left a net 1 g UPWARD).
+            self.applyInvariantForce(gravityActing.mul(-selfMass, new Vector3d()));
         }
     }
 
@@ -471,25 +494,5 @@ public final class GravityCoreForceInducer implements ShipForcesInducer, ShipPhy
     private static double inertiaAbout(Matrix3dc inertia, Vector3dc axis) {
         Vector3d transformed = inertia.transform(axis, new Vector3d());
         return Math.max(0.0, transformed.dot(axis));
-    }
-
-    /**
-     * A FIELD REPLACES GRAVITY. VS applies the dimension's gravity to every
-     * ship regardless; cancel it the way VS's own antigravity test block
-     * does — mass x the dimension's gravity magnitude, straight up, from
-     * the physics-side atmosphere table (zero in a zero-g dimension, so
-     * nothing is over-corrected there).
-     */
-    private static void cancelDimensionGravity(PhysShip self, double selfMass, PhysLevel physLevel) {
-        try {
-            Double gravity = physLevel.getAerodynamicUtils()
-                .getAtmosphereForDimension(physLevel.getDimension()).getThird();
-            if (gravity != null && Double.isFinite(gravity) && gravity != 0.0) {
-                self.applyInvariantForce(new Vector3d(0.0, selfMass * gravity, 0.0));
-            }
-        }
-        catch (RuntimeException ignored) {
-            // an unregistered dimension: leave gravity alone rather than guess
-        }
     }
 }

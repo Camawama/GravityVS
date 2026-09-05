@@ -62,6 +62,10 @@ public class GravityCoreBlockEntity extends BlockEntity
     // by the field (true) or keeps it, the field adding on top (false —
     // also the setting for ships whose gravity another mod controls)
     private boolean replacesGravity = true;
+    // the dimension's ambient entity gravity in this block's grid
+    // (blocks/tick^2), refreshed every tick for the blended fluid/particle
+    // direction (see util.WorldGravity)
+    private Vec3 ambientInGrid = Vec3.ZERO;
     // the world-space box this ship-mounted core's field covered at its
     // last world-fluid wake-up (see GravityPlatingBlockEntity)
     private @Nullable AABB lastShipWakeBox = null;
@@ -140,6 +144,9 @@ public class GravityCoreBlockEntity extends BlockEntity
         }
 
         Ship ownShip = VSGameUtilsKt.getShipManagingPos(world, blockPos);
+        be.ambientInGrid = be.replacesGravity ? Vec3.ZERO
+            : net.camacraft.gravityunbound.util.WorldGravity.toGrid(
+                net.camacraft.gravityunbound.util.WorldGravity.ambient(world), ownShip);
 
         // core center in world space (ship transform aware)
         Vec3 center = Vec3.atCenterOf(blockPos);
@@ -337,11 +344,25 @@ public class GravityCoreBlockEntity extends BlockEntity
             // pass that, and the direction is re-derived live everywhere.
             // The cardinalized grounded-mob direction IS sector-constant, so
             // it keeps the rotation-only anchor.
+            // BLENDED with the dimension's gravity: the summed vector's
+            // direction and magnitude (falloff has already shaped the
+            // field's own part; the ambient part never fades)
+            boolean blended = !replacesGravity;
+            if (blended) {
+                net.camacraft.gravityunbound.util.WorldGravity.Blend blend =
+                    net.camacraft.gravityunbound.util.WorldGravity.blend(
+                        direction, strengthScale, net.camacraft.gravityunbound.util.WorldGravity.ambient(world));
+                direction = blend.direction();
+                strengthScale = blend.strengthScale();
+            }
+
             Vec3 shipLocalDir = null;
             Vec3 shipLocalPos = null;
             Ship anchorShip = VSGameUtilsKt.getShipManagingPos(world, worldPosition);
             if (anchorShip != null) {
-                if (cardinalized) {
+                // a blended direction is no longer the pure radial the
+                // position anchor re-derives: anchor its rotation instead
+                if (cardinalized || blended) {
                     org.joml.Vector3d local = new org.joml.Quaterniond(
                         anchorShip.getTransform().getShipToWorldRotation()).conjugate()
                         .transform(new org.joml.Vector3d(direction.x, direction.y, direction.z));
@@ -436,9 +457,10 @@ public class GravityCoreBlockEntity extends BlockEntity
                 * (gravityAccel / GravityCapabilityImpl.BASE_GRAVITY_ACCEL);
             Vec3 gridCenter = Vec3.atCenterOf(worldPosition);
             inducer.offer(GravityCoreForceInducer.FieldSource.radial(
-                ownShip != null ? ownShip.getId() : GravityCoreForceInducer.WORLD,
-                new Vector3d(gridCenter.x, gridCenter.y, gridCenter.z),
-                range, shipScale, acceleration, attracting, gradualFalloff, replacesGravity));
+                    ownShip != null ? ownShip.getId() : GravityCoreForceInducer.WORLD,
+                    new Vector3d(gridCenter.x, gridCenter.y, gridCenter.z),
+                    range, shipScale, acceleration, attracting, gradualFalloff, replacesGravity),
+                net.camacraft.gravityunbound.util.ShipGravity.actingOn(serverLevel, serverShip));
         }
     }
 
@@ -483,6 +505,17 @@ public class GravityCoreBlockEntity extends BlockEntity
         // origin. Earlier continuous tie-nudges (y-shrink + rotational
         // tangent) gave edge cells TANGENTIAL downs, which let "lateral"
         // spread climb another frame's up — the runaway-flood generator.
+        if (!replacesGravity) {
+            // BLENDED: the radial pull at the cell's own strength plus the
+            // ambient vector (both in this grid), dominant axis
+            double sign = attracting ? 1.0 : -1.0;
+            Vec3 pull = new Vec3(-dx, -dy, -dz).scale(sign * gravityAccel / distance);
+            Vec3 sum = pull.add(ambientInGrid);
+            if (sum.lengthSqr() < 1.0E-14) {
+                return null;
+            }
+            return net.camacraft.gravityunbound.util.WorldGravity.nearestCardinal(sum);
+        }
         int ax = Math.abs(dx);
         int ay = Math.abs(dy);
         int az = Math.abs(dz);
