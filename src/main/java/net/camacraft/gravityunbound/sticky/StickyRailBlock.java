@@ -283,37 +283,54 @@ public class StickyRailBlock extends BaseRailBlock implements EntityBlock {
     private BlockState crossFrameTouchUp(Level level, BlockPos pos, BlockState state) {
         RailShape shape = state.getValue(SHAPE);
         if (shape != RailShape.NORTH_SOUTH && shape != RailShape.EAST_WEST) {
-            return state;
+            return state; // vanilla curved or sloped it from rails of its own: never re-routed
         }
-        boolean lone = vanillaPotentialConnections(level, pos) == 0;
-        RailShape upgraded = null;
+        // What vanilla could see (same-plane rails beside us, level or one
+        // step up/down) and what it could not (the partners across the
+        // frame folds), per direction. Both count as connections: the shape
+        // is then decided exactly as vanilla's RailState would have decided
+        // it had every partner been a same-plane rail. The old touch-up
+        // took the FIRST partner it found and gave the rail that axis, so a
+        // top-face rail at a cube CORNER — a wall rail around each of two
+        // edges — stayed straight while both wall rails curved toward it.
+        boolean[] own = new boolean[4];
+        boolean[] partner = new boolean[4];
+        boolean[] concave = new boolean[4];
+        boolean anyPartner = false;
         for (Direction d : Direction.Plane.HORIZONTAL) {
-            boolean axisMatches = (d.getAxis() == Direction.Axis.Z) == (shape == RailShape.NORTH_SOUTH);
-            if (!lone && !axisMatches) {
-                continue; // never re-route an axis vanilla chose from its own rails
-            }
+            int i = d.get2DDataValue();
+            BlockPos beside = pos.relative(d);
+            own[i] = isPlaneRail(level, beside) || isPlaneRail(level, beside.above()) || isPlaneRail(level, beside.below());
             // CONCAVE: wall rail directly above, mounted on the wall at d
-            if (isSameFrameRail(level.getBlockState(pos.above()), d)) {
-                upgraded = ascendingToward(d);
-                break;
-            }
-            // WALL-BASE: wall rail beside us whose plane base meets our cell
-            if (isSameFrameRail(level.getBlockState(pos.relative(d)), d)
-                || isSameFrameRail(level.getBlockState(pos.relative(d).below()), d.getOpposite())) {
-                // flat toward d (the second probe is the CONVEX edge partner)
-                upgraded = d.getAxis() == Direction.Axis.Z ? RailShape.NORTH_SOUTH : RailShape.EAST_WEST;
-                if (!lone) {
-                    upgraded = null; // axis already correct; nothing to change
-                }
-                if (upgraded != null) {
-                    break;
-                }
-            }
+            concave[i] = isSameFrameRail(level.getBlockState(pos.above()), d);
+            // WALL-BASE: wall rail beside us whose plane base meets our cell;
+            // CONVEX: the rail around the edge, one out and one down
+            partner[i] = concave[i]
+                || isSameFrameRail(level.getBlockState(beside), d)
+                || isSameFrameRail(level.getBlockState(beside.below()), d.getOpposite());
+            anyPartner |= partner[i];
         }
-        if (upgraded == null || upgraded == shape) {
+        if (!anyPartner) {
             return state;
         }
-        BlockState updated = state.setValue(SHAPE, upgraded);
+        int n = Direction.NORTH.get2DDataValue();
+        int s = Direction.SOUTH.get2DDataValue();
+        int w = Direction.WEST.get2DDataValue();
+        int e = Direction.EAST.get2DDataValue();
+        RailShape decided = decideVanillaShape(
+            own[n] || partner[n], own[s] || partner[s], own[w] || partner[w], own[e] || partner[e],
+            shape, level.hasNeighborSignal(pos));
+        // a concave partner turns the straight axis toward it into the ramp
+        // that carries carts up into the wall rail's cell
+        for (Direction d : Direction.Plane.HORIZONTAL) {
+            if (concave[d.get2DDataValue()] && decided == flatAxisToward(d)) {
+                decided = ascendingToward(d);
+            }
+        }
+        if (decided == shape) {
+            return state;
+        }
+        BlockState updated = state.setValue(SHAPE, decided);
         int[] depth = LOCAL_UPDATE_DEPTH.get();
         depth[0]++;
         try {
@@ -322,6 +339,91 @@ public class StickyRailBlock extends BaseRailBlock implements EntityBlock {
             depth[0]--;
         }
         return updated;
+    }
+
+    /** A rail vanilla's own connection logic can see from a DOWN rail: any rail in the world plane. */
+    private static boolean isPlaneRail(Level level, BlockPos pos) {
+        BlockState state = level.getBlockState(pos);
+        if (!(state.getBlock() instanceof BaseRailBlock)) {
+            return false;
+        }
+        return !(state.getBlock() instanceof StickyRailBlock) || state.getValue(BOTTOM) == Direction.DOWN;
+    }
+
+    /** The straight shape running toward world direction {@code d}. */
+    private static RailShape flatAxisToward(Direction d) {
+        return d.getAxis() == Direction.Axis.Z ? RailShape.NORTH_SOUTH : RailShape.EAST_WEST;
+    }
+
+    /**
+     * Vanilla {@code RailState.place}'s shape decision for a flexible rail
+     * with the given neighbors (unpowered: curves prefer NW, NE, SW, SE in
+     * that order; powered: the reverse).
+     */
+    private static RailShape decideVanillaShape(boolean north, boolean south, boolean west, boolean east,
+                                                RailShape current, boolean powered) {
+        RailShape shape = null;
+        boolean northSouth = north || south;
+        boolean eastWest = west || east;
+        if (northSouth && !eastWest) {
+            shape = RailShape.NORTH_SOUTH;
+        }
+        if (eastWest && !northSouth) {
+            shape = RailShape.EAST_WEST;
+        }
+        boolean southEast = south && east;
+        boolean southWest = south && west;
+        boolean northEast = north && east;
+        boolean northWest = north && west;
+        if (southEast && !north && !west) {
+            shape = RailShape.SOUTH_EAST;
+        }
+        if (southWest && !north && !east) {
+            shape = RailShape.SOUTH_WEST;
+        }
+        if (northWest && !south && !east) {
+            shape = RailShape.NORTH_WEST;
+        }
+        if (northEast && !south && !west) {
+            shape = RailShape.NORTH_EAST;
+        }
+        if (shape == null) {
+            if (northSouth && eastWest) {
+                shape = current;
+            } else if (northSouth) {
+                shape = RailShape.NORTH_SOUTH;
+            } else if (eastWest) {
+                shape = RailShape.EAST_WEST;
+            }
+            if (powered) {
+                if (southEast) {
+                    shape = RailShape.SOUTH_EAST;
+                }
+                if (southWest) {
+                    shape = RailShape.SOUTH_WEST;
+                }
+                if (northEast) {
+                    shape = RailShape.NORTH_EAST;
+                }
+                if (northWest) {
+                    shape = RailShape.NORTH_WEST;
+                }
+            } else {
+                if (northWest) {
+                    shape = RailShape.NORTH_WEST;
+                }
+                if (northEast) {
+                    shape = RailShape.NORTH_EAST;
+                }
+                if (southWest) {
+                    shape = RailShape.SOUTH_WEST;
+                }
+                if (southEast) {
+                    shape = RailShape.SOUTH_EAST;
+                }
+            }
+        }
+        return shape == null ? current : shape;
     }
 
     /** The ascending shape climbing toward world direction {@code d}. */

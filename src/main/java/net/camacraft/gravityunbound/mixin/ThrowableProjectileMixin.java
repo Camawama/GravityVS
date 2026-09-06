@@ -46,21 +46,7 @@ public abstract class ThrowableProjectileMixin {
         // pre-cancel vanilla's world-down gravity, re-apply along the
         // CONTINUOUS field vector (cardinal fallback) for smooth orbits
         double g = this.getGravity();
-        Vec3 pull;
-        net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
-            GravityChangerAPI.getGravityComponentOrNull(self);
-        Vec3 field = comp != null ? comp.getTargetGravityVector() : Vec3.ZERO;
-        if (field.lengthSqr() > 1.0E-6) {
-            pull = field.normalize();
-        }
-        else if (comp != null && !comp.isVisuallyDefault()) {
-            // remote client fallback: the synced visual frame's down tracks
-            // the server's continuous pull (the target vector isn't synced)
-            pull = RotationUtil.vecPlayerToWorld(new Vec3(0, -1, 0), comp.getCurrentRotation());
-        }
-        else {
-            pull = Vec3.atLowerCornerOf(cardinal.getNormal());
-        }
+        Vec3 pull = GravityChangerAPI.getFieldPullDirection(self);
         return modify.add(0.0, g, 0.0).add(pull.scale(g));
     }
     

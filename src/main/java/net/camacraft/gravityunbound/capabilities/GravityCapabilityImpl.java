@@ -180,6 +180,33 @@ public class GravityCapabilityImpl implements IGravityCapability {
     public @Nullable org.valkyrienskies.core.api.ships.Ship capsuleGroundShip = null;
     // world-space normal of the surface being stood on
     public @Nullable Vec3 capsuleGroundNormal = null;
+    // the contact most aligned with the FRAME's up (the floor as the frame
+    // sees it); null when only a field-endorsed wall counts as ground
+    public @Nullable Vec3 capsuleFrameGroundNormal = null;
+
+    // SERVER-SIDE PLAYERS: what the controlling client last reported.
+    // onGround from the move packet (the server's own movement replay can
+    // differ from the client by a tick of ship motion — see the flight
+    // guards in LivingEntityMixin), and the client's visual frame (see
+    // PlayerFrameSyncPacket): the client computes the player's gravity, so
+    // its frame is the truth the server adopts for everything frame-bound
+    // it does on the player's behalf (look rays, eye position, velocity
+    // packets, impact measurement).
+    public boolean clientOnGround = false;
+    public int clientOnGroundAge = Integer.MAX_VALUE;
+    public @Nullable Quaternionf clientReportedFrame = null;
+    public int clientFrameAge = Integer.MAX_VALUE;
+    private final Quaternionf lastSentFrame = new Quaternionf();
+    private boolean lastSentFrameValid = false;
+    private int ticksSinceFrameSent = 0;
+    /** ticks a client report stays authoritative without a refresh */
+    private static final int CLIENT_REPORT_TTL = 40;
+    // the field vector last synced to clients / received from the server
+    private @Nullable Vec3 lastSyncedTargetVector = null;
+    // Surface Cling: whether the boots applied their effect last tick (so
+    // taking them off, or walking off the last surface, can let go exactly
+    // once — never a hold some other field owns)
+    public boolean clingHeldLastTick = false;
     // Whether the dominant field source allows planet-walk surface snapping
     // (per-block "snap" toggle on plating/cores). Resolved per tick in
     // resolveGravityTarget; true under base gravity / no field.
@@ -259,6 +286,31 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
         fieldGraceTicks = 0;
         lastFieldVector = null;
+    }
+
+    /**
+     * API: LET GO of a surface a mechanic held the entity to — the field's
+     * grace AND the held surface. The mod's surface machinery keeps a held
+     * face for as long as the feet stand on it (what a plate field wants);
+     * a mechanic whose hold ENDS (Surface Cling boots taken off, a wearer
+     * walking off the last surface) must drop it explicitly or the entity
+     * stays glued. Declined while a PRIMARY block field is pending this
+     * tick: an engineered field owns the entity and keeps its own hold.
+     */
+    public void releaseCling() {
+        for (GravityDirEffect pending : delayApplyDirEffects) {
+            if (!pending.secondary()) {
+                return;
+            }
+        }
+        fieldGraceTicks = 0;
+        lastFieldVector = null;
+        lastGroundNormal = null;
+        groundNormalGraceTicks = 0;
+        surfaceChangeCooldown = 0;
+        recentReleasedNormal = null;
+        recentReleasedTicks = 0;
+        lastGroundShip = null;
     }
 
     /** A surface probe hit: the face normal (world space) and the ship it belongs to, if any. */
@@ -462,6 +514,12 @@ public class GravityCapabilityImpl implements IGravityCapability {
         }
         dbgEffectsQueued = 0;
         dbgTickPos = entity.position();
+        if (clientOnGroundAge < Integer.MAX_VALUE) {
+            clientOnGroundAge++;
+        }
+        if (clientFrameAge < Integer.MAX_VALUE) {
+            clientFrameAge++;
+        }
         updateGravityStatus();
         applyGravityChange();
         applyGravityStrengthAttribute();
@@ -477,6 +535,29 @@ public class GravityCapabilityImpl implements IGravityCapability {
         if (!entity.level().isClientSide()) {
             maybeSendSync();
         }
+        else if (GCUtil.isClientPlayer(entity)) {
+            maybeReportFrame();
+        }
+    }
+
+    /**
+     * CLIENT PLAYER -> SERVER: report the visual frame when it turned by
+     * more than half a degree, with a keep-alive every second while it is
+     * not the vanilla frame (see {@link PlayerFrameSyncPacket}).
+     */
+    private void maybeReportFrame() {
+        ticksSinceFrameSent++;
+        boolean changed = !lastSentFrameValid
+            || angleBetween(lastSentFrame, visualRotation) > (float) Math.toRadians(0.5);
+        boolean keepAlive = !isVisuallyDefault() && ticksSinceFrameSent >= 20;
+        if (!changed && !keepAlive) {
+            return;
+        }
+        lastSentFrame.set(visualRotation);
+        lastSentFrameValid = true;
+        ticksSinceFrameSent = 0;
+        GravityNetwork.sendToServer(new net.camacraft.gravityunbound.network.PlayerFrameSyncPacket(
+            new Quaternionf(visualRotation)));
     }
 
     /**
@@ -1767,6 +1848,21 @@ public class GravityCapabilityImpl implements IGravityCapability {
             pendingShipDelta = null;
         }
 
+        // SERVER-SIDE PLAYER: adopt the controlling client's reported frame
+        // (see maybeReportFrame). The client computes the player's gravity,
+        // and the server's own chase of the same fields can sit a snap or a
+        // surface hold behind it — so every server-side ray cast from the
+        // player's eyes along the look vector (VMod's physgun, mob
+        // targeting) pointed the wrong way under a rotated frame. The report
+        // already carries the client's own ship carry; adopted verbatim.
+        if (!entity.level().isClientSide() && entity instanceof Player
+            && clientReportedFrame != null && clientFrameAge < CLIENT_REPORT_TTL) {
+            visualRotation.set(clientReportedFrame);
+            visualTarget.set(clientReportedFrame);
+            lastChaseTarget.set(clientReportedFrame);
+            return;
+        }
+
         // ATTACH BOOKKEEPING: remember which ship pose the frames correspond
         // to. prevVisualRotation (captured above) is last tick's final frame
         // — it belongs to the pose read last tick; the carried frame belongs
@@ -2184,7 +2280,14 @@ public class GravityCapabilityImpl implements IGravityCapability {
                 }
                 currGravityDirection = vehicleComp.currGravityDirection;
                 currGravityStrength = vehicleComp.currGravityStrength;
-                targetGravityVector = vehicleComp.targetGravityVector;
+                // the vehicle's field vector — or, when this side has none
+                // for it (a remote boat before its first synced vector), the
+                // vehicle's own frame's down, so a rider turns with a boat
+                // rounding a core instead of keeping their old frame
+                targetGravityVector = vehicleComp.targetGravityVector != null
+                    ? vehicleComp.targetGravityVector
+                    : vehicleComp.isVisuallyDefault() ? null
+                        : RotationUtil.vecPlayerToWorld(new Vec3(0, -1, 0), vehicleComp.getVisualRotation());
                 // the vehicle owns the field state; nothing ship-anchored
                 // survives from before mounting
                 fieldGraceTicks = vehicleComp.fieldGraceTicks;
@@ -2729,7 +2832,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
         boolean changed = needsSync
             || lastSyncedDirection != currGravityDirection
             || Math.abs(lastSyncedStrength - currGravityStrength) > 0.01
-            || angleBetween(lastSyncedVisualTarget, visualTarget) > 0.05f;
+            || angleBetween(lastSyncedVisualTarget, visualTarget) > 0.05f
+            || targetVectorChangedSinceSync();
 
         if (changed) {
             sendSyncPacketToOtherPlayers();
@@ -2745,9 +2849,23 @@ public class GravityCapabilityImpl implements IGravityCapability {
             lastSyncedDirection = currGravityDirection;
             lastSyncedStrength = currGravityStrength;
             lastSyncedVisualTarget.set(visualTarget);
+            lastSyncedTargetVector = targetGravityVector;
             needsSync = false;
             noAnimation = false;
         }
+    }
+
+    /** The synced field vector is more than ~2 degrees off the current one (or appeared/vanished). */
+    private boolean targetVectorChangedSinceSync() {
+        if (targetGravityVector == null || lastSyncedTargetVector == null) {
+            return targetGravityVector != lastSyncedTargetVector;
+        }
+        double a = targetGravityVector.lengthSqr();
+        double b = lastSyncedTargetVector.lengthSqr();
+        if (a < 1.0E-12 || b < 1.0E-12) {
+            return a != b;
+        }
+        return targetGravityVector.dot(lastSyncedTargetVector) / Math.sqrt(a * b) < 0.9994;
     }
 
     public UpdateGravityCapabilityPacket makeSyncPacket() {
@@ -2756,7 +2874,8 @@ public class GravityCapabilityImpl implements IGravityCapability {
             baseGravityDirection,
             Vec3.atLowerCornerOf(currGravityDirection.getNormal()),
             baseGravityStrength, currGravityStrength,
-            new Quaternionf(visualTarget)
+            new Quaternionf(visualTarget),
+            targetGravityVector
         );
     }
 
@@ -2765,7 +2884,7 @@ public class GravityCapabilityImpl implements IGravityCapability {
         boolean noAnimation,
         Vec3 baseGravityDirection, Vec3 currentGravityDirection,
         double baseGravityStrength, double currentGravityStrength,
-        Quaternionf rotation
+        Quaternionf rotation, @Nullable Vec3 targetVector
     ) {
         this.baseGravityDirection = baseGravityDirection;
         this.baseGravityStrength = baseGravityStrength;
@@ -2796,6 +2915,15 @@ public class GravityCapabilityImpl implements IGravityCapability {
 
         this.currGravityDirection = serverDirection;
         this.currGravityStrength = currentGravityStrength;
+
+        // the continuous field vector: remote entities integrate their own
+        // gravity against it between position updates (projectiles above
+        // all) and a rider's frame follows its vehicle through it — without
+        // it they pulled along the snapped cardinal or plain world-down and
+        // every position packet corrected them (the projectile stutter)
+        if (targetVector != null) {
+            this.targetGravityVector = targetVector;
+        }
 
         // the visual frame chases the server-provided target smoothly
         if (this.syncedVisualTarget == null) {

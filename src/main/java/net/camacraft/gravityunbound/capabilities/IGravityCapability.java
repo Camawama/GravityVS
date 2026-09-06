@@ -22,5 +22,5 @@ public interface IGravityCapability extends INBTSerializable<CompoundTag>
 
 	void applyGravityChange();
 
-	void sync(boolean noAnimation, Vec3 baseGravityDirection, Vec3 currentGravityDirection, double baseGravityStrength, double currentGravityStrength, Quaternionf rotation);
+	void sync(boolean noAnimation, Vec3 baseGravityDirection, Vec3 currentGravityDirection, double baseGravityStrength, double currentGravityStrength, Quaternionf rotation, @org.jetbrains.annotations.Nullable Vec3 targetGravityVector);
 }

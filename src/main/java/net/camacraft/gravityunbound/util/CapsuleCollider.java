@@ -43,12 +43,21 @@ public final class CapsuleCollider {
         public final @Nullable Ship groundShip;
         /** world-space normal of the strongest up-facing contact, when grounded */
         public final @Nullable Vec3 groundNormal;
+        /**
+         * world-space normal of the contact most aligned with the FRAME's up
+         * (the floor as the frame sees it), or null when no contact faces the
+         * frame's up — a contact counted as ground only against the field's
+         * up (a wall the field endorses) never lands here
+         */
+        public final @Nullable Vec3 frameGroundNormal;
 
-        Result(Vec3 collidedMovement, boolean grounded, @Nullable Ship groundShip, @Nullable Vec3 groundNormal) {
+        Result(Vec3 collidedMovement, boolean grounded, @Nullable Ship groundShip, @Nullable Vec3 groundNormal,
+               @Nullable Vec3 frameGroundNormal) {
             this.collidedMovement = collidedMovement;
             this.grounded = grounded;
             this.groundShip = groundShip;
             this.groundNormal = groundNormal;
+            this.frameGroundNormal = frameGroundNormal;
         }
     }
 
@@ -90,6 +99,8 @@ public final class CapsuleCollider {
         @Nullable Ship groundShip = null;
         double bestGroundDot = 0;
         @Nullable Vec3 groundNormal = null;
+        double bestFrameDot = 0;
+        @Nullable Vec3 frameGroundNormal = null;
         // second "down is that way" reference for ground classification: the
         // FIELD's up. During a landing on a steep surface the frame's up still
         // points the old way, so contacts opposing the field must also count as
@@ -127,7 +138,7 @@ public final class CapsuleCollider {
             // 1e-8 substep-summation error would register as a phantom collision
             // (which manifests as jumping on air, elytra/flight cancelling, and
             // ground friction flickering).
-            return new Result(movement, false, null, null);
+            return new Result(movement, false, null, null, null);
         }
 
         // movement plus the summed contact corrections: axes the contacts never
@@ -186,11 +197,15 @@ public final class CapsuleCollider {
                         state.bestGroundDot = stepState.bestGroundDot;
                         state.groundNormal = stepState.groundNormal;
                     }
+                    if (stepState.bestFrameDot > state.bestFrameDot) {
+                        state.bestFrameDot = stepState.bestFrameDot;
+                        state.frameGroundNormal = stepState.frameGroundNormal;
+                    }
                 }
             }
         }
 
-        return new Result(collided, state.grounded, state.groundShip, state.groundNormal);
+        return new Result(collided, state.grounded, state.groundShip, state.groundNormal, state.frameGroundNormal);
     }
 
     /**
@@ -447,6 +462,13 @@ public final class CapsuleCollider {
                     state.bestGroundDot = upDot;
                     state.groundNormal = pushDir;
                 }
+            }
+            // the FRAME's floor: judged against the frame's up alone (the
+            // step assist must not mistake a field-endorsed wall for ground)
+            double frameDot = pushDir.dot(up);
+            if (frameDot > GROUND_NORMAL_DOT && frameDot > state.bestFrameDot) {
+                state.bestFrameDot = frameDot;
+                state.frameGroundNormal = pushDir;
             }
         }
 

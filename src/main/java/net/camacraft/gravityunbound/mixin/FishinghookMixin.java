@@ -4,6 +4,8 @@ package net.camacraft.gravityunbound.mixin;
 import net.camacraft.gravityunbound.api.GravityChangerAPI;
 import net.camacraft.gravityunbound.util.RotationUtil;
 import org.spongepowered.asm.mixin.Mixin;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Constant;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -53,5 +55,30 @@ public abstract class FishinghookMixin extends Entity {
     @ModifyConstant(method = "Lnet/minecraft/world/entity/projectile/FishingHook;tick()V", constant = @Constant(doubleValue = -0.03))
     private double multiplyGravity(double constant) {
         return constant * GravityChangerAPI.getGravityStrength(this);
+    }
+
+    /**
+     * The bobber's gravity, along the FIELD. Vanilla adds its -0.03 on world
+     * Y just before move(); the hook never had a field-aware pull of its own
+     * — it only ever "fell into" a core because move() wrongly rotated its
+     * world-space velocity through the hook's turning frame, which is also
+     * what made it appear to bounce off the field's edge on the way in. With
+     * projectiles world-frame in move() (EntityMixin), the pull is re-aimed
+     * here: cancel the world-down add and apply the same magnitude along the
+     * field, exactly like arrows and throwables.
+     */
+    @WrapOperation(
+        method = "Lnet/minecraft/world/entity/projectile/FishingHook;tick()V",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/world/phys/Vec3;add(DDD)Lnet/minecraft/world/phys/Vec3;"
+        )
+    )
+    private Vec3 gravityunbound$gravityAlongField(Vec3 velocity, double x, double y, double z, Operation<Vec3> original) {
+        // only the gravity add (pure -y); anything else in tick passes through
+        if (x != 0.0 || z != 0.0 || y >= 0.0 || GravityChangerAPI.isGravityDefault(this)) {
+            return original.call(velocity, x, y, z);
+        }
+        return velocity.add(GravityChangerAPI.getFieldPullDirection(this).scale(-y));
     }
 }

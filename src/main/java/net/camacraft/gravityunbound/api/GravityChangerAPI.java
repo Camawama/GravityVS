@@ -208,19 +208,101 @@ public abstract class GravityChangerAPI {
     }
 
     /**
-     * Returns the world relative velocity for the given entity.
-     * Local velocity is interpreted through the visual/aim frame (which equals
-     * the physics frame whenever the field is cardinal).
+     * World-space up direction of the entity's continuous visual frame (unit
+     * vector; {@code (0, 1, 0)} under default gravity). This is the frame the
+     * entity moves, collides and looks in, so it is the "which way is down"
+     * every other mod should consult for falls, landings and vertical speed —
+     * FullStop's kinetic damage measures its impacts against it.
+     */
+    public static Vec3 getUpVector(Entity entity) {
+        GravityCapabilityImpl comp = getGravityComponentOrNull(entity);
+        if (comp == null || comp.isVisuallyDefault()) {
+            return WORLD_UP;
+        }
+        return comp.getUpVector();
+    }
+
+    private static final Vec3 WORLD_UP = new Vec3(0, 1, 0);
+
+    /**
+     * World-space unit direction the entity's gravity pulls along right now:
+     * the continuous field vector when one is known, else the visual frame's
+     * down (on a remote client the frame is synced and tracks the server's
+     * pull), else the cardinal. The one source projectiles integrate their
+     * own gravity against (arrows, throwables, the fishing bobber) — the old
+     * per-mixin fallback used the CARDINAL frame's down, so a remote client
+     * pulled every projectile toward a snapped axis while the server pulled
+     * along the true field, and the per-tick corrections read as a stutter.
+     */
+    public static Vec3 getFieldPullDirection(Entity entity) {
+        GravityCapabilityImpl comp = getGravityComponentOrNull(entity);
+        if (comp == null) {
+            return GravityCapabilityImpl.DOWN;
+        }
+        Vec3 field = comp.getTargetGravityVector();
+        if (field.lengthSqr() > 1.0E-6) {
+            return field.normalize();
+        }
+        if (!comp.isVisuallyDefault()) {
+            return RotationUtil.vecPlayerToWorld(new Vec3(0, -1, 0), comp.getVisualRotation());
+        }
+        return comp.getCurrGravityDirectionVec();
+    }
+
+    /**
+     * Rotates a vector stored in the entity's {@code deltaMovement} convention
+     * into the world, with the EXACT convention {@code Entity.move} applies
+     * (see EntityMixin's HEAD transform): players and any entity whose frame
+     * is mid-motion use the continuous visual frame; a non-player settled on
+     * a cardinal uses the original mod's entity convention, which differs
+     * from the player convention for UP gravity by a half turn about the
+     * vertical. Reading a settled mob's velocity through the player
+     * convention mirrored its horizontal motion.
+     */
+    public static Vec3 movementToWorld(Entity entity, Vec3 localVelocity) {
+        GravityCapabilityImpl comp = getGravityComponentOrNull(entity);
+        // projectiles are WORLD-frame throughout (see EntityMixin's move transforms)
+        if (comp == null || entity instanceof net.minecraft.world.entity.projectile.Projectile) {
+            return localVelocity;
+        }
+        if (!(entity instanceof net.minecraft.world.entity.player.Player)) {
+            Direction settled = comp.getSettledCardinal();
+            if (settled != null) {
+                return RotationUtil.vecEntityToWorld(localVelocity, settled);
+            }
+        }
+        return RotationUtil.vecPlayerToWorld(localVelocity, comp.getVisualRotation());
+    }
+
+    /** Exact inverse of {@link #movementToWorld}: a world vector into the entity's {@code deltaMovement} convention. */
+    public static Vec3 worldToMovement(Entity entity, Vec3 worldVelocity) {
+        GravityCapabilityImpl comp = getGravityComponentOrNull(entity);
+        if (comp == null || entity instanceof net.minecraft.world.entity.projectile.Projectile) {
+            return worldVelocity;
+        }
+        if (!(entity instanceof net.minecraft.world.entity.player.Player)) {
+            Direction settled = comp.getSettledCardinal();
+            if (settled != null) {
+                return RotationUtil.vecWorldToEntity(worldVelocity, settled);
+            }
+        }
+        return RotationUtil.vecWorldToPlayer(worldVelocity, comp.getVisualRotation());
+    }
+
+    /**
+     * Returns the world relative velocity for the given entity: its
+     * {@code deltaMovement} rotated with the convention {@code Entity.move}
+     * applies to it ({@link #movementToWorld}).
      */
     public static Vec3 getWorldVelocity(Entity entity) {
-        return RotationUtil.vecPlayerToWorld(entity.getDeltaMovement(), getAimRotation(entity));
+        return movementToWorld(entity, entity.getDeltaMovement());
     }
 
     /**
      * Sets the world relative velocity for the given entity.
      */
     public static void setWorldVelocity(Entity entity, Vec3 worldVelocity) {
-        entity.setDeltaMovement(RotationUtil.vecWorldToPlayer(worldVelocity, getAimRotation(entity)));
+        entity.setDeltaMovement(worldToMovement(entity, worldVelocity));
     }
 
     /**

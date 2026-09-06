@@ -23,6 +23,7 @@ public class GravityNetwork
 		CHANNEL.registerMessage(id++, UpdateGravityCapabilityPacket.class, UpdateGravityCapabilityPacket::encode, UpdateGravityCapabilityPacket::new, UpdateGravityCapabilityPacket.Handler::onMessage);
 		CHANNEL.registerMessage(id++, UpdateGravityBlockSettingsPacket.class, UpdateGravityBlockSettingsPacket::encode, UpdateGravityBlockSettingsPacket::new, UpdateGravityBlockSettingsPacket.Handler::onMessage);
 		CHANNEL.registerMessage(id++, SurfaceClingTargetPacket.class, SurfaceClingTargetPacket::encode, SurfaceClingTargetPacket::new, SurfaceClingTargetPacket.Handler::onMessage);
+		CHANNEL.registerMessage(id++, PlayerFrameSyncPacket.class, PlayerFrameSyncPacket::encode, PlayerFrameSyncPacket::new, PlayerFrameSyncPacket.Handler::onMessage);
 	}
 	
     public static <MSG> void sendToServer(MSG message) 

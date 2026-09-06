@@ -52,7 +52,7 @@ public abstract class AbstractArrowMixin extends Entity {
         // cardinal): orbits around a core curve smoothly instead of stepping through
         // the six cardinal pulls.
         double g = 0.05000000074505806D * GravityChangerAPI.getGravityStrength(this);
-        Vec3 pull = gravityunbound$fieldPull(gravityDirection);
+        Vec3 pull = GravityChangerAPI.getFieldPullDirection(this);
         return modify.add(0.0, g, 0.0).add(pull.scale(g));
     }
 
@@ -79,24 +79,5 @@ public abstract class AbstractArrowMixin extends Entity {
     @ModifyConstant(method = "Lnet/minecraft/world/entity/projectile/AbstractArrow;tick()V", constant = @Constant(doubleValue = 0.05000000074505806))
     private double multiplyGravity(double constant) {
         return constant * GravityChangerAPI.getGravityStrength(this);
-    }
-
-    @org.spongepowered.asm.mixin.Unique
-    private Vec3 gravityunbound$fieldPull(Direction cardinal) {
-        net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
-            GravityChangerAPI.getGravityComponentOrNull(this);
-        if (comp != null) {
-            Vec3 field = comp.getTargetGravityVector();
-            if (field.lengthSqr() > 1.0E-6) {
-                return field.normalize();
-            }
-            // remote client: the field target isn't synced, but the visual
-            // frame is — frame-down tracks the server's continuous pull far
-            // closer than the snapping cardinal
-            if (!comp.isVisuallyDefault()) {
-                return RotationUtil.vecPlayerToWorld(new Vec3(0, -1, 0), comp.getCurrentRotation());
-            }
-        }
-        return Vec3.atLowerCornerOf(cardinal.getNormal());
     }
 }

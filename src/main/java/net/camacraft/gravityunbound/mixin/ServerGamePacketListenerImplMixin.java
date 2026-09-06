@@ -341,4 +341,28 @@ public abstract class ServerGamePacketListenerImplMixin {
         return original.call(level, entity, box);
     }
 
+    /**
+     * Remember the client's own onGround with each move packet (the server
+     * copies it onto the player right here). LivingEntityMixin's flight
+     * guards consult it: the server's replayed movement is not the truth
+     * for a client-authoritative mover.
+     */
+    @org.spongepowered.asm.mixin.injection.Inject(
+        method = "handleMovePlayer",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/server/level/ServerPlayer;setOnGroundWithKnownMovement(ZLnet/minecraft/world/phys/Vec3;)V"
+        )
+    )
+    private void gravityunbound$recordClientGround(
+        net.minecraft.network.protocol.game.ServerboundMovePlayerPacket packet,
+        org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci
+    ) {
+        net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
+            GravityChangerAPI.getGravityComponentOrNull(this.player);
+        if (comp != null) {
+            comp.clientOnGround = packet.isOnGround();
+            comp.clientOnGroundAge = 0;
+        }
+    }
 }

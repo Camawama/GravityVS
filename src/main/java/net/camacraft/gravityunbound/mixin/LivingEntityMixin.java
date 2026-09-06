@@ -505,4 +505,80 @@ public abstract class LivingEntityMixin extends Entity {
     private float diminishFallDamage(float value) {
         return value * (float) Math.sqrt(GravityChangerAPI.getGravityStrength(this));
     }
+
+    // ------------------------------------------------------------------
+    // body turn (walking rotates the body toward the movement) at scale
+    // ------------------------------------------------------------------
+
+    /**
+     * Vanilla turns the body toward the movement direction only past a
+     * fixed per-tick displacement (0.05 blocks). A scaled-down body moves a
+     * fraction of that, so under a rotated frame its body never followed
+     * the walk (the frame's own local deltas are handed to vanilla's check
+     * by the wraps above and keep the same magnitude). Scale the threshold
+     * with the body.
+     */
+    @org.spongepowered.asm.mixin.injection.ModifyConstant(
+        method = "tick",
+        constant = @org.spongepowered.asm.mixin.injection.Constant(floatValue = 0.0025000002F)
+    )
+    private float gravityunbound$bodyTurnThresholdAtScale(float threshold) {
+        LivingEntity self = (LivingEntity) (Object) this;
+        if (GravityChangerAPI.isAimDefault(self)) {
+            return threshold;
+        }
+        float scale = net.minecraft.util.Mth.clamp(self.getBbHeight() / 1.8F, 0.05F, 1.0F);
+        return threshold * scale * scale;
+    }
+
+    // ------------------------------------------------------------------
+    // elytra flight is the CLIENT's to end
+    // ------------------------------------------------------------------
+
+    /**
+     * The server ends elytra flight when it finds the player on the ground,
+     * but for a client-authoritative mover the server's own movement replay
+     * is not the truth: inside a Valkyrien Skies ship's field the server's
+     * ship pose is a tick apart from the client's, and its replayed glide
+     * brushed the hull the client flew clear of — flight cancelled on the
+     * spot. While the client's move packets say airborne, they win.
+     */
+    @WrapOperation(
+        method = "travel",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/world/entity/LivingEntity;setSharedFlag(IZ)V"
+        )
+    )
+    private void gravityunbound$keepClientFlight(LivingEntity self, int flag, boolean value, Operation<Void> original) {
+        if (flag == 7 && !value && gravityunbound$clientSaysAirborne(self)) {
+            return;
+        }
+        original.call(self, flag, value);
+    }
+
+    @WrapOperation(
+        method = "updateFallFlying",
+        at = @At(
+            value = "INVOKE",
+            target = "Lnet/minecraft/world/entity/LivingEntity;onGround()Z"
+        )
+    )
+    private boolean gravityunbound$clientGroundEndsFlight(LivingEntity self, Operation<Boolean> original) {
+        if (gravityunbound$clientSaysAirborne(self)) {
+            return false;
+        }
+        return original.call(self);
+    }
+
+    @org.spongepowered.asm.mixin.Unique
+    private static boolean gravityunbound$clientSaysAirborne(LivingEntity self) {
+        if (self.level().isClientSide() || !(self instanceof net.minecraft.server.level.ServerPlayer)) {
+            return false;
+        }
+        net.camacraft.gravityunbound.capabilities.GravityCapabilityImpl comp =
+            GravityChangerAPI.getGravityComponentOrNull(self);
+        return comp != null && comp.isMovementClientAuthoritative()
+            && comp.clientOnGroundAge < 5 && !comp.clientOnGround;
+    }
 }

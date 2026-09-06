@@ -280,8 +280,17 @@ public abstract class EntityMixin {
         // surface the frame hasn't aligned to yet) the step lift points
         // diagonally away from the surface and fires every tick — the
         // "launched off the tilted plated wall" escalator
+        // Judged on the FRAME's floor contact (the contact most aligned with
+        // the frame's up), not on the field-classified ground: the collider
+        // also counts a contact as ground when it faces the FIELD's up, and a
+        // wall the player pushes into is exactly what a field endorses next
+        // (plating blends, Surface Cling) — so rubbing along a wall made the
+        // wall the "strongest ground contact", which read as tilted ground
+        // here and switched the step assist off: no stepping onto the slab
+        // beside the wall until the player backed off and approached again.
         boolean stepEligible = comp.capsuleGrounded
-            && (comp.capsuleGroundNormal == null || comp.capsuleGroundNormal.dot(up) > 0.85);
+            && comp.capsuleFrameGroundNormal != null
+            && comp.capsuleFrameGroundNormal.dot(up) > 0.85;
 
         net.camacraft.gravityunbound.util.CapsuleCollider.Result result =
             net.camacraft.gravityunbound.util.CapsuleCollider.collide(self, up, gravityUp, movement, stepEligible);
@@ -327,6 +336,7 @@ public abstract class EntityMixin {
         comp.capsuleGrounded = grounded;
         comp.capsuleGroundShip = grounded ? groundShip : null;
         comp.capsuleGroundNormal = grounded ? result.groundNormal : null;
+        comp.capsuleFrameGroundNormal = grounded ? result.frameGroundNormal : null;
 
         cir.setReturnValue(result.collidedMovement);
     }
@@ -571,6 +581,19 @@ public abstract class EntityMixin {
     @org.spongepowered.asm.mixin.Unique
     private Vec3 gravityunbound$moveWorldArg = Vec3.ZERO;
 
+    // PROJECTILES ARE WORLD-FRAME: they integrate position by raw world
+    // addition and their own mixins apply gravity along the field in world
+    // space, so their deltaMovement is world-space everywhere (the motion
+    // packets, lerpMotion and the API all treat it so). The fishing bobber
+    // and the firework rocket are the only projectiles that go through
+    // move() at all, and rotating their WORLD velocity here as if it were
+    // local sent the bobber "bouncing" off the edge of a core's field the
+    // moment its frame started turning, and rockets along the frame's up.
+    @org.spongepowered.asm.mixin.Unique
+    private boolean gravityunbound$worldFrameMover() {
+        return (Object) this instanceof net.minecraft.world.entity.projectile.Projectile;
+    }
+
     // transform move vector from local to world (the velocity is local)
     @ModifyVariable(
         method = "Lnet/minecraft/world/entity/Entity;move(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V",
@@ -580,7 +603,9 @@ public abstract class EntityMixin {
     )
     private Vec3 modify_move_Vec3d_0_0(Vec3 vec3d) {
         GravityCapabilityImpl comp = gravityunbound$comp();
-        if (comp == null) {
+        if (comp == null || gravityunbound$worldFrameMover()) {
+            gravityunbound$moveLocalArg = vec3d;
+            gravityunbound$moveWorldArg = vec3d;
             return vec3d;
         }
 
@@ -616,7 +641,7 @@ public abstract class EntityMixin {
     )
     private Vec3 modify_move_Vec3d_0_1(Vec3 vec3d) {
         GravityCapabilityImpl comp = gravityunbound$comp();
-        if (comp == null) {
+        if (comp == null || gravityunbound$worldFrameMover()) {
             return vec3d;
         }
 
@@ -683,7 +708,7 @@ public abstract class EntityMixin {
     )
     private Vec3 modify_move_Vec3d_1(Vec3 vec3d) {
         GravityCapabilityImpl comp = gravityunbound$comp();
-        if (comp == null) {
+        if (comp == null || gravityunbound$worldFrameMover()) {
             return vec3d;
         }
 

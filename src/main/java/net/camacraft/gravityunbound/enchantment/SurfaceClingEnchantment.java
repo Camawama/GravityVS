@@ -112,6 +112,17 @@ public class SurfaceClingEnchantment extends Enchantment {
     public static void applyTo(LivingEntity living, GravityCapabilityImpl comp) {
         if (!isWearing(living)) {
             comp.clingReleaseTicks = 0;
+            // BOOTS OFF WHILE CLINGING: the hold ends with them. The mod's
+            // surface machinery keeps a held face as long as the feet stand
+            // on it (exactly what a plate field wants), so without a release
+            // here the wearer stayed glued to the wall after unequipping.
+            if (comp.clingHeldLastTick) {
+                comp.clingHeldLastTick = false;
+                comp.releaseCling();
+                if (living.level().isClientSide() && living instanceof Player && living.isControlledByLocalInstance()) {
+                    report(comp, false, true, null, null, null);
+                }
+            }
             return;
         }
         if (living instanceof Player player && (player.getAbilities().flying || player.isSpectator())) {
@@ -131,7 +142,8 @@ public class SurfaceClingEnchantment extends Enchantment {
             comp.clingReportedAge++;
             if (comp.clingReportedReleased) {
                 comp.clingReportedReleased = false;
-                comp.releaseFieldGraceNow();
+                comp.clingHeldLastTick = false;
+                comp.releaseCling();
             }
             if (!comp.clingReportedActive || comp.clingReportedDown == null) {
                 return;
@@ -168,6 +180,7 @@ public class SurfaceClingEnchantment extends Enchantment {
                 Vec3 worldVelocity = RotationUtil.vecPlayerToWorld(living.getDeltaMovement(), comp.getVisualRotation());
                 if (worldVelocity.dot(held) > JUMP_RELEASE_SPEED * scale) {
                     comp.clingReleaseTicks = RELEASE_TICKS;
+                    comp.clingHeldLastTick = false;
                     comp.releaseFieldGraceNow();
                     if (controlling) {
                         report(comp, false, true, null, null, null);
@@ -180,16 +193,15 @@ public class SurfaceClingEnchantment extends Enchantment {
             Vec3 sum = Vec3.ZERO;
 
             // the surface underfoot (the held face, or whatever the feet are
-            // on when nothing is held yet) — nothing there, nothing to cling to
+            // on when nothing is held yet). NOTHING under the feet counts for
+            // nothing: the held face used to keep pulling after the wearer
+            // walked off its edge, so they fell "down" toward a wall that was
+            // no longer under them — only a face endorsed below carries on.
             GravityCapabilityImpl.SurfaceHit ground =
                 comp.probeSurface(feet.add(refUp.scale(0.2 * scale)), refUp.scale(-1), 0.8 * scale);
-            if (held != null) {
-                sum = held.scale(-1);
-                ship = comp.getHeldSurfaceShip();
-            }
-            else if (ground != null) {
-                sum = ground.normal().scale(-1);
-                ship = ground.ship();
+            if (ground != null) {
+                sum = (held != null ? held : ground.normal()).scale(-1);
+                ship = held != null ? comp.getHeldSurfaceShip() : ground.ship();
             }
 
             // ENDORSE the next face the wearer is heading for
@@ -209,7 +221,9 @@ public class SurfaceClingEnchantment extends Enchantment {
                     GravityCapabilityImpl.SurfaceHit wrap =
                         comp.probeSurface(feet.subtract(held.scale(0.15 * scale)), intent.scale(-1), 0.75 * scale);
                     if (wrap != null && wrap.normal().dot(held) < 0.7 && wrap.normal().dot(intent) > 0.1) {
-                        sum = sum.add(wrap.normal().scale(-1));
+                        // blend the held face with the one around the corner
+                        // (the smooth edge transition), as before
+                        sum = held.scale(-1).add(wrap.normal().scale(-1));
                         if (ship == null) {
                             ship = wrap.ship();
                         }
@@ -218,9 +232,16 @@ public class SurfaceClingEnchantment extends Enchantment {
             }
 
             if (sum.lengthSqr() < 1.0E-6) {
-                // free of every surface: ambient gravity (zero-g stays zero-g)
+                // free of every surface: ambient gravity (zero-g stays zero-g).
+                // Walking off an edge lets go RIGHT NOW — no grace pull-back,
+                // no held face.
+                boolean wasHeld = comp.clingHeldLastTick;
+                comp.clingHeldLastTick = false;
+                if (wasHeld) {
+                    comp.releaseCling();
+                }
                 if (controlling) {
-                    report(comp, false, false, null, null, null);
+                    report(comp, false, wasHeld, null, null, null);
                 }
                 return;
             }
@@ -235,6 +256,7 @@ public class SurfaceClingEnchantment extends Enchantment {
 
         // THE API CALL: one effect per tick. Ship-anchored when the surface
         // belongs to a ship, so the wearer rides it like a plated deck.
+        comp.clingHeldLastTick = true;
         comp.applyGravityDirectionEffect(down, null, PRIORITY, false, 1.0, true, ship, localDown, null);
     }
 

@@ -1,5 +1,143 @@
 # Gravity Unbound Changelog (formerly GravityVS)
 
+## Unreleased (2.0.0-dev) — 2026-09-05 (round 85: the bobber, the stutter, the slime, the boots, the boat, the corner rail)
+
+- **Projectiles are world-frame in `move()` too — the fishing bobber no
+  longer "bounces off" a core's field.** Arrows and throwables integrate
+  their position by raw world addition, but the bobber (and the firework
+  rocket) go through `Entity.move`, whose HEAD transform rotated their
+  WORLD velocity as if it were local: the moment a hook's frame started
+  turning inside a field, its flight kinked, and it only ever "fell into"
+  the core because that same wrong rotation happened to bend its
+  world-down gravity along the frame. Every `Projectile` now passes
+  through the move transforms untouched (matching `lerpMotion`, the
+  motion packets and the API, which already treated projectiles as
+  world-frame), and the bobber gets a field-aware pull of its own:
+  vanilla's world-down add is re-aimed along the field, exactly like
+  arrows and throwables.
+- **Projectiles orbit smoothly again.** A remote client integrates a
+  projectile's gravity itself between the server's position updates, and
+  it had no idea which way the field pulled: the field vector was never
+  synced, the client's copy sat at its default (world-down), and the
+  per-mixin fallback used the snapped CARDINAL frame's down — so every
+  position packet yanked the projectile back onto the server's continuous
+  orbit, a small stutter each tick. The sync packet now carries the
+  continuous field vector (`UpdateGravityCapabilityPacket`, sent whenever
+  it turns by ~2 degrees), and a single `GravityChangerAPI.getFieldPullDirection`
+  answers arrows, throwables and the bobber: the field vector, else the
+  synced visual frame's down, else the cardinal.
+- **Server-sent velocities are world-space — slime bounces and knockback
+  work under rotated gravity.** The client's `lerpMotion` converts an
+  incoming motion packet from world space into the receiver's local
+  frame, but the server built those packets from the entity's raw LOCAL
+  deltaMovement, so anything pushed by the server under a rotated frame —
+  knockback, explosion pushes, FullStop's slime rebounds — arrived
+  rotated twice: a player on a plated wall slid off the slime instead of
+  bouncing. The velocity `ServerEntity` reads to send (periodic sync,
+  pairing snapshot) and the packet's own entity constructor (the
+  `hurtMarked` push, the sprint-knockback sent to a hit player) now
+  convert with the exact `Entity.move` convention.
+- **Surface Cling lets go when it should.** Taking the boots off while
+  clung to a wall left the wearer glued to it: the surface machinery keeps
+  a held face as long as the feet stand on it (what a plate field wants),
+  and nothing released it. Walking off an edge kept pulling too — the
+  held face still counted even with nothing under the feet, so the wearer
+  fell "down" toward a wall that was no longer there. Now: boots off
+  while clinging, or nothing under the feet with no face endorsed ahead
+  or around the corner, releases at once (grace AND hold — new
+  `releaseCling()` API), on both sides through the existing report
+  packet. Face-to-face transitions (pushing into a wall, wrapping a
+  convex edge) blend exactly as before.
+- **Stepping onto a slab while rubbing a wall.** The capsule counts a
+  contact as ground when it faces EITHER the frame's up or the FIELD's
+  up, and a wall the player pushes into is exactly what a field endorses
+  next (plate blends, Surface Cling) — so rubbing along a wall made the
+  wall the "strongest ground contact", the step assist read it as tilted
+  ground and switched off, and the slab beside the wall would not step
+  until the player backed off. The assist now judges eligibility on the
+  contact most aligned with the FRAME's up (the floor as the frame sees
+  it; `CapsuleCollider.Result.frameGroundNormal`).
+- **Stairs, slabs and trapdoors take the half the PLACING PLAYER means.**
+  Vanilla decides the half by world Y: a ceiling walker's "bottom" is the
+  world top, so every stair came out inverted and slabs landed on the
+  wrong half. The half is now judged in the player's frame
+  (`util.PlacementFrame`) and mapped back onto the world half whenever the
+  player's up runs mostly along world Y (upright, inverted and the tilted
+  frames between). A wall-walker's frame has no world half to map onto;
+  vanilla's choice stands there.
+- **Boats float in their gravity frame.** Every boat reading was world
+  vertical — in water, under water, on land, where the surface is, how
+  hard the water pushes — while the push itself went along the boat's
+  LOCAL up. On any face of a water cube but the top the boat read "under
+  water" (or "in air") and was dragged into it. In-water, under-water,
+  ground and water-level checks now read the cells along the frame's up,
+  and the vanilla float math runs on those values; riders sit at a seat
+  offset rotated into the boat's frame, and their own frame follows the
+  boat's (the synced field vector, or the boat's visual down while none
+  is known) so they turn with it around a core.
+- **A top-face sticky rail at a cube corner curves.** Rails on the world
+  plane are settled by vanilla's own connection logic, which cannot see
+  the wall rails around the cube's edges; the touch-up that followed it
+  took the FIRST cross-frame partner it found and gave the rail that axis
+  — so with a wall rail around each of two edges the top rail stayed
+  straight while both wall rails curved toward it. The touch-up now
+  gathers vanilla's own neighbors and every cross-frame partner (concave,
+  wall-base, convex) per direction and decides the shape exactly as
+  vanilla's `RailState` would have with same-plane rails there (curves,
+  the powered preference order, the concave ramp).
+- **Scaled-down bodies turn with the walk under rotated gravity.** Vanilla
+  turns the body toward the movement past a fixed 0.05-block-per-tick
+  displacement; a scaled-down body moves a fraction of that and its body
+  never followed (only the head turned with the mouse). Under a rotated
+  frame the threshold now scales with the body.
+- **Elytra flight is the client's to end.** Inside a Valkyrien Skies
+  ship's field the flight cancelled on entry: the server replays the
+  player's glide with its own copy of the ship pose, a tick apart from the
+  client's, and its capsule brushed the hull the client flew clear of —
+  vanilla's server-side "landed, stop gliding" then fired. Each move
+  packet's own onGround is now remembered on the server player, and while
+  the client says airborne the server's replay may not end the flight.
+- **The server adopts the client player's frame.** The client computes
+  the player's gravity; the server's own chase of the same fields can sit
+  a snap or a surface hold behind it, and every server-side ray cast from
+  the player's eyes along the look vector (VMod's physgun, mob targeting)
+  then pointed elsewhere under a rotated frame. The client now reports its
+  visual frame (`PlayerFrameSyncPacket`, on a half-degree change with a
+  keep-alive), and the server's `advanceVisualRotation` adopts it for
+  players while the report is fresh — the same frame the velocity packets
+  and FullStop's impact measurement then use.
+
+## Unreleased (2.0.0-dev) — 2026-09-05 (round 84: FullStop compatibility — impacts in the field's frame)
+
+- **FullStop's kinetic damage now works inside gravity fields.** Being
+  pulled by a core or a plate and slamming into a wall dealt nothing.
+  FullStop measures every impact in WORLD axes: the speed lost on world
+  Y is a "fall" (its vertical threshold, boots, Feather Falling), the
+  speed lost on X/Z a "wall run" (its horizontal threshold), and each
+  needs matching evidence — vanilla's `verticalCollision`/`onGround`
+  for falls, `horizontalCollision` for walls. Under a field this mod
+  reports those flags in the entity's OWN frame (a landing on a plated
+  wall sets the frame's vertical flag), while the speed is lost along
+  whatever world axis the field points down — so FullStop saw a
+  horizontal stop with only vertical evidence, or a vertical stop
+  under the wrong threshold, and its damage gate dropped the hit. The
+  fix lives in FullStop (it now measures stopping force, direction and
+  its floor/wall/ceiling heuristics in the entity's gravity frame,
+  read through this mod's API, and exchanges velocity with it in world
+  space); this side grew the API it needed.
+- **API: `GravityChangerAPI.getUpVector(entity)`** — the world-space up
+  of the entity's continuous visual frame, the "which way is down" any
+  other mod should consult for falls, landings and vertical speed.
+- **API: `getWorldVelocity`/`setWorldVelocity` use the exact convention
+  `Entity.move` applies.** They rotated `deltaMovement` through the
+  visual frame for every entity, but a non-player settled on a
+  cardinal moves in the original mod's ENTITY convention, which for UP
+  gravity differs by a half turn about the vertical — reading such a
+  mob's velocity mirrored its horizontal motion, and writing one (an
+  item dropped by a player standing on a ceiling) sent it the wrong
+  way. New `movementToWorld`/`worldToMovement` helpers expose the
+  convention; the two velocity methods route through them.
+
 ## Unreleased (2.0.0-dev) — 2026-09-04 (round 83: lakes, orbit liquids, what a field touches, ships in the field)
 
 - **Still water now answers a field.** A lake never noticed a field
